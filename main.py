@@ -26,10 +26,10 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 WAITING_FOR_FILE = set()
 
-DOWNLOAD_DIR = Path("/root/uploads")
+DOWNLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/tmp/uploads"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-TARGET_FILE = Path("/root/targets.json")
+TARGET_FILE = Path(os.getenv("TARGET_FILE", "/tmp/targets.json"))
 
 # ✅ 保存「最近一次計算結果」（記憶體內）
 LAST_RUN = {
