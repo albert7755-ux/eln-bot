@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+uploads/
+snap/
+.cache/
+.openclaw/
+.streamlit/
+targets.json
+.env
