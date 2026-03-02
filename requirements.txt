@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+line-bot-sdk
+openai
+pandas
+yfinance
+python-dateutil
+openpyxl
+
