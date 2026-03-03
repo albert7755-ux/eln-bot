@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request, HTTPException
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
-from autotracking_core import run_autotracking
+from autotracking_core import calculate_from_file
 
 # ==============================
 # 環境變數
@@ -34,7 +34,7 @@ TARGET_FILE = BASE_DIR / "targets.json"
 
 
 # ==============================
-# 讀寫推播目標
+# 推播目標儲存
 # ==============================
 
 def load_targets():
@@ -47,6 +47,65 @@ def save_targets(data):
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8"
     )
+
+
+# ==============================
+# Adapter：包裝 calculate_from_file
+# ==============================
+
+def run_autotracking(file_path: str):
+    out = calculate_from_file(
+        file_path=file_path,
+        lookback_days=3,
+        notify_ki_daily=True
+    )
+
+    df = out.get("results_df")
+    report = out.get("report_text", "")
+
+    summary_lines = []
+    detail_map = {}
+
+    if df is not None and not df.empty:
+        top = df.head(5)
+
+        for _, r in top.iterrows():
+            summary_lines.append(
+                f"● {r.get('債券代號','-')} {r.get('Type','-')}｜{str(r.get('狀態','')).splitlines()[0]}"
+            )
+
+        for _, r in df.iterrows():
+            _id = str(r.get("債券代號", "")).strip()
+            if not _id:
+                continue
+
+            t_details = []
+            for c in df.columns:
+                if str(c).endswith("_Detail"):
+                    v = r.get(c, "")
+                    if v:
+                        t_details.append(str(v))
+
+            detail_text = (
+                f"【商品】{_id}\n"
+                f"類型: {r.get('Type','-')}\n"
+                f"客戶: {r.get('Name','-')}\n"
+                f"交易日: {r.get('交易日','-')}\n"
+                f"KO設定: {r.get('KO設定','-')}\n"
+                f"最差表現: {r.get('最差表現','-')}\n"
+                f"----------------\n"
+                f"{r.get('狀態','')}\n"
+                f"----------------\n"
+                + ("\n\n".join(t_details) if t_details else "")
+            )
+
+            detail_map[_id] = detail_text
+
+    summary_text = report
+    if summary_lines:
+        summary_text += "\n\n【前5筆摘要】\n" + "\n".join(summary_lines)
+
+    return {"summary": summary_text, "detail": detail_map}
 
 
 # ==============================
@@ -67,7 +126,7 @@ async def callback(request: Request):
 
 
 # ==============================
-# 訊息處理
+# 文字訊息處理
 # ==============================
 
 @handler.add(MessageEvent, message=TextMessage)
@@ -76,11 +135,7 @@ def handle_text_message(event):
     text_raw = event.message.text.strip()
     text = text_raw.lower()
 
-    targets = load_targets()
-
-    # --------------------------
     # hello
-    # --------------------------
     if text in ["hello", "hi"]:
         line_bot_api.reply_message(
             event.reply_token,
@@ -88,9 +143,7 @@ def handle_text_message(event):
         )
         return
 
-    # --------------------------
     # calc / clac
-    # --------------------------
     if text in ["calc", "clac"] or text.startswith("calc") or text.startswith("clac"):
         line_bot_api.reply_message(
             event.reply_token,
@@ -98,9 +151,7 @@ def handle_text_message(event):
         )
         return
 
-    # --------------------------
     # report
-    # --------------------------
     if text == "report":
         last_file = UPLOAD_DIR / "last.xlsx"
         if not last_file.exists():
@@ -117,9 +168,7 @@ def handle_text_message(event):
         )
         return
 
-    # --------------------------
-    # detail <商品代號>
-    # --------------------------
+    # detail
     if text.startswith("detail"):
         parts = text_raw.split(" ", 1)
         if len(parts) < 2:
@@ -153,34 +202,10 @@ def handle_text_message(event):
             )
         return
 
-    # --------------------------
-    # settarget
-    # --------------------------
-    if text == "settarget":
-        if event.source.type == "group":
-            targets["default"] = event.source.group_id
-            save_targets(targets)
-
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="群組已設定為預設推播對象。")
-            )
-        else:
-            targets["default"] = event.source.user_id
-            save_targets(targets)
-
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="已設定為您的個人推播對象。")
-            )
-        return
-
-    # --------------------------
     # fallback
-    # --------------------------
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text="指令不明，請輸入 help。")
+        TextSendMessage(text="指令不明，請輸入 calc / report / detail 商品代號")
     )
 
 
@@ -202,10 +227,7 @@ def handle_file_message(event):
 
     result = run_autotracking(str(file_path))
 
-    reply_text = result["summary"]
-
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text=reply_text)
+        TextSendMessage(text=result["summary"])
     )
-
