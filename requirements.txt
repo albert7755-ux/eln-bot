@@ -8,3 +8,5 @@ openai
 requests
 sqlalchemy
 psycopg[binary]
+pandas
+openpyxl
