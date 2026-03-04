@@ -1,9 +1,8 @@
 fastapi
 uvicorn
+sqlalchemy
+psycopg[binary]
+python-dotenv
 line-bot-sdk
 openai
-pandas
-yfinance
-python-dateutil
-openpyxl
-
+requests
