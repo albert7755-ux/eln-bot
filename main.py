@@ -1,271 +1,288 @@
 import os
+import re
 import json
-from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, List
+
 from fastapi import FastAPI, Request, HTTPException
-
-from linebot import LineBotApi, WebhookHandler
+from linebot import LineBotApi, WebhookParser
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
 
-from autotracking_core import calculate_from_file
+from sqlalchemy import create_engine, text
+from openai import OpenAI
 
-# ==============================
-# ENV
-# ==============================
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+from report_tool import generate_report_today
 
-if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
-    raise RuntimeError("Missing LINE env vars: LINE_CHANNEL_SECRET / LINE_CHANNEL_ACCESS_TOKEN")
+# ====== ENV ======
+LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+DATABASE_URL = os.environ["DATABASE_URL"]
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4.1-mini")
+RECENT_N = int(os.environ.get("RECENT_N", "12"))
 
+TZ_TAIPEI = timezone(timedelta(hours=8))
+
+# ====== Clients ======
 app = FastAPI()
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+parser = WebhookParser(LINE_CHANNEL_SECRET)
+client = OpenAI(api_key=OPENAI_API_KEY)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
-# ==============================
-# Writable paths on Render
-# ==============================
-BASE_DIR = Path("/tmp")
-UPLOAD_DIR = BASE_DIR / "uploads"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+# ====== DB init ======
+def init_db():
+    with engine.begin() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id BIGSERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """))
+        conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_user_time
+        ON chat_messages(user_id, created_at DESC);
+        """))
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS daily_summary (
+            user_id TEXT NOT NULL,
+            ymd DATE NOT NULL,
+            summary TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (user_id, ymd)
+        );
+        """))
 
-LAST_FILE = UPLOAD_DIR / "last.xlsx"
-TARGET_FILE = BASE_DIR / "targets.json"
+init_db()
 
+# ====== DB helpers ======
+def save_msg(user_id: str, role: str, content: str):
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO chat_messages(user_id, role, content) VALUES (:u, :r, :c)"),
+            {"u": user_id, "r": role, "c": content},
+        )
 
-# ==============================
-# Optional: store default push target (not required for reply)
-# ==============================
-def load_targets():
-    if TARGET_FILE.exists():
+def load_recent_messages(user_id: str, limit: int) -> List[Dict[str, str]]:
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+            SELECT role, content
+            FROM chat_messages
+            WHERE user_id = :u
+            ORDER BY created_at DESC
+            LIMIT :n
+            """),
+            {"u": user_id, "n": limit},
+        ).fetchall()
+    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
+def get_today_summary(user_id: str) -> str:
+    today = datetime.now(TZ_TAIPEI).date()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT summary FROM daily_summary WHERE user_id = :u AND ymd = :d"),
+            {"u": user_id, "d": today},
+        ).fetchone()
+    return row[0] if row else ""
+
+def upsert_today_summary(user_id: str, new_summary: str):
+    today = datetime.now(TZ_TAIPEI).date()
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO daily_summary(user_id, ymd, summary, updated_at)
+        VALUES (:u, :d, :s, NOW())
+        ON CONFLICT (user_id, ymd)
+        DO UPDATE SET summary = EXCLUDED.summary, updated_at = NOW()
+        """), {"u": user_id, "d": today, "s": new_summary})
+
+# ====== Command router ======
+def is_command(s: str) -> bool:
+    return s.strip().startswith("/")
+
+def handle_command(user_text: str) -> str:
+    t = user_text.strip()
+
+    if t == "/help":
+    return "✅ [ELN-BOT NEW] 我是新的 webhook\n/help\n/calc 1+2\n/report\n/detail xxx"
+        )
+
+    if t.startswith("/calc"):
+        expr = t[len("/calc"):].strip()
+        if not expr:
+            return "用法：/calc 1+2*3"
+        if not re.fullmatch(r"[0-9\.\+\-\*\/\(\)\s]+", expr):
+            return "算式格式不支援（只允許數字與 + - * / ( ) ）"
         try:
-            return json.loads(TARGET_FILE.read_text(encoding="utf-8"))
+            result = eval(expr, {"__builtins__": {}})
+            return f"{expr} = {result}"
         except Exception:
-            return {}
-    return {}
+            return "算式計算失敗，請檢查格式。"
 
+    if t == "/report":
+        # 指令直接出日報（不走 AI）
+        return generate_report_today(style="brief")
 
-def save_targets(data: dict):
-    TARGET_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return "指令不明。輸入 /help 看可用指令，或直接用自然語言問我。"
 
+# ====== Tools for AI function calling ======
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_report_today",
+            "description": "產生今日財經日報（盤感早報版型）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "style": {"type": "string", "enum": ["brief", "detailed"]}
+                },
+                "required": []
+            }
+        }
+    }
+]
 
-# ==============================
-# Adapter: core -> (summary/detail map)
-# ==============================
-def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bool = True):
-    """
-    calculate_from_file() should return dict with at least:
-      - results_df: pandas.DataFrame
-      - report_text: str
-    """
-    out = calculate_from_file(
-        file_path=file_path,
-        lookback_days=lookback_days,
-        notify_ki_daily=notify_ki_daily
+def dispatch_tool_call(name: str, arguments: Dict[str, Any]) -> str:
+    if name == "generate_report_today":
+        style = arguments.get("style", "brief")
+        return generate_report_today(style=style)
+    return f"工具不存在：{name}"
+
+# ====== AI with memory + tools ======
+def build_system_prompt(today_summary: str) -> str:
+    return (
+        "你是一個在 LINE 上提供協助的 AI 助理。\n"
+        "要求：回答精準、可執行、少廢話。\n"
+        "你可以使用工具（functions）來完成任務。\n"
+        "不要杜撰事實；不確定就給檢查清單。\n"
+        "\n"
+        "【今日摘要（用來承接今天脈絡）】\n"
+        f"{today_summary if today_summary else '（今天目前沒有摘要）'}\n"
     )
 
-    df = out.get("results_df")
-    report = out.get("report_text", "") or ""
+def ai_chat(user_id: str, user_text: str) -> str:
+    today_summary = get_today_summary(user_id)
+    recent = load_recent_messages(user_id, limit=RECENT_N)
 
-    summary_lines = []
-    detail_map = {}
+    messages = [{"role": "system", "content": build_system_prompt(today_summary)}]
+    messages += recent
+    messages += [{"role": "user", "content": user_text}]
 
-    if df is not None and getattr(df, "empty", True) is False:
-        # summary top 5
-        top = df.head(5)
-        for _, r in top.iterrows():
-            status_first = ""
+    resp = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=messages,
+        temperature=0.4,
+        tools=TOOLS,
+        tool_choice="auto",
+    )
+
+    msg = resp.choices[0].message
+
+    # tool calling
+    if getattr(msg, "tool_calls", None):
+        tool_outputs = []
+        for tc in msg.tool_calls:
+            name = tc.function.name
             try:
-                status_first = str(r.get("狀態", "")).splitlines()[0]
+                args = json.loads(tc.function.arguments or "{}")
             except Exception:
-                status_first = str(r.get("狀態", ""))
+                args = {}
 
-            summary_lines.append(
-                f"● {r.get('債券代號','-')} {r.get('Type','-')}｜{status_first}"
-            )
+            result = dispatch_tool_call(name, args)
+            tool_outputs.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
-        # detail map for every ID
-        for _, r in df.iterrows():
-            _id = str(r.get("債券代號", "")).strip()
-            if not _id:
-                continue
+        messages.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": msg.tool_calls
+        })
+        messages += tool_outputs
 
-            # collect *_Detail columns (T1_Detail..)
-            t_details = []
-            for c in df.columns:
-                if str(c).endswith("_Detail"):
-                    v = r.get(c, "")
-                    if v:
-                        t_details.append(str(v))
+        resp2 = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=messages,
+            temperature=0.35,
+        )
+        return (resp2.choices[0].message.content or "").strip()
 
-            detail_text = (
-                f"【商品】{_id}\n"
-                f"類型: {r.get('Type','-')}\n"
-                f"客戶: {r.get('Name','-')}\n"
-                f"交易日: {r.get('交易日','-')}\n"
-                f"KO設定: {r.get('KO設定','-')}\n"
-                f"最差表現: {r.get('最差表現','-')}\n"
-                f"----------------\n"
-                f"{r.get('狀態','')}\n"
-                f"----------------\n"
-                + ("\n\n".join(t_details) if t_details else "")
-            )
+    return (msg.content or "").strip()
 
-            detail_map[_id] = detail_text
+# ====== Daily summary update (省 token) ======
+def update_daily_summary(user_id: str, user_text: str, assistant_text: str):
+    current = get_today_summary(user_id)
+    prompt = (
+        "請把以下內容整合成『今天的短摘要』，限制 6–10 行，每行不超過 20 字。\n"
+        "摘要要保留：重要任務、重要結論、待辦。\n\n"
+        f"【既有今日摘要】\n{current if current else '（無）'}\n\n"
+        f"【新增對話】\n使用者：{user_text}\n助理：{assistant_text}\n"
+    )
 
-    summary_text = report
-    if summary_lines:
-        summary_text += "\n\n【前5筆摘要】\n" + "\n".join(summary_lines)
+    resp = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": "你是擅長寫極短摘要的助理。"},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        max_tokens=220,
+    )
+    new_summary = (resp.choices[0].message.content or "").strip()
+    upsert_today_summary(user_id, new_summary)
 
-    return {"summary": summary_text, "detail": detail_map}
+# ====== Health check (方便你看網站不是 detail not found) ======
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "eln-bot", "webhook": "/callback"}
 
-
-# ==============================
-# Webhook endpoint
-# ==============================
+# ====== LINE webhook ======
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature")
-    body = await request.body()
+    body = (await request.body()).decode("utf-8")
 
     try:
-        handler.handle(body.decode("utf-8"), signature)
+        events = parser.parse(body, signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
+    for event in events:
+        if isinstance(event, MessageEvent) and isinstance(event.message, TextMessage):
+            user_id = event.source.user_id
+            user_text = event.message.text.strip()
+
+            # 1) 寫入 DB（user）
+            save_msg(user_id, "user", user_text)
+
+            # 2) 先跑指令路由
+            if is_command(user_text):
+                reply = handle_command(user_text)
+            else:
+                # 3) 非指令 → AI（含：記憶 + 工具）
+                reply = ai_chat(user_id, user_text)
+
+            # 4) 寫入 DB（assistant）
+            save_msg(user_id, "assistant", reply)
+
+            # 5) 更新今日摘要（只對非指令）
+            if not is_command(user_text):
+                try:
+                    update_daily_summary(user_id, user_text, reply)
+                except Exception:
+                    pass
+
+            # 6) 回覆 LINE
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply[:4900])
+            )
+
     return "OK"
-
-
-# ==============================
-# Text message handler
-# ==============================
-@handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
-    text_raw = (event.message.text or "").strip()
-    text = text_raw.lower().strip()
-
-    # HELP
-    if text in ("help", "?", "指令", "幫助"):
-        msg = (
-            "可用指令：\n"
-            "• hello\n"
-            "• calc（或 clac）：提示你上傳Excel\n"
-            "• report：用最後一次上傳的Excel重算並回日報\n"
-            "• detail <商品代號>：查單筆完整KO/KI/狀態（可打部分代號）\n"
-            "• settarget：把目前聊天室設為預設推播對象\n"
-        )
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
-        return
-
-    # HELLO
-    if text in ("hello", "hi"):
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請問有什麼需要協助的？"))
-        return
-
-    # SETTARGET (optional)
-    if text == "settarget":
-        targets = load_targets()
-        if event.source.type == "group":
-            targets["default"] = event.source.group_id
-            targets["default_type"] = "group"
-            save_targets(targets)
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已設定此群組為預設推播對象"))
-        elif event.source.type == "room":
-            targets["default"] = event.source.room_id
-            targets["default_type"] = "room"
-            save_targets(targets)
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已設定此聊天室為預設推播對象"))
-        else:
-            targets["default"] = event.source.user_id
-            targets["default_type"] = "user"
-            save_targets(targets)
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已設定您為預設推播對象"))
-        return
-
-    # CALC / CLAC (tolerant)
-    if text in ("calc", "clac") or text.startswith("calc") or text.startswith("clac"):
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="收到！請直接把 Excel 檔案傳給我，我會計算並回傳戰情快報。")
-        )
-        return
-
-    # REPORT
-    if text == "report":
-        if not LAST_FILE.exists():
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="尚未有檔案，請先輸入 calc 並上傳 Excel。"))
-            return
-
-        result = run_autotracking(str(LAST_FILE))
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result["summary"] or "沒有產出內容"))
-        return
-
-    # DETAIL <id>
-    if text.startswith("detail"):
-        parts = text_raw.split(" ", 1)
-        if len(parts) < 2 or not parts[1].strip():
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入：detail 商品代號（例：detail U123）"))
-            return
-
-        if not LAST_FILE.exists():
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="尚未有檔案，請先輸入 calc 並上傳 Excel。"))
-            return
-
-        query = parts[1].strip()
-        q_norm = query.strip().upper()
-
-        result = run_autotracking(str(LAST_FILE))
-        detail_map = result.get("detail", {}) or {}
-        keys = list(detail_map.keys())
-
-        # exact match (case-insensitive)
-        norm_map = {str(k).strip().upper(): k for k in keys}
-        if q_norm in norm_map:
-            real_key = norm_map[q_norm]
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=detail_map[real_key]))
-            return
-
-        # fuzzy contains
-        hits = [k for k in keys if q_norm in str(k).strip().upper()]
-
-        if len(hits) == 1:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=detail_map[hits[0]]))
-            return
-
-        if len(hits) > 1:
-            sample = "\n".join([f"• {h}" for h in hits[:20]])
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找到多筆相符，請再精準一點：\n{sample}"))
-            return
-
-        # not found -> show sample list
-        sample = "\n".join([f"• {k}" for k in keys[:20]]) if keys else "(目前無可查資料)"
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=f"找不到代號：{query}\n\n目前可查代號(前20)：\n{sample}")
-        )
-        return
-
-    # fallback
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="指令不明。請輸入 help 看可用指令。"))
-
-
-# ==============================
-# File message handler
-# ==============================
-@handler.add(MessageEvent, message=FileMessage)
-def handle_file_message(event):
-    """
-    LINE 的 FileMessage 不一定保證是 xlsx，但你這裡先當 xlsx 存 last.xlsx
-    若你有 csv，也可以再加判斷副檔名。
-    """
-    message_id = event.message.id
-    content = line_bot_api.get_message_content(message_id)
-
-    # save as last.xlsx
-    with open(LAST_FILE, "wb") as f:
-        for chunk in content.iter_content():
-            f.write(chunk)
-
-    result = run_autotracking(str(LAST_FILE))
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result["summary"] or "已收到檔案，但沒有產出內容"))
+@app.get("/whoami")
+def whoami():
+    return {"service": "eln-bot", "version": "NEW-2026-03-04-01"}
