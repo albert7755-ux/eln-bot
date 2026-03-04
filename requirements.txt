@@ -10,3 +10,4 @@ sqlalchemy
 psycopg[binary]
 pandas
 openpyxl
+yfinance
