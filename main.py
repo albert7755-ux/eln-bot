@@ -1,145 +1,368 @@
 import os
-import re
 import json
+from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 
-from linebot import LineBotApi, WebhookParser
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
 
 from openai import OpenAI
 
-# ===== ENV =====
-LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+from autotracking_core import calculate_from_file
 
-CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4o-mini")
+# ==============================
+# ENV
+# ==============================
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # 沒有也能跑（只是 AI 功能會關閉）
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-# ===== Clients =====
-app = FastAPI()
+if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
+    raise RuntimeError("Missing LINE env vars: LINE_CHANNEL_SECRET / LINE_CHANNEL_ACCESS_TOKEN")
+
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-parser = WebhookParser(LINE_CHANNEL_SECRET)
-client = OpenAI(api_key=OPENAI_API_KEY)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# =========================
-# Health Check
-# =========================
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
+app = FastAPI()
+
+# ==============================
+# Writable paths on Render
+# ==============================
+BASE_DIR = Path("/tmp")
+UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+LAST_FILE = UPLOAD_DIR / "last.xlsx"
+TARGET_FILE = BASE_DIR / "targets.json"
+STATE_FILE = BASE_DIR / "state.json"  # 用來記錄「哪個聊天室正在等上傳檔案」
+
+VERSION = "eln-autotracking+ai-2026-03-05"
+
+# ==============================
+# Health check
+# ==============================
 @app.get("/")
 def root():
     return {"status": "ok", "service": "eln-bot", "webhook": "/callback"}
 
 @app.get("/whoami")
 def whoami():
-    return {"service": "eln-bot", "version": "2026-03-05"}
+    return {"service": "eln-bot", "version": VERSION}
 
-# =========================
-# Commands
-# =========================
+# ==============================
+# Small JSON storage helpers
+# ==============================
+def _read_json(path: Path, default):
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return default
+    return default
 
-def is_command(text: str) -> bool:
-    t = text.strip()
-    return (
-        t == "/help"
-        or t.startswith("/calc")
-        or t == "/report"
-        or t.startswith("/detail")
+def _write_json(path: Path, data):
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+# ==============================
+# Optional: store default push target
+# ==============================
+def load_targets():
+    return _read_json(TARGET_FILE, {})
+
+def save_targets(data: dict):
+    _write_json(TARGET_FILE, data)
+
+# ==============================
+# State: which chat is awaiting file after /calc
+# ==============================
+def _chat_key(event) -> str:
+    # 用聊天室/群組/使用者當 key，避免群組多人混在一起
+    if event.source.type == "group":
+        return f"group:{event.source.group_id}"
+    if event.source.type == "room":
+        return f"room:{event.source.room_id}"
+    return f"user:{event.source.user_id}"
+
+def load_state():
+    return _read_json(STATE_FILE, {})
+
+def save_state(data: dict):
+    _write_json(STATE_FILE, data)
+
+def set_await_file(chat_key: str, val: bool):
+    st = load_state()
+    st[chat_key] = {"await_file": bool(val)}
+    save_state(st)
+
+def is_await_file(chat_key: str) -> bool:
+    st = load_state()
+    return bool(st.get(chat_key, {}).get("await_file", False))
+
+# ==============================
+# Adapter: core -> (summary/detail map)
+# ==============================
+def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bool = True):
+    """
+    calculate_from_file() should return dict with at least:
+      - results_df: pandas.DataFrame
+      - report_text: str
+    """
+    out = calculate_from_file(
+        file_path=file_path,
+        lookback_days=lookback_days,
+        notify_ki_daily=notify_ki_daily
     )
 
+    df = out.get("results_df")
+    report = out.get("report_text", "") or ""
 
-def handle_command(text: str):
+    summary_lines = []
+    detail_map = {}
 
-    t = text.strip()
+    if df is not None and getattr(df, "empty", True) is False:
+        # summary top 5
+        top = df.head(5)
+        for _, r in top.iterrows():
+            try:
+                status_first = str(r.get("狀態", "")).splitlines()[0]
+            except Exception:
+                status_first = str(r.get("狀態", ""))
 
-    if t == "/help":
-        return (
-            "ELN BOT 指令\n"
-            "/help\n"
-            "/calc 1+2*3\n"
-            "/report\n"
-            "/detail xxx\n\n"
-            "其他任何文字都會進 AI 模式"
-        )
+            summary_lines.append(
+                f"● {r.get('債券代號','-')} {r.get('Type','-')}｜{status_first}"
+            )
 
-    if t.startswith("/calc"):
-        expr = t.replace("/calc", "").strip()
+        # detail map for every ID
+        for _, r in df.iterrows():
+            _id = str(r.get("債券代號", "")).strip()
+            if not _id:
+                continue
 
-        if not expr:
-            return "用法：/calc 1+2*3"
+            # collect *_Detail columns (T1_Detail..)
+            t_details = []
+            for c in df.columns:
+                if str(c).endswith("_Detail"):
+                    v = r.get(c, "")
+                    if v:
+                        t_details.append(str(v))
 
-        if not re.fullmatch(r"[0-9\.\+\-\*\/\(\)\s]+", expr):
-            return "算式格式錯誤"
+            detail_text = (
+                f"【商品】{_id}\n"
+                f"類型: {r.get('Type','-')}\n"
+                f"客戶: {r.get('Name','-')}\n"
+                f"交易日: {r.get('交易日','-')}\n"
+                f"KO設定: {r.get('KO設定','-')}\n"
+                f"最差表現: {r.get('最差表現','-')}\n"
+                f"----------------\n"
+                f"{r.get('狀態','')}\n"
+                f"----------------\n"
+                + ("\n\n".join(t_details) if t_details else "")
+            )
 
-        try:
-            result = eval(expr, {"__builtins__": {}})
-            return f"{expr} = {result}"
-        except:
-            return "算式錯誤"
+            detail_map[_id] = detail_text
 
-    if t == "/report":
-        return "日報功能已接通"
+    summary_text = report
+    if summary_lines:
+        summary_text += "\n\n【前5筆摘要】\n" + "\n".join(summary_lines)
 
-    if t.startswith("/detail"):
-        q = t.replace("/detail", "").strip()
-        return f"detail 查詢：{q}"
+    return {"summary": summary_text, "detail": detail_map}
 
-    return "指令不明"
-
-# =========================
-# AI Chat
-# =========================
-
-def ai_chat(user_text: str):
+# ==============================
+# AI fallback
+# ==============================
+def ai_reply(user_text: str) -> str:
+    if not client:
+        return "（AI 模式尚未開啟：缺少 OPENAI_API_KEY。你可以用 /help 看指令，或先用 /calc 上傳檔案。）"
 
     resp = client.chat.completions.create(
-        model=CHAT_MODEL,
+        model=OPENAI_MODEL,
+        temperature=0.35,
+        max_tokens=700,
         messages=[
             {
                 "role": "system",
-                "content": "你是LINE助理，回答要簡短、清楚。",
+                "content": (
+                    "你是「龍蝦」LINE助理。"
+                    "使用者是銀行財管/投資顧問端，回答要務實、可直接拿去用。"
+                    "若問題跟ELN追蹤/KO/KI/狀態相關，可引導他用 /calc 上傳 Excel，或用 /detail 查商品。"
+                ),
             },
-            {
-                "role": "user",
-                "content": user_text,
-            },
+            {"role": "user", "content": user_text},
         ],
-        max_tokens=500,
-        temperature=0.4,
     )
+    return (resp.choices[0].message.content or "").strip()
 
-    return resp.choices[0].message.content.strip()
-
-
-# =========================
-# LINE Webhook
-# =========================
-
+# ==============================
+# Webhook endpoint
+# ==============================
 @app.post("/callback")
 async def callback(request: Request):
-
     signature = request.headers.get("X-Line-Signature")
-    body = (await request.body()).decode("utf-8")
+    body = await request.body()
 
     try:
-        events = parser.parse(body, signature)
+        handler.handle(body.decode("utf-8"), signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    for event in events:
-
-        if isinstance(event, MessageEvent) and isinstance(event.message, TextMessage):
-
-            user_text = event.message.text.strip()
-
-            if is_command(user_text):
-                reply = handle_command(user_text)
-            else:
-                reply = ai_chat(user_text)
-
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=reply[:4900])
-            )
-
     return "OK"
+
+# ==============================
+# Text message handler
+# ==============================
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text_message(event):
+    text_raw = (event.message.text or "").strip()
+    t = text_raw.strip()
+    tl = t.lower()
+
+    # 兼容：允許帶 / 或不帶 /
+    if tl.startswith("/"):
+        tl2 = tl[1:]
+        t2 = t[1:]
+    else:
+        tl2 = tl
+        t2 = t
+
+    chat_key = _chat_key(event)
+
+    # HELP
+    if tl2 in ("help", "?", "指令", "幫助"):
+        msg = (
+            "可用指令：\n"
+            "/help\n"
+            "/calc  （或 calc / clac）：提示你上傳Excel，收到檔案後自動計算並回前5筆\n"
+            "/report：用最後一次上傳的Excel重算並回日報\n"
+            "/detail <商品代號>：查單筆完整KO/KI/狀態（可打部分代號）\n"
+            "/settarget：把目前聊天室設為預設推播對象\n"
+            "\n"
+            "其他任何文字：會進 AI 對話模式"
+        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
+        return
+
+    # HELLO
+    if tl2 in ("hello", "hi"):
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請問有什麼需要協助的？"))
+        return
+
+    # SETTARGET (optional)
+    if tl2 == "settarget":
+        targets = load_targets()
+        if event.source.type == "group":
+            targets["default"] = event.source.group_id
+            targets["default_type"] = "group"
+            save_targets(targets)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已設定此群組為預設推播對象"))
+        elif event.source.type == "room":
+            targets["default"] = event.source.room_id
+            targets["default_type"] = "room"
+            save_targets(targets)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已設定此聊天室為預設推播對象"))
+        else:
+            targets["default"] = event.source.user_id
+            targets["default_type"] = "user"
+            save_targets(targets)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已設定您為預設推播對象"))
+        return
+
+    # CALC / CLAC (tolerant, with or without slash)
+    if tl2 in ("calc", "clac") or tl2.startswith("calc") or tl2.startswith("clac"):
+        set_await_file(chat_key, True)
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="收到！請直接把 Excel 檔案傳給我（用 LINE 的『檔案』上傳），我會計算並回傳戰情快報＋前5筆摘要。")
+        )
+        return
+
+    # REPORT
+    if tl2 == "report":
+        if not LAST_FILE.exists():
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="尚未有檔案，請先輸入 /calc 並上傳 Excel。"))
+            return
+
+        result = run_autotracking(str(LAST_FILE))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=(result["summary"] or "沒有產出內容")[:4900]))
+        return
+
+    # DETAIL <id>
+    if tl2.startswith("detail"):
+        parts = text_raw.split(" ", 1)
+        if len(parts) < 2 or not parts[1].strip():
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入：/detail 商品代號（例：/detail U123）"))
+            return
+
+        if not LAST_FILE.exists():
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="尚未有檔案，請先輸入 /calc 並上傳 Excel。"))
+            return
+
+        query = parts[1].strip()
+        q_norm = query.strip().upper()
+
+        result = run_autotracking(str(LAST_FILE))
+        detail_map = result.get("detail", {}) or {}
+        keys = list(detail_map.keys())
+
+        # exact match (case-insensitive)
+        norm_map = {str(k).strip().upper(): k for k in keys}
+        if q_norm in norm_map:
+            real_key = norm_map[q_norm]
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=detail_map[real_key][:4900]))
+            return
+
+        # fuzzy contains
+        hits = [k for k in keys if q_norm in str(k).strip().upper()]
+
+        if len(hits) == 1:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=detail_map[hits[0]][:4900]))
+            return
+
+        if len(hits) > 1:
+            sample = "\n".join([f"• {h}" for h in hits[:20]])
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找到多筆相符，請再精準一點：\n{sample}"[:4900]))
+            return
+
+        sample = "\n".join([f"• {k}" for k in keys[:20]]) if keys else "(目前無可查資料)"
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=f"找不到代號：{query}\n\n目前可查代號(前20)：\n{sample}"[:4900])
+        )
+        return
+
+    # ===== 非指令：進 AI 模式 =====
+    reply = ai_reply(text_raw)
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply[:4900]))
+
+# ==============================
+# File message handler
+# ==============================
+@handler.add(MessageEvent, message=FileMessage)
+def handle_file_message(event):
+    chat_key = _chat_key(event)
+
+    # 只有在 /calc 之後才接受檔案（避免被亂丟檔案就觸發重算）
+    if not is_await_file(chat_key):
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="我收到檔案了，但你尚未輸入 /calc。請先打 /calc，再上傳 Excel。")
+        )
+        return
+
+    message_id = event.message.id
+    content = line_bot_api.get_message_content(message_id)
+
+    # save as last.xlsx
+    with open(LAST_FILE, "wb") as f:
+        for chunk in content.iter_content():
+            f.write(chunk)
+
+    # 計算後清除等待狀態
+    set_await_file(chat_key, False)
+
+    result = run_autotracking(str(LAST_FILE))
+    summary = result["summary"] or "已收到檔案，但沒有產出內容"
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
