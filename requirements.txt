@@ -6,8 +6,8 @@ python-dotenv
 line-bot-sdk
 openai
 requests
-sqlalchemy
-psycopg[binary]
 pandas
 openpyxl
 yfinance
+anthropic
+pytz
