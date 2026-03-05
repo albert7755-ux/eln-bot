@@ -11,3 +11,6 @@ openpyxl
 yfinance
 anthropic
 pytz
+pdfplumber
+python-docx
+python-pptx
