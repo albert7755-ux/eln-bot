@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, HTTPException
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage, ImageMessage
 from sqlalchemy import create_engine, text
 from autotracking_core import calculate_from_file
 from market_content_generator import generate_market_content
@@ -504,35 +504,161 @@ def handle_text_message(event):
 UPLOAD_DIR = Path("/tmp/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+def extract_text_from_file(file_path: str, filename: str) -> str:
+    ext = Path(filename).suffix.lower()
+    text = ""
+
+    try:
+        if ext == ".pdf":
+            import pdfplumber
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+
+        elif ext == ".docx":
+            from docx import Document
+            doc = Document(file_path)
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    text += para.text + "\n"
+
+        elif ext == ".pptx":
+            from pptx import Presentation
+            prs = Presentation(file_path)
+            for i, slide in enumerate(prs.slides, start=1):
+                text += f"\n--- 第 {i} 頁 ---\n"
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        text += shape.text + "\n"
+
+        elif ext in (".xlsx", ".xls"):
+            import pandas as pd
+            xl = pd.ExcelFile(file_path)
+            for sheet in xl.sheet_names:
+                df = xl.parse(sheet)
+                text += f"\n--- 工作表: {sheet} ---\n"
+                text += df.to_string(index=False) + "\n"
+
+    except Exception as e:
+        print(f"Extract error: {e}")
+        text = ""
+
+    return text.strip()
+
+def analyze_file_with_claude(text: str, filename: str) -> str:
+    ext = Path(filename).suffix.lower()
+    type_map = {
+        ".pdf": "PDF文件",
+        ".docx": "Word文件",
+        ".pptx": "PowerPoint簡報",
+        ".xlsx": "Excel試算表",
+        ".xls": "Excel試算表",
+    }
+    file_type = type_map.get(ext, "文件")
+
+    prompt = (
+        f"我收到一份{file_type}，內容如下:\n\n"
+        f"{text[:6000]}\n\n"
+        "請幫我:\n"
+        "1. 用2-3句話說明這份文件的主題與目的\n"
+        "2. 條列出5-8個最重要的重點\n"
+        "3. 如果有數據或結論，特別標示出來\n"
+        "4. 最後一句話說明這份文件的主要價值或建議行動\n\n"
+        "格式規定: 不使用 Markdown 符號（禁止 ## ** --- 等），標題用 emoji，條列用 •"
+    )
+
+    resp = claude_client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return (resp.content[0].text or "").strip()
+
+def analyze_image_with_claude(image_data: bytes, media_type: str) -> str:
+    import base64
+    image_b64 = base64.b64encode(image_data).decode("utf-8")
+
+    resp = claude_client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1500,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": image_b64
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "請分析這張圖片，幫我:\n"
+                        "1. 說明圖片的主要內容\n"
+                        "2. 如果有文字或數據，擷取重要資訊\n"
+                        "3. 條列出重點\n"
+                        "格式規定: 不使用 Markdown 符號，標題用 emoji，條列用 •"
+                    )
+                }
+            ]
+        }]
+    )
+    return (resp.content[0].text or "").strip()
+
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file_message(event):
     try:
         ck = chat_key_of(event)
         filename = getattr(event.message, "file_name", "") or ""
-        size = getattr(event.message, "file_size", None)
-        print("[FILE]", ck, filename, size)
-
-        if not db_is_await(ck):
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="我收到檔案了，但你尚未輸入 /calc。請先打 /calc，再上傳 Excel。")
-            )
-            return
+        ext = Path(filename).suffix.lower()
+        print("[FILE]", ck, filename)
 
         message_id = event.message.id
         content = line_bot_api.get_message_content(message_id)
-        tmp_path = UPLOAD_DIR / f"upload_{int(datetime.now(TZ_TAIPEI).timestamp())}.xlsx"
+        tmp_path = UPLOAD_DIR / f"upload_{int(datetime.now(TZ_TAIPEI).timestamp())}{ext}"
         with open(tmp_path, "wb") as f:
             for chunk in content.iter_content():
                 f.write(chunk)
 
-        db_set_await(ck, False)
-        summary, top5_lines, detail_map = run_autotracking(str(tmp_path))
-        db_save_result(ck, summary, top5_lines, detail_map)
+        # ELN 模式：有先打 /calc 且是 Excel
+        if ext in (".xlsx", ".xls") and db_is_await(ck):
+            db_set_await(ck, False)
+            summary, top5_lines, detail_map = run_autotracking(str(tmp_path))
+            db_save_result(ck, summary, top5_lines, detail_map)
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900])
+            )
+            return
 
+        # 通用分析模式
+        if ext in (".xlsx", ".xls", ".pdf", ".docx", ".pptx"):
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=f"收到！正在分析 {filename}，請稍候...")
+            )
+            text = extract_text_from_file(str(tmp_path), filename)
+            if not text:
+                line_bot_api.push_message(
+                    ck.split(":", 1)[1],
+                    TextSendMessage(text="檔案解析失敗，可能是掃描版 PDF 或格式不支援。")
+                )
+                return
+            analysis = analyze_file_with_claude(text, filename)
+            line_bot_api.push_message(
+                ck.split(":", 1)[1],
+                TextSendMessage(text=analysis[:4900])
+            )
+            return
+
+        # 不支援的格式
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900])
+            TextSendMessage(text=f"目前支援的檔案格式: PDF、Word、PowerPoint、Excel\n收到的格式 {ext} 暫不支援。")
         )
 
     except Exception as e:
@@ -545,7 +671,45 @@ def handle_file_message(event):
         try:
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text="我收到檔案但處理失敗了。請確認是 .xlsx 檔，或稍後再試。")
+                TextSendMessage(text="檔案處理時出錯了，請稍後再試。")
+            )
+        except Exception:
+            pass
+
+# ==============================
+# Image message handler
+# ==============================
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    try:
+        ck = chat_key_of(event)
+        print("[IMAGE]", ck)
+
+        message_id = event.message.id
+        content = line_bot_api.get_message_content(message_id)
+
+        image_data = b""
+        for chunk in content.iter_content():
+            image_data += chunk
+
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="收到圖片！正在分析，請稍候...")
+        )
+
+        analysis = analyze_image_with_claude(image_data, "image/jpeg")
+        line_bot_api.push_message(
+            ck.split(":", 1)[1],
+            TextSendMessage(text=analysis[:4900])
+        )
+
+    except Exception as e:
+        print("[ERROR] handle_image_message:", e)
+        print(traceback.format_exc())
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="圖片處理時出錯了，請稍後再試。")
             )
         except Exception:
             pass
