@@ -23,28 +23,37 @@ from autotracking_core import calculate_from_file
 # ==============================
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # 沒有也能跑，只是 AI 不啟用
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # optional
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-DATABASE_URL = os.getenv("DATABASE_URL")  # DB 永久記憶必須要有
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    # SQLAlchemy 標準寫法
-    DATABASE_URL = "postgresql+psycopg://" + DATABASE_URL[len("postgres://"):]
+DATABASE_URL = os.getenv("DATABASE_URL")  # required for DB memory
 
 if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
     raise RuntimeError("Missing LINE env vars: LINE_CHANNEL_SECRET / LINE_CHANNEL_ACCESS_TOKEN")
 
 if not DATABASE_URL:
-    raise RuntimeError("Missing env var: DATABASE_URL (DB 永久記憶版需要它)")
+    raise RuntimeError("Missing env var: DATABASE_URL")
+
+# ---- IMPORTANT: force psycopg3 driver (avoid psycopg2 import) ----
+# Render may provide postgres:// or postgresql://; SQLAlchemy default can pick psycopg2.
+# We force postgresql+psycopg:// to use psycopg3 (psycopg[binary]).
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+
+# If user already set postgresql+psycopg://, keep it.
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 app = FastAPI()
-VERSION = "eln-autotracking-db-2026-03-05"
+VERSION = "eln-autotracking-db-v2-2026-03-05"
 
 TZ_TAIPEI = timezone(timedelta(hours=8))
+
 
 # ==============================
 # DB
@@ -53,7 +62,6 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 def init_db():
     with engine.begin() as conn:
-        # 每個聊天室（user/group/room）最後一次計算的 summary
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS eln_last_report (
             chat_key TEXT PRIMARY KEY,
@@ -62,7 +70,6 @@ def init_db():
         );
         """))
 
-        # 每個聊天室、每個商品代號的 detail
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS eln_detail (
             chat_key TEXT NOT NULL,
@@ -73,7 +80,6 @@ def init_db():
         );
         """))
 
-        # 用來存 top5（可選，但實用）
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS eln_top5 (
             chat_key TEXT NOT NULL,
@@ -84,7 +90,6 @@ def init_db():
         );
         """))
 
-        # 紀錄哪些聊天室正在等檔案（/calc 後）
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS eln_session (
             chat_key TEXT PRIMARY KEY,
@@ -95,6 +100,7 @@ def init_db():
 
 init_db()
 
+
 def db_set_await(chat_key: str, await_file: bool):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -104,14 +110,18 @@ def db_set_await(chat_key: str, await_file: bool):
         SET await_file=:a, updated_at=NOW()
         """), {"k": chat_key, "a": bool(await_file)})
 
+
 def db_is_await(chat_key: str) -> bool:
     with engine.begin() as conn:
-        row = conn.execute(text("SELECT await_file FROM eln_session WHERE chat_key=:k"), {"k": chat_key}).fetchone()
+        row = conn.execute(
+            text("SELECT await_file FROM eln_session WHERE chat_key=:k"),
+            {"k": chat_key}
+        ).fetchone()
     return bool(row and row[0])
+
 
 def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_map: dict[str, str]):
     with engine.begin() as conn:
-        # summary
         conn.execute(text("""
         INSERT INTO eln_last_report(chat_key, summary, updated_at)
         VALUES (:k, :s, NOW())
@@ -119,7 +129,6 @@ def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_ma
         SET summary=:s, updated_at=NOW()
         """), {"k": chat_key, "s": summary})
 
-        # top5: 先清再寫
         conn.execute(text("DELETE FROM eln_top5 WHERE chat_key=:k"), {"k": chat_key})
         for i, line in enumerate(top5_lines, start=1):
             conn.execute(text("""
@@ -127,7 +136,6 @@ def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_ma
             VALUES (:k, :n, :t, NOW())
             """), {"k": chat_key, "n": i, "t": line})
 
-        # detail: 先清再寫（避免舊商品殘留）
         conn.execute(text("DELETE FROM eln_detail WHERE chat_key=:k"), {"k": chat_key})
         for bond_id, detail in detail_map.items():
             conn.execute(text("""
@@ -135,28 +143,29 @@ def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_ma
             VALUES (:k, :b, :d, NOW())
             """), {"k": chat_key, "b": bond_id, "d": detail})
 
+
 def db_get_report(chat_key: str) -> str | None:
     with engine.begin() as conn:
-        row = conn.execute(text("SELECT summary FROM eln_last_report WHERE chat_key=:k"), {"k": chat_key}).fetchone()
+        row = conn.execute(
+            text("SELECT summary FROM eln_last_report WHERE chat_key=:k"),
+            {"k": chat_key}
+        ).fetchone()
     return row[0] if row else None
 
-def db_get_top5(chat_key: str) -> list[str]:
+
+def db_list_bonds(chat_key: str, limit: int = 50) -> list[str]:
     with engine.begin() as conn:
         rows = conn.execute(text("""
-        SELECT line_no, text_line
-        FROM eln_top5
+        SELECT bond_id
+        FROM eln_detail
         WHERE chat_key=:k
-        ORDER BY line_no ASC
-        """), {"k": chat_key}).fetchall()
-    return [r[1] for r in rows] if rows else []
+        ORDER BY bond_id ASC
+        LIMIT :lim
+        """), {"k": chat_key, "lim": int(limit)}).fetchall()
+    return [r[0] for r in rows] if rows else []
+
 
 def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, list[str]]:
-    """
-    回傳：
-    - matched_id
-    - detail_text
-    - candidates（如果有多筆）
-    """
     q_norm = query.strip().upper()
     if not q_norm:
         return None, None, []
@@ -177,7 +186,8 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
         real = norm_map[q_norm]
         with engine.begin() as conn:
             row = conn.execute(text("""
-            SELECT detail FROM eln_detail
+            SELECT detail
+            FROM eln_detail
             WHERE chat_key=:k AND bond_id=:b
             """), {"k": chat_key, "b": real}).fetchone()
         return real, (row[0] if row else None), []
@@ -187,7 +197,8 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
         real = hits[0]
         with engine.begin() as conn:
             row = conn.execute(text("""
-            SELECT detail FROM eln_detail
+            SELECT detail
+            FROM eln_detail
             WHERE chat_key=:k AND bond_id=:b
             """), {"k": chat_key, "b": real}).fetchone()
         return real, (row[0] if row else None), []
@@ -198,7 +209,7 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
 
 
 # ==============================
-# Optional: store default push target
+# Optional: store default push target (not required for reply)
 # ==============================
 BASE_DIR = Path("/tmp")
 TARGET_FILE = BASE_DIR / "targets.json"
@@ -220,6 +231,7 @@ def load_targets():
 def save_targets(data: dict):
     _write_json(TARGET_FILE, data)
 
+
 # ==============================
 # Health check
 # ==============================
@@ -231,6 +243,7 @@ def root():
 def whoami():
     return {"service": "eln-bot", "version": VERSION, "ai_enabled": bool(client)}
 
+
 # ==============================
 # Chat key
 # ==============================
@@ -240,6 +253,7 @@ def chat_key_of(event) -> str:
     if event.source.type == "room":
         return f"room:{event.source.room_id}"
     return f"user:{event.source.user_id}"
+
 
 # ==============================
 # Adapter: core -> (summary, top5, detail_map)
@@ -265,7 +279,9 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
             except Exception:
                 status_first = str(r.get("狀態", ""))
 
-            top5_lines.append(f"● {r.get('債券代號','-')} {r.get('Type','-')}｜{status_first}")
+            top5_lines.append(
+                f"● {r.get('債券代號','-')} {r.get('Type','-')}｜{status_first}"
+            )
 
         for _, r in df.iterrows():
             _id = str(r.get("債券代號", "")).strip()
@@ -298,6 +314,7 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
         summary += "\n\n【前5筆摘要】\n" + "\n".join(top5_lines)
 
     return summary, top5_lines, detail_map
+
 
 # ==============================
 # AI fallback
@@ -352,7 +369,6 @@ def handle_text_message(event):
 
         print("[TEXT]", ck, repr(text_raw))
 
-        # 支援 /help 或 help
         if tl.startswith("/"):
             cmd = tl[1:]
             raw_cmd = text_raw[1:]
@@ -368,6 +384,7 @@ def handle_text_message(event):
                 "/calc  ：提示你上傳 Excel（收到檔案後自動計算並永久保存）\n"
                 "/report：直接顯示最近一次結果（不用重上傳）\n"
                 "/detail <商品代號>：查單筆完整 KO/KI/狀態（不用重上傳，支援模糊）\n"
+                "/list：列出目前可查商品代號（前50）\n"
                 "/settarget：把目前聊天室設為預設推播對象\n"
                 "\n"
                 "其他任何文字：會進 AI 對話模式"
@@ -375,7 +392,7 @@ def handle_text_message(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
             return
 
-        # SETTARGET（可選）
+        # SETTARGET (optional)
         if cmd == "settarget":
             targets = load_targets()
             if event.source.type == "group":
@@ -395,9 +412,19 @@ def handle_text_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已設定您為預設推播對象"))
             return
 
-        # CALC：檔案模式（/calc 之後才接受檔案）
+        # LIST
+        if cmd == "list":
+            bonds = db_list_bonds(ck, limit=50)
+            if not bonds:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無已保存結果。請先 /calc 上傳 Excel。"))
+                return
+            msg = "目前可查商品代號（前50）：\n" + "\n".join(bonds)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg[:4900]))
+            return
+
+        # CALC
         if cmd.startswith("calc") or cmd.startswith("clac"):
-            # 若你仍想保留算式：/calc 1+2*3，就留著；不想要就刪掉這段
+            # optional calculator mode: /calc 1+2*3
             parts = raw_cmd.split(" ", 1)
             if len(parts) > 1 and parts[1].strip():
                 expr = parts[1].strip()
@@ -419,7 +446,7 @@ def handle_text_message(event):
             )
             return
 
-        # REPORT：直接讀 DB 最近一次 summary
+        # REPORT (from DB)
         if cmd == "report":
             summary = db_get_report(ck)
             if not summary:
@@ -428,7 +455,7 @@ def handle_text_message(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
             return
 
-        # DETAIL：從 DB 查
+        # DETAIL (from DB)
         if cmd.startswith("detail"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
@@ -443,7 +470,6 @@ def handle_text_message(event):
                 return
 
             if candidates and matched_id is None:
-                # 多筆或找不到時給候選清單
                 sample = "\n".join([f"• {c}" for c in candidates[:20]])
                 line_bot_api.reply_message(
                     event.reply_token,
@@ -451,14 +477,13 @@ def handle_text_message(event):
                 )
                 return
 
-            # 完全沒有資料
             line_bot_api.reply_message(
                 event.reply_token,
                 TextSendMessage(text="查不到該代號或目前沒有已保存結果。請先 /calc 上傳 Excel。")
             )
             return
 
-        # 非指令：AI 模式
+        # Non-command => AI
         reply = ai_reply(text_raw)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply[:4900]))
 
@@ -477,8 +502,7 @@ def handle_text_message(event):
 # ==============================
 # File message handler
 # ==============================
-BASE_DIR = Path("/tmp")
-UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR = Path("/tmp/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 @handler.add(MessageEvent, message=FileMessage)
@@ -497,27 +521,29 @@ def handle_file_message(event):
             )
             return
 
-        # 下載檔案內容（只用來當次計算，不做永久保存）
+        # download
         message_id = event.message.id
         content = line_bot_api.get_message_content(message_id)
 
-        # 存到 /tmp（就算重啟會不見也沒關係，因為結果會存 DB）
         tmp_path = UPLOAD_DIR / f"upload_{int(datetime.now(TZ_TAIPEI).timestamp())}.xlsx"
         with open(tmp_path, "wb") as f:
             for chunk in content.iter_content():
                 f.write(chunk)
 
-        # 先關掉 await，避免重複狀態
+        # stop await (avoid stuck state)
         db_set_await(ck, False)
 
-        # 計算
+        # calculate
         summary, top5_lines, detail_map = run_autotracking(str(tmp_path))
 
-        # 存 DB（永久）
+        # persist
         db_save_result(ck, summary, top5_lines, detail_map)
 
-        # 回覆 summary
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900]))
+        # reply
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900])
+        )
 
     except Exception as e:
         print("[ERROR] handle_file_message:", e)
