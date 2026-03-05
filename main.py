@@ -8,24 +8,25 @@ from fastapi import FastAPI, Request, HTTPException
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
-from openai import OpenAI
 from sqlalchemy import create_engine, text
 from autotracking_core import calculate_from_file
 from market_content_generator import generate_market_content
+import anthropic
 
 # ==============================
 # ENV
 # ==============================
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
     raise RuntimeError("Missing LINE env vars: LINE_CHANNEL_SECRET / LINE_CHANNEL_ACCESS_TOKEN")
 if not DATABASE_URL:
     raise RuntimeError("Missing env var: DATABASE_URL")
+if not ANTHROPIC_API_KEY:
+    raise RuntimeError("Missing env var: ANTHROPIC_API_KEY")
 
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
@@ -34,10 +35,10 @@ elif DATABASE_URL.startswith("postgresql://"):
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 app = FastAPI()
 
-VERSION = "eln-autotracking-db-v2-2026-03-05"
+VERSION = "eln-autotracking-db-v3-2026-03-05"
 TZ_TAIPEI = timezone(timedelta(hours=8))
 
 # ==============================
@@ -145,9 +146,7 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
         return None, None, []
     with engine.begin() as conn:
         rows = conn.execute(text("""
-        SELECT bond_id
-        FROM eln_detail
-        WHERE chat_key=:k
+        SELECT bond_id FROM eln_detail WHERE chat_key=:k
         """), {"k": chat_key}).fetchall()
     keys = [r[0] for r in rows] if rows else []
     if not keys:
@@ -157,9 +156,7 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
         real = norm_map[q_norm]
         with engine.begin() as conn:
             row = conn.execute(text("""
-            SELECT detail
-            FROM eln_detail
-            WHERE chat_key=:k AND bond_id=:b
+            SELECT detail FROM eln_detail WHERE chat_key=:k AND bond_id=:b
             """), {"k": chat_key, "b": real}).fetchone()
         return real, (row[0] if row else None), []
     hits = [k for k in keys if q_norm in k.strip().upper()]
@@ -167,9 +164,7 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
         real = hits[0]
         with engine.begin() as conn:
             row = conn.execute(text("""
-            SELECT detail
-            FROM eln_detail
-            WHERE chat_key=:k AND bond_id=:b
+            SELECT detail FROM eln_detail WHERE chat_key=:k AND bond_id=:b
             """), {"k": chat_key, "b": real}).fetchone()
         return real, (row[0] if row else None), []
     if len(hits) > 1:
@@ -208,7 +203,7 @@ def root():
 
 @app.get("/whoami")
 def whoami():
-    return {"service": "eln-bot", "version": VERSION, "ai_enabled": bool(client)}
+    return {"service": "eln-bot", "version": VERSION}
 
 # ==============================
 # Chat key
@@ -272,27 +267,22 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
     return summary, top5_lines, detail_map
 
 # ==============================
-# AI fallback
+# AI fallback (Claude)
 # ==============================
 def ai_reply(user_text: str) -> str:
-    if not client:
-        return "（AI 模式尚未開啟：缺少 OPENAI_API_KEY。你可以輸入 /help，或用 /calc 上傳 Excel。）"
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0.35,
+    resp = claude_client.messages.create(
+        model="claude-sonnet-4-20250514",
         max_tokens=700,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "你是「龍蝦」LINE助理。回答要務實、可直接拿去用。\n"
-                    "若問題跟 ELN 追蹤/KO/KI/狀態相關，可提示使用 /calc 上傳 Excel，或 /detail 查商品。"
-                ),
-            },
-            {"role": "user", "content": user_text},
-        ],
+        system=(
+            "你是「龍蝦」LINE助理，專門服務投資輔銷人員。"
+            "回答要專業、務實、可直接拿去用。"
+            "擅長回答投資、財經、金融商品、市場趨勢等相關問題。"
+            "若問題跟 ELN 追蹤/KO/KI/狀態相關，可提示使用 /calc 上傳 Excel，或 /detail 查商品。"
+            "其他財經問題請直接專業回答，不要硬往 ELN 引導。"
+        ),
+        messages=[{"role": "user", "content": user_text}]
     )
-    return (resp.choices[0].message.content or "").strip()
+    return (resp.content[0].text or "").strip()
 
 # ==============================
 # Webhook endpoint
@@ -330,14 +320,14 @@ def handle_text_message(event):
             msg = (
                 "可用指令：\n"
                 "/help\n"
-                "/calc  ：提示你上傳 Excel（收到檔案後自動計算並永久保存）\n"
+                "/calc：提示你上傳 Excel（收到檔案後自動計算並永久保存）\n"
                 "/report：直接顯示最近一次結果（不用重上傳）\n"
-                "/detail <商品代號>：查單筆完整 KO/KI/狀態（不用重上傳，支援模糊）\n"
+                "/detail <商品代號>：查單筆完整 KO/KI/狀態（支援模糊）\n"
                 "/list：列出目前可查商品代號（前50）\n"
                 "/market <新聞+標的>：自動生成客戶推播文案\n"
                 "/settarget：把目前聊天室設為預設推播對象\n"
                 "\n"
-                "其他任何文字：會進 AI 對話模式"
+                "其他任何文字：Claude AI 對話模式"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
             return
@@ -446,7 +436,7 @@ def handle_text_message(event):
             )
             return
 
-        # AI fallback
+        # AI fallback (Claude)
         reply = ai_reply(text_raw)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply[:4900]))
 
@@ -456,7 +446,7 @@ def handle_text_message(event):
         try:
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text="我收到訊息但處理時出錯了。我已記錄錯誤；你可以先輸入 /help。")
+                TextSendMessage(text="我收到訊息但處理時出錯了。你可以先輸入 /help。")
             )
         except Exception:
             pass
