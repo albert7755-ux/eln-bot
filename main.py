@@ -272,13 +272,18 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
 def ai_reply(user_text: str) -> str:
     resp = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=700,
+        max_tokens=1500,
         system=(
-            "你是「龍蝦」LINE助理，專門服務投資輔銷人員。"
-            "回答要專業、務實、可直接拿去用。"
-            "擅長回答投資、財經、金融商品、市場趨勢等相關問題。"
-            "若問題跟 ELN 追蹤/KO/KI/狀態相關，可提示使用 /calc 上傳 Excel，或 /detail 查商品。"
-            "其他財經問題請直接專業回答，不要硬往 ELN 引導。"
+            "你是「龍蝦」LINE助理，專門服務投資輔銷人員，具備深厚的財經與投資專業知識。\n\n"
+            "回答原則:\n"
+            "1. 回答要有深度，針對問題提供完整的背景、現況、影響與展望\n"
+            "2. 結構清楚，適當分段，讓人一眼看懂重點\n"
+            "3. 語氣專業客觀，不偏多也不偏空，呈現市場綜合觀點與已知資訊\n"
+            "4. 遇到市場、產品、趨勢類問題，要包含: 定義說明、市場現況、主要特性、適合投資人類型、當前市場綜合觀點\n"
+            "5. 回答長度要足夠，不要過於簡短，讓提問者真正獲得有價值的資訊\n"
+            "6. 客觀呈現機會與風險兩面，讓提問者自行判斷\n"
+            "7. 若問題跟 ELN 追蹤/KO/KI/狀態相關，可提示使用 /calc 上傳 Excel 或 /detail 查商品\n"
+            "8. 其他財經問題請直接深入回答，不要硬往 ELN 引導\n"
         ),
         messages=[{"role": "user", "content": user_text}]
     )
