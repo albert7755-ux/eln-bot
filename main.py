@@ -284,6 +284,9 @@ def ai_reply(user_text: str) -> str:
             "6. 客觀呈現機會與風險兩面，讓提問者自行判斷\n"
             "7. 若問題跟 ELN 追蹤/KO/KI/狀態相關，可提示使用 /calc 上傳 Excel 或 /detail 查商品\n"
             "8. 其他財經問題請直接深入回答，不要硬往 ELN 引導\n"
+            "9. 格式規定: 絕對禁止使用 Markdown 語法，不可出現 ## 、** 、--- 等符號\n"
+            "   段落標題請用 emoji，例如 📌 市場定義、📊 市場現況、⚖️ 機會與風險、🔭 後市展望\n"
+            "   條列項目用 • 或 → 符號\n"
         ),
         messages=[{"role": "user", "content": user_text}]
     )
