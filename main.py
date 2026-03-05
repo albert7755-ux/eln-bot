@@ -333,11 +333,50 @@ def handle_text_message(event):
                 "/detail <商品代號>：查單筆完整 KO/KI/狀態（支援模糊）\n"
                 "/list：列出目前可查商品代號（前50）\n"
                 "/market <新聞+標的>：自動生成客戶推播文案\n"
+                "/daily：立即產出最新財經日報\n"
+                "/daily cache：回傳今天早上已產生的日報\n"
                 "/settarget：把目前聊天室設為預設推播對象\n"
                 "\n"
                 "其他任何文字：Claude AI 對話模式"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
+            return
+
+        # DAILY REPORT
+        if cmd.startswith("daily"):
+            parts = text_raw.split(" ", 1)
+            use_cache = len(parts) > 1 and parts[1].strip().lower() == "cache"
+
+            if use_cache:
+                try:
+                    from sqlalchemy import create_engine, text as sa_text
+                    db_url = DATABASE_URL
+                    if db_url.startswith("postgres://"):
+                        db_url = db_url.replace("postgres://", "postgresql+psycopg://", 1)
+                    elif db_url.startswith("postgresql://"):
+                        db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+                    eng = create_engine(db_url, pool_pre_ping=True)
+                    with eng.begin() as conn:
+                        row = conn.execute(sa_text("""
+                        SELECT report_text FROM daily_report_cache
+                        ORDER BY created_at DESC LIMIT 1
+                        """)).fetchone()
+                    if row:
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=row[0][:4900]))
+                    else:
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="尚無快取日報，請用 /daily 產生最新版本。"))
+                except Exception as e:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"讀取快取失敗: {e}"))
+                return
+
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="產生中，請稍候約30秒..."))
+            try:
+                from daily_report import generate_report, save_report_to_db
+                report = generate_report()
+                save_report_to_db(report)
+                line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=report[:4900]))
+            except Exception as e:
+                line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"日報產生失敗: {e}"))
             return
 
         # SETTARGET
