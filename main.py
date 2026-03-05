@@ -4,56 +4,41 @@ import json
 import traceback
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-
 from fastapi import FastAPI, Request, HTTPException
-
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
-
 from openai import OpenAI
-
 from sqlalchemy import create_engine, text
-
 from autotracking_core import calculate_from_file
-
+from market_content_generator import generate_market_content
 
 # ==============================
 # ENV
 # ==============================
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # optional
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-DATABASE_URL = os.getenv("DATABASE_URL")  # required for DB memory
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
     raise RuntimeError("Missing LINE env vars: LINE_CHANNEL_SECRET / LINE_CHANNEL_ACCESS_TOKEN")
-
 if not DATABASE_URL:
     raise RuntimeError("Missing env var: DATABASE_URL")
 
-# ---- IMPORTANT: force psycopg3 driver (avoid psycopg2 import) ----
-# Render may provide postgres:// or postgresql://; SQLAlchemy default can pick psycopg2.
-# We force postgresql+psycopg:// to use psycopg3 (psycopg[binary]).
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
 elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
-# If user already set postgresql+psycopg://, keep it.
-
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-
 app = FastAPI()
+
 VERSION = "eln-autotracking-db-v2-2026-03-05"
-
 TZ_TAIPEI = timezone(timedelta(hours=8))
-
 
 # ==============================
 # DB
@@ -69,7 +54,6 @@ def init_db():
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         """))
-
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS eln_detail (
             chat_key TEXT NOT NULL,
@@ -79,7 +63,6 @@ def init_db():
             PRIMARY KEY (chat_key, bond_id)
         );
         """))
-
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS eln_top5 (
             chat_key TEXT NOT NULL,
@@ -89,7 +72,6 @@ def init_db():
             PRIMARY KEY (chat_key, line_no)
         );
         """))
-
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS eln_session (
             chat_key TEXT PRIMARY KEY,
@@ -100,7 +82,6 @@ def init_db():
 
 init_db()
 
-
 def db_set_await(chat_key: str, await_file: bool):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -110,7 +91,6 @@ def db_set_await(chat_key: str, await_file: bool):
         SET await_file=:a, updated_at=NOW()
         """), {"k": chat_key, "a": bool(await_file)})
 
-
 def db_is_await(chat_key: str) -> bool:
     with engine.begin() as conn:
         row = conn.execute(
@@ -118,7 +98,6 @@ def db_is_await(chat_key: str) -> bool:
             {"k": chat_key}
         ).fetchone()
     return bool(row and row[0])
-
 
 def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_map: dict[str, str]):
     with engine.begin() as conn:
@@ -128,21 +107,18 @@ def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_ma
         ON CONFLICT (chat_key) DO UPDATE
         SET summary=:s, updated_at=NOW()
         """), {"k": chat_key, "s": summary})
-
         conn.execute(text("DELETE FROM eln_top5 WHERE chat_key=:k"), {"k": chat_key})
         for i, line in enumerate(top5_lines, start=1):
             conn.execute(text("""
             INSERT INTO eln_top5(chat_key, line_no, text_line, updated_at)
             VALUES (:k, :n, :t, NOW())
             """), {"k": chat_key, "n": i, "t": line})
-
         conn.execute(text("DELETE FROM eln_detail WHERE chat_key=:k"), {"k": chat_key})
         for bond_id, detail in detail_map.items():
             conn.execute(text("""
             INSERT INTO eln_detail(chat_key, bond_id, detail, updated_at)
             VALUES (:k, :b, :d, NOW())
             """), {"k": chat_key, "b": bond_id, "d": detail})
-
 
 def db_get_report(chat_key: str) -> str | None:
     with engine.begin() as conn:
@@ -151,7 +127,6 @@ def db_get_report(chat_key: str) -> str | None:
             {"k": chat_key}
         ).fetchone()
     return row[0] if row else None
-
 
 def db_list_bonds(chat_key: str, limit: int = 50) -> list[str]:
     with engine.begin() as conn:
@@ -164,12 +139,10 @@ def db_list_bonds(chat_key: str, limit: int = 50) -> list[str]:
         """), {"k": chat_key, "lim": int(limit)}).fetchall()
     return [r[0] for r in rows] if rows else []
 
-
 def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, list[str]]:
     q_norm = query.strip().upper()
     if not q_norm:
         return None, None, []
-
     with engine.begin() as conn:
         rows = conn.execute(text("""
         SELECT bond_id
@@ -177,10 +150,8 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
         WHERE chat_key=:k
         """), {"k": chat_key}).fetchall()
     keys = [r[0] for r in rows] if rows else []
-
     if not keys:
         return None, None, []
-
     norm_map = {k.strip().upper(): k for k in keys}
     if q_norm in norm_map:
         real = norm_map[q_norm]
@@ -191,7 +162,6 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
             WHERE chat_key=:k AND bond_id=:b
             """), {"k": chat_key, "b": real}).fetchone()
         return real, (row[0] if row else None), []
-
     hits = [k for k in keys if q_norm in k.strip().upper()]
     if len(hits) == 1:
         real = hits[0]
@@ -204,12 +174,10 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
         return real, (row[0] if row else None), []
     if len(hits) > 1:
         return None, None, hits[:20]
-
     return None, None, keys[:20]
 
-
 # ==============================
-# Optional: store default push target (not required for reply)
+# Optional: store default push target
 # ==============================
 BASE_DIR = Path("/tmp")
 TARGET_FILE = BASE_DIR / "targets.json"
@@ -231,7 +199,6 @@ def load_targets():
 def save_targets(data: dict):
     _write_json(TARGET_FILE, data)
 
-
 # ==============================
 # Health check
 # ==============================
@@ -243,7 +210,6 @@ def root():
 def whoami():
     return {"service": "eln-bot", "version": VERSION, "ai_enabled": bool(client)}
 
-
 # ==============================
 # Chat key
 # ==============================
@@ -254,7 +220,6 @@ def chat_key_of(event) -> str:
         return f"room:{event.source.room_id}"
     return f"user:{event.source.user_id}"
 
-
 # ==============================
 # Adapter: core -> (summary, top5, detail_map)
 # ==============================
@@ -264,13 +229,10 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
         lookback_days=lookback_days,
         notify_ki_daily=notify_ki_daily
     )
-
     df = out.get("results_df")
     report = out.get("report_text", "") or ""
-
     top5_lines: list[str] = []
     detail_map: dict[str, str] = {}
-
     if df is not None and getattr(df, "empty", True) is False:
         top = df.head(5)
         for _, r in top.iterrows():
@@ -278,23 +240,19 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
                 status_first = str(r.get("狀態", "")).splitlines()[0]
             except Exception:
                 status_first = str(r.get("狀態", ""))
-
             top5_lines.append(
                 f"● {r.get('債券代號','-')} {r.get('Type','-')}｜{status_first}"
             )
-
         for _, r in df.iterrows():
             _id = str(r.get("債券代號", "")).strip()
             if not _id:
                 continue
-
             t_details = []
             for c in df.columns:
                 if str(c).endswith("_Detail"):
                     v = r.get(c, "")
                     if v:
                         t_details.append(str(v))
-
             detail_text = (
                 f"【商品】{_id}\n"
                 f"類型: {r.get('Type','-')}\n"
@@ -308,13 +266,10 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
                 + ("\n\n".join(t_details) if t_details else "")
             )
             detail_map[_id] = detail_text
-
     summary = report
     if top5_lines:
         summary += "\n\n【前5筆摘要】\n" + "\n".join(top5_lines)
-
     return summary, top5_lines, detail_map
-
 
 # ==============================
 # AI fallback
@@ -322,7 +277,6 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
 def ai_reply(user_text: str) -> str:
     if not client:
         return "（AI 模式尚未開啟：缺少 OPENAI_API_KEY。你可以輸入 /help，或用 /calc 上傳 Excel。）"
-
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
         temperature=0.35,
@@ -340,7 +294,6 @@ def ai_reply(user_text: str) -> str:
     )
     return (resp.choices[0].message.content or "").strip()
 
-
 # ==============================
 # Webhook endpoint
 # ==============================
@@ -348,14 +301,11 @@ def ai_reply(user_text: str) -> str:
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature")
     body = await request.body()
-
     try:
         handler.handle(body.decode("utf-8"), signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
-
     return "OK"
-
 
 # ==============================
 # Text message handler
@@ -366,7 +316,6 @@ def handle_text_message(event):
         text_raw = (event.message.text or "").strip()
         tl = text_raw.lower().strip()
         ck = chat_key_of(event)
-
         print("[TEXT]", ck, repr(text_raw))
 
         if tl.startswith("/"):
@@ -385,6 +334,7 @@ def handle_text_message(event):
                 "/report：直接顯示最近一次結果（不用重上傳）\n"
                 "/detail <商品代號>：查單筆完整 KO/KI/狀態（不用重上傳，支援模糊）\n"
                 "/list：列出目前可查商品代號（前50）\n"
+                "/market <新聞+標的>：自動生成客戶推播文案\n"
                 "/settarget：把目前聊天室設為預設推播對象\n"
                 "\n"
                 "其他任何文字：會進 AI 對話模式"
@@ -392,24 +342,24 @@ def handle_text_message(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
             return
 
-        # SETTARGET (optional)
+        # SETTARGET
         if cmd == "settarget":
             targets = load_targets()
             if event.source.type == "group":
                 targets["default"] = event.source.group_id
                 targets["default_type"] = "group"
                 save_targets(targets)
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已設定此群組為預設推播對象"))
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已設定此群組為預設推播對象"))
             elif event.source.type == "room":
                 targets["default"] = event.source.room_id
                 targets["default_type"] = "room"
                 save_targets(targets)
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已設定此聊天室為預設推播對象"))
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已設定此聊天室為預設推播對象"))
             else:
                 targets["default"] = event.source.user_id
                 targets["default_type"] = "user"
                 save_targets(targets)
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已設定您為預設推播對象"))
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已設定您為預設推播對象"))
             return
 
         # LIST
@@ -424,7 +374,6 @@ def handle_text_message(event):
 
         # CALC
         if cmd.startswith("calc") or cmd.startswith("clac"):
-            # optional calculator mode: /calc 1+2*3
             parts = raw_cmd.split(" ", 1)
             if len(parts) > 1 and parts[1].strip():
                 expr = parts[1].strip()
@@ -438,7 +387,6 @@ def handle_text_message(event):
                 except Exception:
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text="算式錯誤"))
                     return
-
             db_set_await(ck, True)
             line_bot_api.reply_message(
                 event.reply_token,
@@ -446,7 +394,7 @@ def handle_text_message(event):
             )
             return
 
-        # REPORT (from DB)
+        # REPORT
         if cmd == "report":
             summary = db_get_report(ck)
             if not summary:
@@ -455,20 +403,36 @@ def handle_text_message(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
             return
 
-        # DETAIL (from DB)
+        # MARKET CONTENT
+        if cmd.startswith("market"):
+            parts = text_raw.split(" ", 1)
+            if len(parts) < 2 or not parts[1].strip():
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(
+                        text="請輸入新聞內容和推薦標的\n\n格式範例:\n/market 美股反彈，高盛喊買。\n\n推薦標的: PIMCO收益增長、駿利平衡基金"
+                    )
+                )
+                return
+            news_text = parts[1].strip()
+            content = generate_market_content(news_text)
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=content[:4900])
+            )
+            return
+
+        # DETAIL
         if cmd.startswith("detail"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入：/detail 商品代號（例：/detail U123）"))
                 return
-
             query = parts[1].strip()
             matched_id, detail, candidates = db_find_detail(ck, query)
-
             if detail:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=detail[:4900]))
                 return
-
             if candidates and matched_id is None:
                 sample = "\n".join([f"• {c}" for c in candidates[:20]])
                 line_bot_api.reply_message(
@@ -476,14 +440,13 @@ def handle_text_message(event):
                     TextSendMessage(text=f"請再精準一點，候選代號如下：\n{sample}"[:4900])
                 )
                 return
-
             line_bot_api.reply_message(
                 event.reply_token,
                 TextSendMessage(text="查不到該代號或目前沒有已保存結果。請先 /calc 上傳 Excel。")
             )
             return
 
-        # Non-command => AI
+        # AI fallback
         reply = ai_reply(text_raw)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply[:4900]))
 
@@ -498,7 +461,6 @@ def handle_text_message(event):
         except Exception:
             pass
 
-
 # ==============================
 # File message handler
 # ==============================
@@ -511,7 +473,6 @@ def handle_file_message(event):
         ck = chat_key_of(event)
         filename = getattr(event.message, "file_name", "") or ""
         size = getattr(event.message, "file_size", None)
-
         print("[FILE]", ck, filename, size)
 
         if not db_is_await(ck):
@@ -521,25 +482,17 @@ def handle_file_message(event):
             )
             return
 
-        # download
         message_id = event.message.id
         content = line_bot_api.get_message_content(message_id)
-
         tmp_path = UPLOAD_DIR / f"upload_{int(datetime.now(TZ_TAIPEI).timestamp())}.xlsx"
         with open(tmp_path, "wb") as f:
             for chunk in content.iter_content():
                 f.write(chunk)
 
-        # stop await (avoid stuck state)
         db_set_await(ck, False)
-
-        # calculate
         summary, top5_lines, detail_map = run_autotracking(str(tmp_path))
-
-        # persist
         db_save_result(ck, summary, top5_lines, detail_map)
 
-        # reply
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900])
