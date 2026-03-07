@@ -274,28 +274,71 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
 # ==============================
 # AI fallback (Claude)
 # ==============================
-def ai_reply(user_text: str) -> str:
+SYSTEM_PROMPT = (
+    "你是「龍蝦」LINE助理，專門服務投資輔銷人員，具備深厚的財經與投資專業知識。\n\n"
+    "回答原則:\n"
+    "1. 回答要有深度，針對問題提供完整的背景、現況、影響與展望\n"
+    "2. 結構清楚，適當分段，讓人一眼看懂重點\n"
+    "3. 語氣專業客觀，不偏多也不偏空，呈現市場綜合觀點與已知資訊\n"
+    "4. 遇到市場、產品、趨勢類問題，要包含: 定義說明、市場現況、主要特性、適合投資人類型、當前市場綜合觀點\n"
+    "5. 回答長度要足夠，不要過於簡短，讓提問者真正獲得有價值的資訊\n"
+    "6. 客觀呈現機會與風險兩面，讓提問者自行判斷\n"
+    "7. 若問題跟 ELN 追蹤/KO/KI/狀態相關，可提示使用 /calc 上傳 Excel 或 /detail 查商品\n"
+    "8. 其他財經問題請直接深入回答，不要硬往 ELN 引導\n"
+    "9. 格式規定: 絕對禁止使用 Markdown 語法，不可出現 ## 、** 、--- 等符號\n"
+    "   段落標題請用 emoji，例如 📌 市場定義、📊 市場現況、⚖️ 機會與風險、🔭 後市展望\n"
+    "   條列項目用 • 或 → 符號\n"
+)
+
+def get_chat_history(chat_key: str, limit: int = 10) -> list[dict]:
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text("""
+            SELECT role, content FROM chat_history
+            WHERE chat_key = :k
+            ORDER BY created_at DESC
+            LIMIT :n
+            """), {"k": chat_key, "n": limit}).fetchall()
+        return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+    except Exception as e:
+        print(f"get_chat_history error: {e}")
+        return []
+
+def save_chat_history(chat_key: str, role: str, content: str):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+            INSERT INTO chat_history (chat_key, role, content)
+            VALUES (:k, :r, :c)
+            """), {"k": chat_key, "r": role, "c": content[:4000]})
+        with engine.begin() as conn:
+            conn.execute(text("""
+            DELETE FROM chat_history
+            WHERE chat_key = :k
+              AND id NOT IN (
+                SELECT id FROM chat_history
+                WHERE chat_key = :k
+                ORDER BY created_at DESC
+                LIMIT 50
+              )
+            """), {"k": chat_key})
+    except Exception as e:
+        print(f"save_chat_history error: {e}")
+
+def ai_reply(user_text: str, chat_key: str = "") -> str:
+    history = get_chat_history(chat_key) if chat_key else []
+    messages = history + [{"role": "user", "content": user_text}]
     resp = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1500,
-        system=(
-            "你是「龍蝦」LINE助理，專門服務投資輔銷人員，具備深厚的財經與投資專業知識。\n\n"
-            "回答原則:\n"
-            "1. 回答要有深度，針對問題提供完整的背景、現況、影響與展望\n"
-            "2. 結構清楚，適當分段，讓人一眼看懂重點\n"
-            "3. 語氣專業客觀，不偏多也不偏空，呈現市場綜合觀點與已知資訊\n"
-            "4. 遇到市場、產品、趨勢類問題，要包含: 定義說明、市場現況、主要特性、適合投資人類型、當前市場綜合觀點\n"
-            "5. 回答長度要足夠，不要過於簡短，讓提問者真正獲得有價值的資訊\n"
-            "6. 客觀呈現機會與風險兩面，讓提問者自行判斷\n"
-            "7. 若問題跟 ELN 追蹤/KO/KI/狀態相關，可提示使用 /calc 上傳 Excel 或 /detail 查商品\n"
-            "8. 其他財經問題請直接深入回答，不要硬往 ELN 引導\n"
-            "9. 格式規定: 絕對禁止使用 Markdown 語法，不可出現 ## 、** 、--- 等符號\n"
-            "   段落標題請用 emoji，例如 📌 市場定義、📊 市場現況、⚖️ 機會與風險、🔭 後市展望\n"
-            "   條列項目用 • 或 → 符號\n"
-        ),
-        messages=[{"role": "user", "content": user_text}]
+        system=SYSTEM_PROMPT,
+        messages=messages
     )
-    return (resp.content[0].text or "").strip()
+    reply = (resp.content[0].text or "").strip()
+    if chat_key:
+        save_chat_history(chat_key, "user", user_text)
+        save_chat_history(chat_key, "assistant", reply)
+    return reply
 
 # ==============================
 # Webhook endpoint
@@ -701,7 +744,7 @@ def handle_text_message(event):
             return
 
         # AI fallback (Claude)
-        reply = ai_reply(text_raw)
+        reply = ai_reply(text_raw, chat_key=ck)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply[:4900]))
 
     except Exception as e:
