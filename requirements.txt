@@ -14,3 +14,7 @@ pytz
 pdfplumber
 python-docx
 python-pptx
+google-auth
+google-auth-oauthlib
+google-api-python-client
+reportlab
