@@ -562,6 +562,90 @@ def handle_text_message(event):
                 ))
             return
 
+        # ALERT 價格警示
+        if cmd.startswith("alert"):
+            parts = text_raw.split(" ")
+            sub = parts[1].strip().lower() if len(parts) > 1 else ""
+
+            # /alert list
+            if sub == "list":
+                with engine.begin() as conn:
+                    rows = conn.execute(text("""\n                    SELECT id, symbol, alert_type, condition, target_value, ma_period\n                    FROM price_alerts\n                    WHERE chat_key=:k AND triggered=FALSE\n                    ORDER BY id ASC\n                    """), {"k": ck}).fetchall()
+                if not rows:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有任何警示設定。\n\n新增範例：\n/alert add AAPL 200 above\n/alert add AAPL ma20 below"))
+                    return
+                msg = "目前警示清單：\n"
+                for r in rows:
+                    rid, sym, atype, cond, tval, maper = r
+                    cond_str = "漲到" if cond == "above" else "跌到"
+                    cross_str = "漲破" if cond == "above" else "跌破"
+                    if atype == "price":
+                        msg += f"#{rid} {sym} {cond_str} {tval}\n"
+                    else:
+                        msg += f"#{rid} {sym} {cross_str} MA{maper}\n"
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg.strip()))
+                return
+
+            # /alert del <id>
+            if sub == "del":
+                if len(parts) < 3:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入要刪除的編號\n範例：/alert del 1"))
+                    return
+                try:
+                    del_id = int(parts[2])
+                    with engine.begin() as conn:
+                        conn.execute(text("DELETE FROM price_alerts WHERE id=:i AND chat_key=:k"), {"i": del_id, "k": ck})
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 警示 #{del_id} 已刪除"))
+                except Exception as e:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"刪除失敗：{e}"))
+                return
+
+            # /alert add <symbol> <target/maXX> <above/below>
+            if sub == "add":
+                # 格式：/alert add AAPL 200 above
+                #       /alert add AAPL ma20 below
+                if len(parts) < 5:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text="格式說明：\n\n目標價：\n/alert add AAPL 200 above\n/alert add 0050.TW 150 below\n/alert add USDTWD=X 32.5 below\n\n均線突破：\n/alert add AAPL ma20 below\n/alert add 2330.TW ma60 above"
+                    ))
+                    return
+                symbol = parts[2].upper()
+                value_str = parts[3].lower()
+                direction = parts[4].lower()
+
+                if direction not in ("above", "below"):
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="方向請輸入 above（漲到/漲破）或 below（跌到/跌破）"))
+                    return
+
+                try:
+                    if value_str.startswith("ma"):
+                        # 均線警示
+                        ma_period = int(value_str[2:])
+                        with engine.begin() as conn:
+                            conn.execute(text("""\n                            INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, ma_period)\n                            VALUES (:k, :s, 'ma', :c, :m)\n                            """), {"k": ck, "s": symbol, "c": direction, "m": ma_period})
+                        cross = "漲破" if direction == "above" else "跌破"
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                            text=f"✅ 均線警示已設定！\n標的：{symbol}\n條件：{cross} MA{ma_period}\n\n當條件成立時龍蝦會通知你 🔔"
+                        ))
+                    else:
+                        # 目標價警示
+                        target = float(value_str)
+                        with engine.begin() as conn:
+                            conn.execute(text("""\n                            INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, target_value)\n                            VALUES (:k, :s, 'price', :c, :t)\n                            """), {"k": ck, "s": symbol, "c": direction, "t": target})
+                        cond_str = "漲到" if direction == "above" else "跌到"
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                            text=f"✅ 價格警示已設定！\n標的：{symbol}\n條件：{cond_str} {target}\n\n當條件成立時龍蝦會通知你 🔔"
+                        ))
+                except Exception as e:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"設定失敗：{e}"))
+                return
+
+            # /alert 說明
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="價格警示指令：\n/alert add <標的> <目標價/均線> <above/below>\n/alert list → 查看清單\n/alert del <編號> → 刪除\n\n範例：\n/alert add AAPL 200 above\n/alert add 2330.TW ma20 below\n/alert add USDTWD=X 32.5 below"
+            ))
+            return
+
         # NEWS PDF
         if cmd == "news pdf" or cmd == "news":
             from news_fetcher import generate_news_report
