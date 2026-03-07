@@ -350,7 +350,8 @@ def handle_text_message(event):
                     "/detail <商品代號>：查單筆完整 KO/KI/狀態（支援模糊）\n"
                     "/list：列出目前可查商品代號（前50）\n"
                     "/market <新聞+標的>：自動生成客戶推播文案\n"
-                    "/daily：立即產出最新財經日報\n"
+                    "/pdf daily：產生今日財經日報 PDF\n"
+                    "/pdf market <內容>：產生市場觀點 PDF\n"
                     "/daily cache：回傳今天早上已產生的日報\n"
                     "/settarget：把目前聊天室設為預設推播對象\n"
                     "\n"
@@ -474,6 +475,41 @@ def handle_text_message(event):
                 event.reply_token,
                 TextSendMessage(text=content[:4900])
             )
+            return
+
+        # PDF 生成
+        if cmd.startswith("pdf"):
+            from pdf_generator import create_and_upload_pdf
+            parts = text_raw.split(" ", 2)
+            sub = parts[1].strip().lower() if len(parts) > 1 else ""
+
+            if sub == "daily":
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="產生財經日報 PDF 中，請稍候約30秒..."))
+                try:
+                    from daily_report import generate_report
+                    report = generate_report()
+                    link = create_and_upload_pdf("daily", report)
+                    line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📄 財經日報 PDF 已產生！\n\n{link}"))
+                except Exception as e:
+                    line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"PDF 產生失敗: {e}"))
+                return
+
+            if sub == "market":
+                if len(parts) < 3 or not parts[2].strip():
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入內容\n範例：/pdf market 美股反彈，推薦PIMCO"))
+                    return
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="產生市場觀點 PDF 中，請稍候..."))
+                try:
+                    content = generate_market_content(parts[2].strip())
+                    link = create_and_upload_pdf("market", content)
+                    line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📄 市場觀點 PDF 已產生！\n\n{link}"))
+                except Exception as e:
+                    line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"PDF 產生失敗: {e}"))
+                return
+
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="PDF 指令用法：\n/pdf daily → 財經日報 PDF\n/pdf market <內容> → 市場觀點 PDF"
+            ))
             return
 
         # DETAIL
@@ -670,6 +706,16 @@ def handle_file_message(event):
                 ck.split(":", 1)[1],
                 TextSendMessage(text=analysis[:4900])
             )
+            # 自動產生PDF
+            try:
+                from pdf_generator import create_and_upload_pdf
+                link = create_and_upload_pdf("analysis", analysis, filename)
+                line_bot_api.push_message(
+                    ck.split(":", 1)[1],
+                    TextSendMessage(text=f"📄 分析報告 PDF：\n{link}")
+                )
+            except Exception as e:
+                print(f"PDF upload error: {e}")
             return
 
         # 不支援的格式
