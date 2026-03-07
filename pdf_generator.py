@@ -19,11 +19,13 @@ from googleapiclient.http import MediaFileUpload
 TZ_TAIPEI = pytz.timezone("Asia/Taipei")
 
 # 註冊中文字型
+pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
 pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
 pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
 
-FONT_NORMAL = "STSong-Light"
-FONT_BOLD = "STSong-Light"
+FONT_NORMAL = "HeiseiKakuGo-W5"
+FONT_BOLD = "HeiseiKakuGo-W5"
 
 # ==============================
 # Google Drive 上傳
