@@ -38,10 +38,14 @@ def init_db():
             condition TEXT NOT NULL,
             target_value FLOAT,
             ma_period INT,
-            triggered BOOLEAN NOT NULL DEFAULT FALSE,
+            deleted BOOLEAN NOT NULL DEFAULT FALSE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             triggered_at TIMESTAMPTZ
         );
+        -- 相容處理
+        ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS triggered_at TIMESTAMPTZ;
+        ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS trigger_count INT NOT NULL DEFAULT 0;
         """))
 
 # ══════════════════════════════
@@ -74,27 +78,34 @@ def get_ma(symbol: str, period: int) -> float | None:
 # 取得所有未觸發的警示
 # ══════════════════════════════
 def get_active_alerts() -> list[dict]:
+    """撈出所有警示：未刪除、今天尚未觸發、觸發次數未超過2次"""
     with engine.begin() as conn:
         rows = conn.execute(text("""
-        SELECT id, chat_key, symbol, alert_type, condition, target_value, ma_period
+        SELECT id, chat_key, symbol, alert_type, condition, target_value, ma_period, trigger_count
         FROM price_alerts
-        WHERE triggered = FALSE
+        WHERE deleted = FALSE
+          AND trigger_count < 2
+          AND (triggered_at IS NULL OR triggered_at < NOW() - INTERVAL '1 day')
         ORDER BY created_at ASC
         """)).fetchall()
     return [
         {
             "id": r[0], "chat_key": r[1], "symbol": r[2],
             "alert_type": r[3], "condition": r[4],
-            "target_value": r[5], "ma_period": r[6]
+            "target_value": r[5], "ma_period": r[6],
+            "trigger_count": r[7]
         }
         for r in rows
     ]
 
 def mark_triggered(alert_id: int):
+    """累加觸發次數，達2次自動刪除"""
     with engine.begin() as conn:
         conn.execute(text("""
         UPDATE price_alerts
-        SET triggered = TRUE, triggered_at = NOW()
+        SET triggered_at = NOW(),
+            trigger_count = trigger_count + 1,
+            deleted = CASE WHEN trigger_count + 1 >= 2 THEN TRUE ELSE FALSE END
         WHERE id = :id
         """), {"id": alert_id})
 
