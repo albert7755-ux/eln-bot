@@ -631,7 +631,7 @@ def handle_text_message(event):
             # /alert list
             if sub == "list":
                 with engine.begin() as conn:
-                    rows = conn.execute(text("""\n                    SELECT id, symbol, alert_type, condition, target_value, ma_period\n                    FROM price_alerts\n                    WHERE chat_key=:k AND triggered=FALSE\n                    ORDER BY id ASC\n                    """), {"k": ck}).fetchall()
+                    rows = conn.execute(text("""\n                    SELECT id, symbol, alert_type, condition, target_value, ma_period\n                    FROM price_alerts\n                    WHERE chat_key=:k AND deleted=FALSE\n                    ORDER BY id ASC\n                    """), {"k": ck}).fetchall()
                 if not rows:
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有任何警示設定。\n\n新增範例：\n/alert add AAPL 200 above\n/alert add AAPL ma20 below"))
                     return
@@ -647,15 +647,37 @@ def handle_text_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg.strip()))
                 return
 
-            # /alert del <id>
+            # /alert del <id> 或 /alert del（顯示清單讓用戶選）
             if sub == "del":
                 if len(parts) < 3:
-                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入要刪除的編號\n範例：/alert del 1"))
+                    # 沒給編號 → 先顯示清單
+                    with engine.begin() as conn:
+                        rows = conn.execute(text("""
+                        SELECT id, symbol, alert_type, condition, target_value, ma_period, trigger_count
+                        FROM price_alerts
+                        WHERE chat_key=:k AND deleted=FALSE
+                        ORDER BY id ASC
+                        """), {"k": ck}).fetchall()
+                    if not rows:
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有任何警示設定。"))
+                        return
+                    msg = "請輸入要刪除的編號：\n\n"
+                    for r in rows:
+                        rid, sym, atype, cond, tval, maper, tcount = r
+                        cond_str = "漲到" if cond == "above" else "跌到"
+                        cross_str = "漲破" if cond == "above" else "跌破"
+                        remain = 2 - (tcount or 0)
+                        if atype == "price":
+                            msg += f"#{rid} {sym} {cond_str} {tval}（剩餘{remain}次）\n"
+                        else:
+                            msg += f"#{rid} {sym} {cross_str} MA{maper}（剩餘{remain}次）\n"
+                    msg += "\n輸入：/alert del <編號>"
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg.strip()))
                     return
                 try:
                     del_id = int(parts[2])
                     with engine.begin() as conn:
-                        conn.execute(text("DELETE FROM price_alerts WHERE id=:i AND chat_key=:k"), {"i": del_id, "k": ck})
+                        conn.execute(text("UPDATE price_alerts SET deleted=TRUE WHERE id=:i AND chat_key=:k"), {"i": del_id, "k": ck})
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 警示 #{del_id} 已刪除"))
                 except Exception as e:
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"刪除失敗：{e}"))
