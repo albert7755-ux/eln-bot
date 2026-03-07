@@ -414,8 +414,9 @@ def handle_text_message(event):
                     "─────────────────\n"
                     "⚙️ 其他\n"
                     "/settarget：設定推播對象\n"
-                    "其他文字：Claude AI 對話模式\n"
-                    "上傳檔案：自動分析（PDF/Excel/Word/PPT）"
+                    "其他文字：Claude AI 對話模式（有記憶上下文）\n"
+                    "上傳檔案：自動分析（PDF/Excel/Word/PPT）\n"
+                    "/forget：清除龍蝦對話記憶"
                 )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
             return
@@ -741,6 +742,16 @@ def handle_text_message(event):
                 event.reply_token,
                 TextSendMessage(text="查不到該代號或目前沒有已保存結果。請先 /calc 上傳 Excel。")
             )
+            return
+
+        # FORGET 清除記憶
+        if cmd == "forget":
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("DELETE FROM chat_history WHERE chat_key = :k"), {"k": ck})
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🧹 記憶已清除！龍蝦從頭開始囉。"))
+            except Exception as e:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"清除失敗：{e}"))
             return
 
         # AI fallback (Claude)
