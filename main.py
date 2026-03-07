@@ -60,6 +60,7 @@ def init_db():
             chat_key TEXT NOT NULL,
             bond_id TEXT NOT NULL,
             detail TEXT NOT NULL,
+            agent_name TEXT,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (chat_key, bond_id)
         );
@@ -100,7 +101,7 @@ def db_is_await(chat_key: str) -> bool:
         ).fetchone()
     return bool(row and row[0])
 
-def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_map: dict[str, str]):
+def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_map: dict[str, str], agent_name_map: dict[str, str] = {}):
     with engine.begin() as conn:
         conn.execute(text("""
         INSERT INTO eln_last_report(chat_key, summary, updated_at)
@@ -116,10 +117,11 @@ def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_ma
             """), {"k": chat_key, "n": i, "t": line})
         conn.execute(text("DELETE FROM eln_detail WHERE chat_key=:k"), {"k": chat_key})
         for bond_id, detail in detail_map.items():
+            agent = agent_name_map.get(bond_id, "-")
             conn.execute(text("""
-            INSERT INTO eln_detail(chat_key, bond_id, detail, updated_at)
-            VALUES (:k, :b, :d, NOW())
-            """), {"k": chat_key, "b": bond_id, "d": detail})
+            INSERT INTO eln_detail(chat_key, bond_id, detail, agent_name, updated_at)
+            VALUES (:k, :b, :d, :a, NOW())
+            """), {"k": chat_key, "b": bond_id, "d": detail, "a": agent})
 
 def db_get_report(chat_key: str) -> str | None:
     with engine.begin() as conn:
@@ -129,16 +131,16 @@ def db_get_report(chat_key: str) -> str | None:
         ).fetchone()
     return row[0] if row else None
 
-def db_list_bonds(chat_key: str, limit: int = 50) -> list[str]:
+def db_list_bonds(chat_key: str, limit: int = 50) -> list[tuple[str, str]]:
     with engine.begin() as conn:
         rows = conn.execute(text("""
-        SELECT bond_id
+        SELECT bond_id, COALESCE(agent_name, '-')
         FROM eln_detail
         WHERE chat_key=:k
         ORDER BY bond_id ASC
         LIMIT :lim
         """), {"k": chat_key, "lim": int(limit)}).fetchall()
-    return [r[0] for r in rows] if rows else []
+    return [(r[0], r[1]) for r in rows] if rows else []
 
 def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, list[str]]:
     q_norm = query.strip().upper()
@@ -228,6 +230,7 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
     report = out.get("report_text", "") or ""
     top5_lines: list[str] = []
     detail_map: dict[str, str] = {}
+    agent_name_map: dict[str, str] = {}
     if df is not None and getattr(df, "empty", True) is False:
         top = df.head(5)
         for _, r in top.iterrows():
@@ -248,10 +251,12 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
                     v = r.get(c, "")
                     if v:
                         t_details.append(str(v))
+            agent = str(r.get("Name", "-") or "-").strip()
+            agent_name_map[_id] = agent
             detail_text = (
                 f"【商品】{_id}\n"
                 f"類型: {r.get('Type','-')}\n"
-                f"客戶: {r.get('Name','-')}\n"
+                f"理專: {agent}\n"
                 f"交易日: {r.get('交易日','-')}\n"
                 f"KO設定: {r.get('KO設定','-')}\n"
                 f"最差表現: {r.get('最差表現','-')}\n"
@@ -264,7 +269,7 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
     summary = report
     if top5_lines:
         summary += "\n\n【前5筆摘要】\n" + "\n".join(top5_lines)
-    return summary, top5_lines, detail_map
+    return summary, top5_lines, detail_map, agent_name_map
 
 # ==============================
 # AI fallback (Claude)
@@ -314,6 +319,7 @@ def handle_text_message(event):
         text_raw = (event.message.text or "").strip()
         tl = text_raw.lower().strip()
         ck = chat_key_of(event)
+        is_group = event.source.type in ("group", "room")
         print("[TEXT]", ck, repr(text_raw))
 
         if tl.startswith("/"):
@@ -323,22 +329,33 @@ def handle_text_message(event):
             cmd = tl
             raw_cmd = text_raw
 
-        # HELP
+        # 群組模式：非指令訊息直接靜音
+        if is_group and not tl.startswith("/"):
+            return
+
+        # 群組模式 HELP：只顯示查詢相關指令
         if cmd in ("help", "?", "指令", "幫助"):
-            msg = (
-                "可用指令：\n"
-                "/help\n"
-                "/calc：提示你上傳 Excel（收到檔案後自動計算並永久保存）\n"
-                "/report：直接顯示最近一次結果（不用重上傳）\n"
-                "/detail <商品代號>：查單筆完整 KO/KI/狀態（支援模糊）\n"
-                "/list：列出目前可查商品代號（前50）\n"
-                "/market <新聞+標的>：自動生成客戶推播文案\n"
-                "/daily：立即產出最新財經日報\n"
-                "/daily cache：回傳今天早上已產生的日報\n"
-                "/settarget：把目前聊天室設為預設推播對象\n"
-                "\n"
-                "其他任何文字：Claude AI 對話模式"
-            )
+            if is_group:
+                msg = (
+                    "群組可用指令：\n"
+                    "/detail <商品代號>：查詢標的完整狀況（支援模糊搜尋）\n"
+                    "/list：列出所有可查商品代號\n"
+                )
+            else:
+                msg = (
+                    "可用指令：\n"
+                    "/help\n"
+                    "/calc：提示你上傳 Excel（收到檔案後自動計算並永久保存）\n"
+                    "/report：直接顯示最近一次結果（不用重上傳）\n"
+                    "/detail <商品代號>：查單筆完整 KO/KI/狀態（支援模糊）\n"
+                    "/list：列出目前可查商品代號（前50）\n"
+                    "/market <新聞+標的>：自動生成客戶推播文案\n"
+                    "/daily：立即產出最新財經日報\n"
+                    "/daily cache：回傳今天早上已產生的日報\n"
+                    "/settarget：把目前聊天室設為預設推播對象\n"
+                    "\n"
+                    "其他任何文字：Claude AI 對話模式"
+                )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
             return
 
@@ -405,7 +422,7 @@ def handle_text_message(event):
             if not bonds:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無已保存結果。請先 /calc 上傳 Excel。"))
                 return
-            msg = "目前可查商品代號（前50）：\n" + "\n".join(bonds)
+            msg = "目前可查商品代號：\n" + "\n".join([f"• {bond_id} - {agent}" for bond_id, agent in bonds])
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg[:4900]))
             return
 
@@ -627,8 +644,8 @@ def handle_file_message(event):
         # ELN 模式：有先打 /calc 且是 Excel
         if ext in (".xlsx", ".xls") and db_is_await(ck):
             db_set_await(ck, False)
-            summary, top5_lines, detail_map = run_autotracking(str(tmp_path))
-            db_save_result(ck, summary, top5_lines, detail_map)
+            summary, top5_lines, detail_map, agent_name_map = run_autotracking(str(tmp_path))
+            db_save_result(ck, summary, top5_lines, detail_map, agent_name_map)
             line_bot_api.reply_message(
                 event.reply_token,
                 TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900])
