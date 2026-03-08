@@ -184,9 +184,43 @@ def generate_report() -> str:
 def main():
     report = generate_report()
     save_report_to_db(report)
-    print("Sending to LINE...")
+    print("Sending daily report to LINE...")
     send_line_message(report)
-    print("Done!")
+    print("Daily report done!")
+
+    # 自動產生新聞摘要PDF
+    try:
+        print("Fetching news and generating PDF...")
+        from news_fetcher import generate_news_report
+        from pdf_generator import create_and_upload_pdf
+        from linebot import LineBotApi
+        from linebot.models import TextSendMessage
+        news_report = generate_news_report()
+        link = create_and_upload_pdf("news", news_report)
+        _api = LineBotApi(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", ""))
+        _user_id = os.environ.get("LINE_USER_ID", "")
+        _api.push_message(_user_id, TextSendMessage(text=f"📰 今日財經新聞摘要 PDF\n\n{link}"))
+        print("News PDF sent!")
+    except Exception as e:
+        print(f"News PDF error: {e}")
+
+def send_email_summary():
+    """早上推播郵件摘要"""
+    from linebot import LineBotApi
+    from linebot.models import TextSendMessage
+    line_bot_api = LineBotApi(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN",""))
+    user_id = os.environ.get("LINE_USER_ID","")
+    if not user_id:
+        print("Missing LINE_USER_ID")
+        return
+    try:
+        from gmail_manager import daily_email_summary
+        summary = daily_email_summary()
+        line_bot_api.push_message(user_id, TextSendMessage(text=summary[:4900]))
+        print("Email summary sent!")
+    except Exception as e:
+        print(f"Email summary error: {e}")
 
 if __name__ == "__main__":
     main()
+    send_email_summary()
