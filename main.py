@@ -88,6 +88,15 @@ def init_db():
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         """))
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id SERIAL PRIMARY KEY,
+            chat_key TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """))
 init_db()
 
 def db_set_await(chat_key: str, await_file: bool):
