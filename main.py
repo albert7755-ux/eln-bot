@@ -523,7 +523,7 @@ def handle_text_message(event):
                     "/alert del <編號>：刪除警示\n"
                     "-----------------\n"
                     "📸 照片分類\n"
-                    "/sortphoto：整理 Dropbox 照片\n"
+                    "/sortphoto <資料夾>：整理 Dropbox 照片\n"
                     "-----------------\n"
                     "⚙️ 其他\n"
                     "/settarget：設定推播對象\n"
