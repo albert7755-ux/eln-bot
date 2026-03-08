@@ -981,6 +981,50 @@ def analyze_image_with_claude(image_data: bytes, media_type: str) -> str:
     )
     return (resp.content[0].text or "").strip()
 
+def transcribe_audio(file_path: str) -> str:
+    import json as _json
+    from google.cloud import speech
+    from google.oauth2 import service_account
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+    creds_dict = _json.loads(creds_json)
+    credentials = service_account.Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    client = speech.SpeechClient(credentials=credentials)
+    with open(file_path, "rb") as f:
+        audio_data = f.read()
+    audio = speech.RecognitionAudio(content=audio_data)
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.MP3,
+        sample_rate_hertz=44100,
+        language_code="zh-TW",
+        alternative_language_codes=["en-US"],
+        enable_automatic_punctuation=True,
+    )
+    response = client.recognize(config=config, audio=audio)
+    transcript = ""
+    for result in response.results:
+        transcript += result.alternatives[0].transcript + "\n"
+    return transcript.strip()
+
+def summarize_transcript(transcript: str) -> str:
+    prompt = (
+        "以下是一段錄音的逐字稿：\n\n"
+        f"{transcript[:6000]}\n\n"
+        "請幫我：\n"
+        "1. 整理成完整逐字稿（修正標點符號）\n"
+        "2. 條列出5-8個重點摘要\n"
+        "3. 如有待辦事項或結論，特別標示\n\n"
+        "格式規定: 不使用 Markdown 符號，標題用 emoji，條列用 •"
+    )
+    resp = claude_client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return (resp.content[0].text or "").strip()
+
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file_message(event):
     try:
@@ -1000,6 +1044,19 @@ def handle_file_message(event):
             db_save_result(ck, summary, top5_lines, detail_map, agent_name_map)
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900]))
             return
+        if ext in (".m4a", ".mp3", ".wav", ".ogg"):
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="收到錄音檔！正在轉文字中，請稍候約30秒..."))
+            try:
+                transcript = transcribe_audio(str(tmp_path))
+                if not transcript:
+                    line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text="語音辨識失敗，請確認錄音檔格式是否正確。"))
+                    return
+                summary = summarize_transcript(transcript)
+                line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=summary[:4900]))
+            except Exception as e:
+                line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"語音轉文字失敗：{e}"))
+            return
+
         if ext in (".xlsx", ".xls", ".pdf", ".docx", ".pptx"):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"收到！正在分析 {filename}，請稍候..."))
             text = extract_text_from_file(str(tmp_path), filename)
