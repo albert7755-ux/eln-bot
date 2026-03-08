@@ -857,15 +857,24 @@ def handle_text_message(event):
             return
 
         # SORT PHOTO
-        if cmd == "sortphoto":
+        if cmd.startswith("sortphoto"):
             token = DROPBOX_TOKEN
             if not token:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="DROPBOX_TOKEN 尚未設定，請聯絡管理員。"))
                 return
+            parts = text_raw.split(" ", 1)
+            if len(parts) > 1 and parts[1].strip():
+                source = parts[1].strip()
+                if source == "/":
+                    source = ""
+                elif not source.startswith("/"):
+                    source = "/" + source
+            else:
+                source = PHOTO_SOURCE_FOLDER
             line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="開始整理照片！\n來源：{}\n目標：{}\n\n完成後會通知你 📸".format(PHOTO_SOURCE_FOLDER, PHOTO_DEST_FOLDER)
+                text="開始整理照片！\n來源：{}\n目標：{}\n\n完成後會通知你 📸".format(source if source else "根目錄", PHOTO_DEST_FOLDER)
             ))
-            run_photo_sort_and_notify(event.source.user_id, PHOTO_SOURCE_FOLDER, PHOTO_DEST_FOLDER, token)
+            run_photo_sort_and_notify(event.source.user_id, source, PHOTO_DEST_FOLDER, token)
             return
 
         # FORGET
