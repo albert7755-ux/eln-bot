@@ -983,7 +983,8 @@ def analyze_image_with_claude(image_data: bytes, media_type: str) -> str:
 
 def transcribe_audio(file_path: str) -> str:
     import json as _json
-    from google.cloud import speech
+    import uuid
+    from google.cloud import speech, storage
     from google.oauth2 import service_account
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
     creds_dict = _json.loads(creds_json)
@@ -991,10 +992,17 @@ def transcribe_audio(file_path: str) -> str:
         creds_dict,
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
-    client = speech.SpeechClient(credentials=credentials)
-    with open(file_path, "rb") as f:
-        audio_data = f.read()
-    audio = speech.RecognitionAudio(content=audio_data)
+    bucket_name = "eln-bot-audio"
+    blob_name = f"audio_{uuid.uuid4().hex}.m4a"
+    # Upload to GCS
+    storage_client = storage.Client(credentials=credentials)
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    blob.upload_from_filename(file_path)
+    gcs_uri = f"gs://{bucket_name}/{blob_name}"
+    # Transcribe via GCS URI (no size limit)
+    speech_client = speech.SpeechClient(credentials=credentials)
+    audio = speech.RecognitionAudio(uri=gcs_uri)
     config = speech.RecognitionConfig(
         encoding=speech.RecognitionConfig.AudioEncoding.MP3,
         sample_rate_hertz=44100,
@@ -1002,10 +1010,16 @@ def transcribe_audio(file_path: str) -> str:
         alternative_language_codes=["en-US"],
         enable_automatic_punctuation=True,
     )
-    response = client.recognize(config=config, audio=audio)
+    operation = speech_client.long_running_recognize(config=config, audio=audio)
+    response = operation.result(timeout=300)
     transcript = ""
     for result in response.results:
         transcript += result.alternatives[0].transcript + "\n"
+    # Clean up GCS file
+    try:
+        blob.delete()
+    except Exception:
+        pass
     return transcript.strip()
 
 def summarize_transcript(transcript: str) -> str:
