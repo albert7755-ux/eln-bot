@@ -406,6 +406,10 @@ def handle_text_message(event):
                     "/pdf make <內容>：自訂內容 PDF\n"
                     "/report <主題>：投資銀行風格研究報告\n"
                     "─────────────────\n"
+                    "📧 郵件管理\n"
+                    "/mail：今日郵件摘要\n"
+                    "/mail unread：查看未讀重要郵件\n"
+                    "─────────────────\n"
                     "🔔 價格警示\n"
                     "/alert add <標的> <目標價> <above/below>\n"
                     "/alert add <標的> <ma20> <above/below>\n"
@@ -764,6 +768,29 @@ def handle_text_message(event):
                 event.reply_token,
                 TextSendMessage(text="查不到該代號或目前沒有已保存結果。請先 /calc 上傳 Excel。")
             )
+            return
+
+        # MAIL 郵件摘要
+        if cmd.startswith("mail"):
+            parts = text_raw.split(" ", 1)
+            sub = parts[1].strip().lower() if len(parts) > 1 else ""
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="📧 正在讀取郵件並分析中，請稍候..."))
+            try:
+                from gmail_manager import daily_email_summary, get_gmail_service, get_unread_emails, analyze_emails, format_line_message
+                if sub == "unread":
+                    service = get_gmail_service()
+                    emails = get_unread_emails(service, max_results=10)
+                    if not emails:
+                        line_bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text="📧 目前沒有未讀郵件 ✅"))
+                    else:
+                        analysis = analyze_emails(emails)
+                        msg = format_line_message(analysis, emails)
+                        line_bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=msg[:4900]))
+                else:
+                    summary = daily_email_summary()
+                    line_bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=summary[:4900]))
+            except Exception as e:
+                line_bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=f"郵件讀取失敗：{e}"))
             return
 
         # FORGET 清除記憶
