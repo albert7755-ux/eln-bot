@@ -397,6 +397,7 @@ async def callback(request: Request):
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     _bot_api = get_bot_api(event)
+    print(f"[TEXT_HANDLER] event id={id(event)}, bot_api={_bot_api}, map keys={list(_event_bot_map.keys())}")
     try:
         text_raw = (event.message.text or "").strip()
         tl = text_raw.lower().strip()
@@ -1098,7 +1099,9 @@ def handle_image_message(event):
 if agent_handler:
     @agent_handler.add(MessageEvent, message=TextMessage)
     def agent_handle_text(event):
+        print(f"[AGENT] agent_handle_text called, event id={id(event)}, setting agent_line_bot_api")
         _event_bot_map[id(event)] = agent_line_bot_api
+        print(f"[AGENT] map now: {list(_event_bot_map.keys())}")
         try:
             handle_text_message(event)
         finally:
