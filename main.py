@@ -1066,3 +1066,11 @@ def handle_image_message(event):
             )
         except Exception:
             pass
+
+# ==============================
+# 綁定 agent_handler 到同樣的處理器
+# ==============================
+if agent_handler:
+    agent_handler.add(MessageEvent, message=TextMessage)(handle_text_message)
+    agent_handler.add(MessageEvent, message=FileMessage)(handle_file_message)
+    agent_handler.add(MessageEvent, message=ImageMessage)(handle_image_message)
