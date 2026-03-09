@@ -412,6 +412,7 @@ def handle_text_message(event):
                     "/report <主題> client — 客戶推播風格\n"
                     "/report <主題> academic — 學術研究\n"
                     "/report <主題> hybrid — 投銀+研究混合\n"
+                    "/report <主題> custom <說明> — 自訂風格\n"
                     "─────────────────\n"
                     "📄 PDF\n"
                     "/pdf daily — 財經日報 PDF\n"
@@ -617,17 +618,31 @@ def handle_text_message(event):
         # REPORT 研究報告（多種風格）
         if cmd.startswith("report"):
             parts = text_raw.split(" ")
-            style_codes = {"ib", "brief", "client", "academic", "hybrid"}
-            style_names = {"ib":"投資銀行", "brief":"簡報摘要", "client":"客戶推播", "academic":"學術研究", "hybrid":"混合風格"}
+            style_codes = {"ib", "brief", "client", "academic", "hybrid", "custom"}
+            style_names = {"ib":"投資銀行", "brief":"簡報摘要", "client":"客戶推播", "academic":"學術研究", "hybrid":"混合風格", "custom":"自訂風格"}
             style = "ib"
-            if len(parts) > 2 and parts[-1].lower() in style_codes:
+            custom_prompt = ""
+
+            # 偵測 custom：/report <主題> custom <自訂說明>
+            if "custom" in [p.lower() for p in parts[2:]]:
+                custom_idx = next(i for i,p in enumerate(parts) if p.lower() == "custom")
+                topic = " ".join(parts[1:custom_idx]).strip()
+                custom_prompt = " ".join(parts[custom_idx+1:]).strip()
+                style = "custom"
+                if not custom_prompt:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text="自訂風格請在 custom 後面加上說明！\n\n範例：\n/report 台積電展望 custom 請用輕鬆幽默的風格，適合分享給非專業投資人"
+                    ))
+                    return
+            elif len(parts) > 2 and parts[-1].lower() in style_codes:
                 style = parts[-1].lower()
                 topic = " ".join(parts[1:-1]).strip()
             else:
                 topic = " ".join(parts[1:]).strip()
+
             if not topic:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="請輸入報告主題\n\n風格選擇（加在主題後面）：\n預設 → 投資銀行風格\nbrief → 簡報摘要\nclient → 客戶推播\nacademic → 學術研究\nhybrid → 投銀+研究混合\n\n範例：\n/report 私人信貸爆雷對美股的影響\n/report 聯準會降息對債市影響 client\n/report 台積電2026年展望 hybrid"
+                    text="請輸入報告主題\n\n風格選擇（加在主題後面）：\n預設 → 投資銀行\nbrief → 簡報摘要\nclient → 客戶推播\nacademic → 學術研究\nhybrid → 投銀+研究混合\ncustom <說明> → 自訂風格\n\n範例：\n/report 聯準會降息對債市影響\n/report 聯準會降息對債市影響 client\n/report 台積電展望 custom 請用輕鬆幽默的風格，適合分享給非專業投資人"
                 ))
                 return
             _bot_api.reply_message(event.reply_token, TextSendMessage(
@@ -635,7 +650,7 @@ def handle_text_message(event):
             ))
             try:
                 from report_generator import generate_research_report
-                link = generate_research_report(topic, ck.split(":", 1)[1], style=style)
+                link = generate_research_report(topic, ck.split(":", 1)[1], style=style, custom_prompt=custom_prompt)
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
                     text=f"📑 研究報告已完成！\n\n主題：{topic}\n風格：{style_names.get(style,'投資銀行')}\n\n{link}"
                 ))
