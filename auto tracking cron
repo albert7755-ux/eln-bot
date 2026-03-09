@@ -1,0 +1,161 @@
+"""
+auto_tracking_cron.py
+每天早上由 Render Cron Job 執行
+1. 從 Dropbox 下載最新 Excel
+2. 執行 ELN 自動追蹤計算
+3. 更新 Supabase 資料庫
+4. 推播結果到 LINE
+"""
+import os
+import tempfile
+from datetime import datetime, timezone, timedelta
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
+from sqlalchemy import create_engine, text
+import dropbox
+
+TZ_TAIPEI = timezone(timedelta(hours=8))
+
+# 固定的 Dropbox Excel 路徑
+DROPBOX_EXCEL_PATH = "/eln-bot/(發LINE版)ELN 自動追蹤KO、KI、到期狀況v2.xlsx"
+
+def get_env(key):
+    val = os.environ.get(key, "")
+    if not val:
+        raise RuntimeError(f"Missing env var: {key}")
+    return val
+
+def download_from_dropbox(dbx_token: str, dropbox_path: str) -> str:
+    """從 Dropbox 下載 Excel，回傳本地暫存路徑"""
+    dbx = dropbox.Dropbox(dbx_token)
+    _, response = dbx.files_download(dropbox_path)
+    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+    tmp.write(response.content)
+    tmp.close()
+    print(f"Downloaded from Dropbox: {dropbox_path} → {tmp.name}")
+    return tmp.name
+
+def save_result_to_db(engine, chat_key: str, summary: str, top5_lines: list, detail_map: dict, agent_name_map: dict):
+    """儲存計算結果到 Supabase"""
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO eln_last_report(chat_key, summary, updated_at)
+        VALUES (:k, :s, NOW())
+        ON CONFLICT (chat_key) DO UPDATE
+        SET summary=:s, updated_at=NOW()
+        """), {"k": chat_key, "s": summary})
+
+        conn.execute(text("DELETE FROM eln_top5 WHERE chat_key=:k"), {"k": chat_key})
+        for i, line in enumerate(top5_lines, start=1):
+            conn.execute(text("""
+            INSERT INTO eln_top5(chat_key, line_no, text_line, updated_at)
+            VALUES (:k, :n, :t, NOW())
+            """), {"k": chat_key, "n": i, "t": line})
+
+        conn.execute(text("DELETE FROM eln_detail WHERE chat_key=:k"), {"k": chat_key})
+        for bond_id, detail in detail_map.items():
+            agent = agent_name_map.get(bond_id, "-")
+            conn.execute(text("""
+            INSERT INTO eln_detail(chat_key, bond_id, detail, agent_name, updated_at)
+            VALUES (:k, :b, :d, :a, NOW())
+            """), {"k": chat_key, "b": bond_id, "d": detail, "a": agent})
+
+def main():
+    now = datetime.now(TZ_TAIPEI)
+    print(f"[{now.strftime('%Y/%m/%d %H:%M')}] auto_tracking_cron starting...")
+
+    # 環境變數
+    dropbox_token = get_env("DROPBOX_TOKEN")
+    line_token = get_env("LINE_CHANNEL_ACCESS_TOKEN")
+    user_id = get_env("LINE_USER_ID")
+    db_url = get_env("DATABASE_URL")
+
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql+psycopg://", 1)
+    elif db_url.startswith("postgresql://"):
+        db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+    engine = create_engine(db_url, pool_pre_ping=True)
+    line_bot_api = LineBotApi(line_token)
+
+    # chat_key 設定為你的個人 user_id
+    chat_key = f"user:{user_id}"
+
+    try:
+        # 1. 從 Dropbox 下載 Excel
+        print("Downloading Excel from Dropbox...")
+        excel_path = download_from_dropbox(dropbox_token, DROPBOX_EXCEL_PATH)
+
+        # 2. 執行計算
+        print("Running autotracking...")
+        from autotracking_core import calculate_from_file
+        out = calculate_from_file(excel_path, lookback_days=3, notify_ki_daily=True)
+
+        df = out.get("results_df")
+        report = out.get("report_text", "") or ""
+
+        top5_lines = []
+        detail_map = {}
+        agent_name_map = {}
+
+        if df is not None and not df.empty:
+            for _, r in df.head(5).iterrows():
+                try:
+                    status_first = str(r["狀態"]).splitlines()[0] if "狀態" in r.index else ""
+                except Exception:
+                    status_first = ""
+                bond_id = str(r["債券代號"]) if "債券代號" in r.index else "-"
+                ptype = str(r["Type"]) if "Type" in r.index else "-"
+                top5_lines.append(f"● {bond_id} {ptype}｜{status_first}")
+
+            for _, r in df.iterrows():
+                _id = str(r["債券代號"]).strip() if "債券代號" in r.index else ""
+                if not _id or _id == "nan":
+                    continue
+                t_details = []
+                for c in df.columns:
+                    if str(c).endswith("_Detail"):
+                        v = r[c] if c in r.index else ""
+                        if v:
+                            t_details.append(str(v))
+                agent = str(r["Name"] if "Name" in r.index else "-").strip() or "-"
+                agent_name_map[_id] = agent
+                detail_text = (
+                    f"【商品】{_id}\n"
+                    f"類型: {r['Type'] if 'Type' in r.index else '-'}\n"
+                    f"理專: {agent}\n"
+                    f"交易日: {r['交易日'] if '交易日' in r.index else '-'}\n"
+                    f"KO設定: {r['KO設定'] if 'KO設定' in r.index else '-'}\n"
+                    f"最差表現: {r['最差表現'] if '最差表現' in r.index else '-'}\n"
+                    f"----------------\n"
+                    f"{r['狀態'] if '狀態' in r.index else ''}\n"
+                    f"----------------\n"
+                    + ("\n\n".join(t_details) if t_details else "")
+                )
+                detail_map[_id] = detail_text
+
+        summary = report
+        if top5_lines:
+            summary += "\n\n【前5筆摘要】\n" + "\n".join(top5_lines)
+
+        # 3. 存入資料庫
+        print("Saving to database...")
+        save_result_to_db(engine, chat_key, summary, top5_lines, detail_map, agent_name_map)
+        print(f"Saved {len(detail_map)} bonds to DB")
+
+        # 4. 推播到 LINE
+        print("Sending to LINE...")
+        line_bot_api.push_message(user_id, TextSendMessage(text=summary[:4900]))
+        print("Done!")
+
+    except Exception as e:
+        import traceback
+        print(f"Error: {e}")
+        print(traceback.format_exc())
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage(text=f"⚠️ ELN 自動追蹤失敗：{e}"))
+        except Exception:
+            pass
+
+if __name__ == "__main__":
+    main()
