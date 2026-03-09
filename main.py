@@ -351,21 +351,31 @@ def ai_reply(user_text: str, chat_key: str = "") -> str:
 # Webhook endpoint
 # ==============================
 # 用 threading.local 記錄當前是哪個 Bot 在處理
-# 全域變數：當前請求使用的 bot_api
-_active_bot_api = line_bot_api
+# event -> bot_api 對應表
+_event_bot_map: dict = {}
 
-def get_bot_api():
-    return _active_bot_api
+def get_bot_api(event=None):
+    if event is not None:
+        return _event_bot_map.get(id(event), line_bot_api)
+    return line_bot_api
+
+def _handle_with_bot(wh, body_text, signature, bot_api):
+    """用指定的 bot_api 處理 webhook，並在 event 上記錄對應關係"""
+    import json
+    events_data = json.loads(body_text).get("events", [])
+    # 先記錄這批 event 對應的 bot_api（用時間戳當 key）
+    import time
+    marker = str(time.time())
+    _event_bot_map["__pending__"] = (bot_api, marker)
+    wh.handle(body_text, signature)
 
 @app.post("/callback")
 async def callback(request: Request):
-    global _active_bot_api
     signature = request.headers.get("X-Line-Signature")
     body = await request.body()
     body_text = body.decode("utf-8")
     # 先試主Bot（龍蝦）
     try:
-        _active_bot_api = line_bot_api
         handler.handle(body_text, signature)
         return "OK"
     except InvalidSignatureError:
@@ -373,12 +383,10 @@ async def callback(request: Request):
     # 再試第二Bot（ELN Auto-Tracking）
     if agent_handler and agent_line_bot_api:
         try:
-            _active_bot_api = agent_line_bot_api
             agent_handler.handle(body_text, signature)
             return "OK"
         except InvalidSignatureError:
             pass
-    _active_bot_api = line_bot_api
     raise HTTPException(status_code=400, detail="Invalid signature")
 
 # ==============================
@@ -386,7 +394,7 @@ async def callback(request: Request):
 # ==============================
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
-    _bot_api = get_bot_api()
+    _bot_api = get_bot_api(event)
     try:
         text_raw = (event.message.text or "").strip()
         tl = text_raw.lower().strip()
@@ -967,7 +975,7 @@ def analyze_image_with_claude(image_data: bytes, media_type: str) -> str:
 
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file_message(event):
-    _bot_api = get_bot_api()
+    _bot_api = get_bot_api(event)
     try:
         ck = chat_key_of(event)
         filename = getattr(event.message, "file_name", "") or ""
@@ -1048,7 +1056,7 @@ def handle_file_message(event):
 # ==============================
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
-    _bot_api = get_bot_api()
+    _bot_api = get_bot_api(event)
     try:
         ck = chat_key_of(event)
         print("[IMAGE]", ck)
@@ -1088,18 +1096,24 @@ def handle_image_message(event):
 if agent_handler:
     @agent_handler.add(MessageEvent, message=TextMessage)
     def agent_handle_text(event):
-        global _active_bot_api
-        _active_bot_api = agent_line_bot_api
-        handle_text_message(event)
+        _event_bot_map[id(event)] = agent_line_bot_api
+        try:
+            handle_text_message(event)
+        finally:
+            _event_bot_map.pop(id(event), None)
 
     @agent_handler.add(MessageEvent, message=FileMessage)
     def agent_handle_file(event):
-        global _active_bot_api
-        _active_bot_api = agent_line_bot_api
-        handle_file_message(event)
+        _event_bot_map[id(event)] = agent_line_bot_api
+        try:
+            handle_file_message(event)
+        finally:
+            _event_bot_map.pop(id(event), None)
 
     @agent_handler.add(MessageEvent, message=ImageMessage)
     def agent_handle_image(event):
-        global _active_bot_api
-        _active_bot_api = agent_line_bot_api
-        handle_image_message(event)
+        _event_bot_map[id(event)] = agent_line_bot_api
+        try:
+            handle_image_message(event)
+        finally:
+            _event_bot_map.pop(id(event), None)
