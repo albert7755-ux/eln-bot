@@ -371,24 +371,28 @@ def _handle_with_bot(wh, body_text, signature, bot_api):
 
 @app.post("/callback")
 async def callback(request: Request):
+    """龍蝦主Bot的 webhook"""
     signature = request.headers.get("X-Line-Signature")
     body = await request.body()
     body_text = body.decode("utf-8")
-    # 先試主Bot（龍蝦）
     try:
         handler.handle(body_text, signature)
-        print("[CALLBACK] 龍蝦 handler 處理成功")
         return "OK"
     except InvalidSignatureError:
-        print("[CALLBACK] 龍蝦 signature 驗證失敗，改試 ELN Bot")
-    # 再試第二Bot（ELN Auto-Tracking）
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+@app.post("/agent-callback")
+async def agent_callback(request: Request):
+    """ELN Auto-Tracking Bot的 webhook"""
+    signature = request.headers.get("X-Line-Signature")
+    body = await request.body()
+    body_text = body.decode("utf-8")
     if agent_handler and agent_line_bot_api:
         try:
             agent_handler.handle(body_text, signature)
-            print("[CALLBACK] ELN handler 處理成功")
             return "OK"
         except InvalidSignatureError:
-            print("[CALLBACK] ELN signature 也驗證失敗")
+            pass
     raise HTTPException(status_code=400, detail="Invalid signature")
 
 # ==============================
@@ -397,7 +401,6 @@ async def callback(request: Request):
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     _bot_api = get_bot_api(event)
-    print(f"[TEXT_HANDLER] event id={id(event)}, bot_api={_bot_api}, map keys={list(_event_bot_map.keys())}")
     try:
         text_raw = (event.message.text or "").strip()
         tl = text_raw.lower().strip()
@@ -1099,9 +1102,7 @@ def handle_image_message(event):
 if agent_handler:
     @agent_handler.add(MessageEvent, message=TextMessage)
     def agent_handle_text(event):
-        print(f"[AGENT] agent_handle_text called, event id={id(event)}, setting agent_line_bot_api")
         _event_bot_map[id(event)] = agent_line_bot_api
-        print(f"[AGENT] map now: {list(_event_bot_map.keys())}")
         try:
             handle_text_message(event)
         finally:
