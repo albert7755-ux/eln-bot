@@ -33,8 +33,15 @@ if DATABASE_URL.startswith("postgres://"):
 elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
+# 龍蝦主Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# ELN Auto-Tracking Bot（第二組）
+AGENT_LINE_CHANNEL_SECRET = os.getenv("AGENT_LINE_CHANNEL_SECRET")
+AGENT_LINE_CHANNEL_ACCESS_TOKEN = os.getenv("AGENT_LINE_CHANNEL_ACCESS_TOKEN")
+agent_line_bot_api = LineBotApi(AGENT_LINE_CHANNEL_ACCESS_TOKEN) if AGENT_LINE_CHANNEL_ACCESS_TOKEN else None
+agent_handler = WebhookHandler(AGENT_LINE_CHANNEL_SECRET) if AGENT_LINE_CHANNEL_SECRET else None
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 app = FastAPI()
 
@@ -347,11 +354,20 @@ def ai_reply(user_text: str, chat_key: str = "") -> str:
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature")
     body = await request.body()
+    body_text = body.decode("utf-8")
+    # 先試主Bot，再試第二Bot
     try:
-        handler.handle(body.decode("utf-8"), signature)
+        handler.handle(body_text, signature)
+        return "OK"
     except InvalidSignatureError:
-        raise HTTPException(status_code=400, detail="Invalid signature")
-    return "OK"
+        pass
+    if agent_handler:
+        try:
+            agent_handler.handle(body_text, signature)
+            return "OK"
+        except InvalidSignatureError:
+            pass
+    raise HTTPException(status_code=400, detail="Invalid signature")
 
 # ==============================
 # Text message handler
@@ -603,23 +619,30 @@ def handle_text_message(event):
             ))
             return
 
-        # REPORT 投資銀行風格研究報告
+        # REPORT 研究報告（多種風格）
         if cmd.startswith("report"):
-            parts = text_raw.split(" ", 1)
-            topic = parts[1].strip() if len(parts) > 1 else ""
+            parts = text_raw.split(" ")
+            style_codes = {"ib", "brief", "client", "academic", "hybrid"}
+            style_names = {"ib":"投資銀行", "brief":"簡報摘要", "client":"客戶推播", "academic":"學術研究", "hybrid":"混合風格"}
+            style = "ib"
+            if len(parts) > 2 and parts[-1].lower() in style_codes:
+                style = parts[-1].lower()
+                topic = " ".join(parts[1:-1]).strip()
+            else:
+                topic = " ".join(parts[1:]).strip()
             if not topic:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="請輸入報告主題\n\n範例：\n/report 私人信貸爆雷對美股的影響\n/report 聯準會降息對債券市場的影響\n/report 台積電2026年展望"
+                    text="請輸入報告主題\n\n風格選擇（加在主題後面）：\n預設 → 投資銀行風格\nbrief → 簡報摘要\nclient → 客戶推播\nacademic → 學術研究\nhybrid → 投銀+研究混合\n\n範例：\n/report 私人信貸爆雷對美股的影響\n/report 聯準會降息對債市影響 client\n/report 台積電2026年展望 hybrid"
                 ))
                 return
             line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                text=f"📊 正在研究「{topic}」\n\n步驟：搜尋資料 → 整理分析 → 生成專業PDF\n請稍候約60至90秒..."
+                text=f"📊 正在研究「{topic}」\n風格：{style_names.get(style,'投資銀行')}\n\n搜尋資料 → 整理分析 → 生成PDF\n請稍候約60至90秒..."
             ))
             try:
                 from report_generator import generate_research_report
-                link = generate_research_report(topic, ck.split(":", 1)[1])
+                link = generate_research_report(topic, ck.split(":", 1)[1], style=style)
                 line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                    text=f"📑 研究報告已完成！\n\n主題：{topic}\n\n{link}"
+                    text=f"📑 研究報告已完成！\n\n主題：{topic}\n風格：{style_names.get(style,'投資銀行')}\n\n{link}"
                 ))
             except Exception as e:
                 line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
