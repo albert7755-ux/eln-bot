@@ -399,8 +399,8 @@ async def agent_callback(request: Request):
 # Text message handler
 # ==============================
 @handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
-    _bot_api = get_bot_api(event)
+def handle_text_message(event, _override_bot_api=None):
+    _bot_api = _override_bot_api if _override_bot_api is not None else line_bot_api
     try:
         text_raw = (event.message.text or "").strip()
         tl = text_raw.lower().strip()
@@ -980,8 +980,8 @@ def analyze_image_with_claude(image_data: bytes, media_type: str) -> str:
     return (resp.content[0].text or "").strip()
 
 @handler.add(MessageEvent, message=FileMessage)
-def handle_file_message(event):
-    _bot_api = get_bot_api(event)
+def handle_file_message(event, _override_bot_api=None):
+    _bot_api = _override_bot_api if _override_bot_api is not None else line_bot_api
     try:
         ck = chat_key_of(event)
         filename = getattr(event.message, "file_name", "") or ""
@@ -1061,8 +1061,8 @@ def handle_file_message(event):
 # Image message handler
 # ==============================
 @handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event):
-    _bot_api = get_bot_api(event)
+def handle_image_message(event, _override_bot_api=None):
+    _bot_api = _override_bot_api if _override_bot_api is not None else line_bot_api
     try:
         ck = chat_key_of(event)
         print("[IMAGE]", ck)
@@ -1102,24 +1102,12 @@ def handle_image_message(event):
 if agent_handler:
     @agent_handler.add(MessageEvent, message=TextMessage)
     def agent_handle_text(event):
-        _event_bot_map[id(event)] = agent_line_bot_api
-        try:
-            handle_text_message(event)
-        finally:
-            _event_bot_map.pop(id(event), None)
+        handle_text_message(event, _override_bot_api=agent_line_bot_api)
 
     @agent_handler.add(MessageEvent, message=FileMessage)
     def agent_handle_file(event):
-        _event_bot_map[id(event)] = agent_line_bot_api
-        try:
-            handle_file_message(event)
-        finally:
-            _event_bot_map.pop(id(event), None)
+        handle_file_message(event, _override_bot_api=agent_line_bot_api)
 
     @agent_handler.add(MessageEvent, message=ImageMessage)
     def agent_handle_image(event):
-        _event_bot_map[id(event)] = agent_line_bot_api
-        try:
-            handle_image_message(event)
-        finally:
-            _event_bot_map.pop(id(event), None)
+        handle_image_message(event, _override_bot_api=agent_line_bot_api)
