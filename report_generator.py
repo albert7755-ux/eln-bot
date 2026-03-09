@@ -63,10 +63,27 @@ def sec(title):
 # ══════════════════════════════
 # Step 1: Claude 搜尋並整理報告內容（JSON格式）
 # ══════════════════════════════
-def research_topic(topic: str) -> dict:
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+STYLE_PROMPTS = {
+    "ib": "你是一位頂尖投資銀行的資深研究分析師，請以專業、嚴謹、數據導向的投資銀行風格撰寫報告。語氣專業正式，強調數據與市場影響。",
+    "brief": "你是一位財經媒體編輯，請以簡潔有力的一頁式摘要風格撰寫報告。重點突出，每個觀點不超過一句話，適合忙碌的投資人快速瀏覽。",
+    "client": "你是一位親切的理財顧問，請以口語化、易懂的客戶溝通風格撰寫報告。避免艱深術語，多用比喻，適合直接分享給客戶閱讀。",
+    "academic": "你是一位財經學術研究員，請以嚴謹的學術研究風格撰寫報告。深度分析、引用數據來源、探討多方觀點與潛在風險。",
+    "hybrid": "你是一位兼具投資銀行與學術背景的資深分析師，請以投資銀行的清晰架構結合學術的深度分析撰寫報告。既有實務建議，也有理論依據。",
+}
 
-    prompt = f"""你是一位資深投資研究分析師，請針對以下主題進行研究並產出專業報告內容。
+STYLE_TITLES = {
+    "ib": "投資銀行研究報告",
+    "brief": "市場快訊摘要",
+    "client": "投資觀點分享",
+    "academic": "深度研究分析",
+    "hybrid": "策略研究報告",
+}
+
+def research_topic(topic: str, style: str = "ib") -> dict:
+    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    style_desc = STYLE_PROMPTS.get(style, STYLE_PROMPTS["ib"])
+
+    prompt = f"""{style_desc}
 
 主題：{topic}
 
@@ -278,15 +295,16 @@ def build_pdf(data: dict, output_path: str):
 # ══════════════════════════════
 # 主入口
 # ══════════════════════════════
-def generate_research_report(topic: str, user_id: str = "") -> str:
+def generate_research_report(topic: str, user_id: str = "", style: str = "ib") -> str:
     from pdf_generator import upload_to_drive
 
     # 研究主題
-    data = research_topic(topic)
+    data = research_topic(topic, style=style)
 
     # 生成PDF
     now = datetime.now(TZ_TAIPEI)
-    filename = f"研究報告_{now.strftime('%Y%m%d_%H%M')}.pdf"
+    style_name = STYLE_TITLES.get(style, "研究報告")
+    filename = f"{style_name}_{now.strftime('%Y%m%d_%H%M')}.pdf"
     tmp_path = os.path.join(tempfile.gettempdir(), filename)
     build_pdf(data, tmp_path)
 
