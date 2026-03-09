@@ -69,6 +69,7 @@ STYLE_PROMPTS = {
     "client": "你是一位親切的理財顧問，請以口語化、易懂的客戶溝通風格撰寫報告。避免艱深術語，多用比喻，適合直接分享給客戶閱讀。",
     "academic": "你是一位財經學術研究員，請以嚴謹的學術研究風格撰寫報告。深度分析、引用數據來源、探討多方觀點與潛在風險。",
     "hybrid": "你是一位兼具投資銀行與學術背景的資深分析師，請以投資銀行的清晰架構結合學術的深度分析撰寫報告。既有實務建議，也有理論依據。",
+    "custom": "{custom_prompt}",
 }
 
 STYLE_TITLES = {
@@ -77,11 +78,15 @@ STYLE_TITLES = {
     "client": "投資觀點分享",
     "academic": "深度研究分析",
     "hybrid": "策略研究報告",
+    "custom": "自訂風格報告",
 }
 
-def research_topic(topic: str, style: str = "ib") -> dict:
+def research_topic(topic: str, style: str = "ib", custom_prompt: str = "") -> dict:
     client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-    style_desc = STYLE_PROMPTS.get(style, STYLE_PROMPTS["ib"])
+    if style == "custom" and custom_prompt:
+        style_desc = custom_prompt
+    else:
+        style_desc = STYLE_PROMPTS.get(style, STYLE_PROMPTS["ib"])
 
     prompt = f"""{style_desc}
 
@@ -295,11 +300,11 @@ def build_pdf(data: dict, output_path: str):
 # ══════════════════════════════
 # 主入口
 # ══════════════════════════════
-def generate_research_report(topic: str, user_id: str = "", style: str = "ib") -> str:
+def generate_research_report(topic: str, user_id: str = "", style: str = "ib", custom_prompt: str = "") -> str:
     from pdf_generator import upload_to_drive
 
     # 研究主題
-    data = research_topic(topic, style=style)
+    data = research_topic(topic, style=style, custom_prompt=custom_prompt)
 
     # 生成PDF
     now = datetime.now(TZ_TAIPEI)
