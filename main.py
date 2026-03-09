@@ -351,13 +351,11 @@ def ai_reply(user_text: str, chat_key: str = "") -> str:
 # Webhook endpoint
 # ==============================
 # 用 threading.local 記錄當前是哪個 Bot 在處理
-# 全域變數記錄當前 Bot API（用 contextvars 確保 async 安全）
-from contextvars import ContextVar
-_current_bot_api: ContextVar = ContextVar("current_bot_api", default=None)
+# 全域變數：記錄當前使用的 bot_api（用 list 包裝以便 in-place 修改）
+_active_bot_api = [None]
 
 def get_bot_api():
-    api = _current_bot_api.get()
-    return api if api is not None else line_bot_api
+    return _active_bot_api[0] if _active_bot_api[0] is not None else line_bot_api
 
 @app.post("/callback")
 async def callback(request: Request):
@@ -366,21 +364,23 @@ async def callback(request: Request):
     body_text = body.decode("utf-8")
     # 先試主Bot
     try:
-        token = _current_bot_api.set(line_bot_api)
+        _active_bot_api[0] = line_bot_api
         handler.handle(body_text, signature)
-        _current_bot_api.reset(token)
         return "OK"
     except InvalidSignatureError:
         pass
+    finally:
+        _active_bot_api[0] = None
     # 再試第二Bot（ELN Auto-Tracking）
     if agent_handler and agent_line_bot_api:
         try:
-            token = _current_bot_api.set(agent_line_bot_api)
+            _active_bot_api[0] = agent_line_bot_api
             agent_handler.handle(body_text, signature)
-            _current_bot_api.reset(token)
             return "OK"
         except InvalidSignatureError:
             pass
+        finally:
+            _active_bot_api[0] = None
     raise HTTPException(status_code=400, detail="Invalid signature")
 
 # ==============================
