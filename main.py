@@ -351,36 +351,34 @@ def ai_reply(user_text: str, chat_key: str = "") -> str:
 # Webhook endpoint
 # ==============================
 # 用 threading.local 記錄當前是哪個 Bot 在處理
-# 全域變數：記錄當前使用的 bot_api（用 list 包裝以便 in-place 修改）
-_active_bot_api = [None]
+# 全域變數：當前請求使用的 bot_api
+_active_bot_api = line_bot_api
 
 def get_bot_api():
-    return _active_bot_api[0] if _active_bot_api[0] is not None else line_bot_api
+    return _active_bot_api
 
 @app.post("/callback")
 async def callback(request: Request):
+    global _active_bot_api
     signature = request.headers.get("X-Line-Signature")
     body = await request.body()
     body_text = body.decode("utf-8")
-    # 先試主Bot
+    # 先試主Bot（龍蝦）
     try:
-        _active_bot_api[0] = line_bot_api
+        _active_bot_api = line_bot_api
         handler.handle(body_text, signature)
         return "OK"
     except InvalidSignatureError:
         pass
-    finally:
-        _active_bot_api[0] = None
     # 再試第二Bot（ELN Auto-Tracking）
     if agent_handler and agent_line_bot_api:
         try:
-            _active_bot_api[0] = agent_line_bot_api
+            _active_bot_api = agent_line_bot_api
             agent_handler.handle(body_text, signature)
             return "OK"
         except InvalidSignatureError:
             pass
-        finally:
-            _active_bot_api[0] = None
+    _active_bot_api = line_bot_api
     raise HTTPException(status_code=400, detail="Invalid signature")
 
 # ==============================
@@ -1085,9 +1083,23 @@ def handle_image_message(event):
             pass
 
 # ==============================
-# 綁定 agent_handler 到同樣的處理器
+# 綁定 agent_handler 到同樣的處理器（使用正確的 bot_api）
 # ==============================
 if agent_handler:
-    agent_handler.add(MessageEvent, message=TextMessage)(handle_text_message)
-    agent_handler.add(MessageEvent, message=FileMessage)(handle_file_message)
-    agent_handler.add(MessageEvent, message=ImageMessage)(handle_image_message)
+    @agent_handler.add(MessageEvent, message=TextMessage)
+    def agent_handle_text(event):
+        global _active_bot_api
+        _active_bot_api = agent_line_bot_api
+        handle_text_message(event)
+
+    @agent_handler.add(MessageEvent, message=FileMessage)
+    def agent_handle_file(event):
+        global _active_bot_api
+        _active_bot_api = agent_line_bot_api
+        handle_file_message(event)
+
+    @agent_handler.add(MessageEvent, message=ImageMessage)
+    def agent_handle_image(event):
+        global _active_bot_api
+        _active_bot_api = agent_line_bot_api
+        handle_image_message(event)
