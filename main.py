@@ -37,11 +37,6 @@ elif DATABASE_URL.startswith("postgresql://"):
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# ELN Auto-Tracking Bot（第二組）
-AGENT_LINE_CHANNEL_SECRET = os.getenv("AGENT_LINE_CHANNEL_SECRET")
-AGENT_LINE_CHANNEL_ACCESS_TOKEN = os.getenv("AGENT_LINE_CHANNEL_ACCESS_TOKEN")
-agent_line_bot_api = LineBotApi(AGENT_LINE_CHANNEL_ACCESS_TOKEN) if AGENT_LINE_CHANNEL_ACCESS_TOKEN else None
-agent_handler = WebhookHandler(AGENT_LINE_CHANNEL_SECRET) if AGENT_LINE_CHANNEL_SECRET else None
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 app = FastAPI()
 
@@ -352,26 +347,8 @@ def ai_reply(user_text: str, chat_key: str = "") -> str:
 # ==============================
 # 用 threading.local 記錄當前是哪個 Bot 在處理
 # event -> bot_api 對應表
-_event_bot_map: dict = {}
-
-def get_bot_api(event=None):
-    if event is not None:
-        return _event_bot_map.get(id(event), line_bot_api)
-    return line_bot_api
-
-def _handle_with_bot(wh, body_text, signature, bot_api):
-    """用指定的 bot_api 處理 webhook，並在 event 上記錄對應關係"""
-    import json
-    events_data = json.loads(body_text).get("events", [])
-    # 先記錄這批 event 對應的 bot_api（用時間戳當 key）
-    import time
-    marker = str(time.time())
-    _event_bot_map["__pending__"] = (bot_api, marker)
-    wh.handle(body_text, signature)
-
 @app.post("/callback")
 async def callback(request: Request):
-    """龍蝦主Bot的 webhook"""
     signature = request.headers.get("X-Line-Signature")
     body = await request.body()
     body_text = body.decode("utf-8")
@@ -381,26 +358,14 @@ async def callback(request: Request):
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-@app.post("/agent-callback")
-async def agent_callback(request: Request):
-    """ELN Auto-Tracking Bot的 webhook"""
-    signature = request.headers.get("X-Line-Signature")
-    body = await request.body()
-    body_text = body.decode("utf-8")
-    if agent_handler and agent_line_bot_api:
-        try:
-            agent_handler.handle(body_text, signature)
-            return "OK"
-        except InvalidSignatureError:
-            pass
-    raise HTTPException(status_code=400, detail="Invalid signature")
+
 
 # ==============================
 # Text message handler
 # ==============================
 @handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event, _override_bot_api=None):
-    _bot_api = _override_bot_api if _override_bot_api is not None else line_bot_api
+def handle_text_message(event):
+    _bot_api = line_bot_api
     try:
         text_raw = (event.message.text or "").strip()
         tl = text_raw.lower().strip()
@@ -980,8 +945,8 @@ def analyze_image_with_claude(image_data: bytes, media_type: str) -> str:
     return (resp.content[0].text or "").strip()
 
 @handler.add(MessageEvent, message=FileMessage)
-def handle_file_message(event, _override_bot_api=None):
-    _bot_api = _override_bot_api if _override_bot_api is not None else line_bot_api
+def handle_file_message(event):
+    _bot_api = line_bot_api
     try:
         ck = chat_key_of(event)
         filename = getattr(event.message, "file_name", "") or ""
@@ -1061,8 +1026,8 @@ def handle_file_message(event, _override_bot_api=None):
 # Image message handler
 # ==============================
 @handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event, _override_bot_api=None):
-    _bot_api = _override_bot_api if _override_bot_api is not None else line_bot_api
+def handle_image_message(event):
+    _bot_api = line_bot_api
     try:
         ck = chat_key_of(event)
         print("[IMAGE]", ck)
@@ -1096,14 +1061,7 @@ def handle_image_message(event, _override_bot_api=None):
         except Exception:
             pass
 
-# ==============================
-# 綁定 agent_handler 到同樣的處理器（使用正確的 bot_api）
-# ==============================
-if agent_handler:
-    @agent_handler.add(MessageEvent, message=TextMessage)
-    def agent_handle_text(event):
-        print(f"[AGENT_TEXT] token前20字={AGENT_LINE_CHANNEL_ACCESS_TOKEN[:20] if AGENT_LINE_CHANNEL_ACCESS_TOKEN else 'None'}")
-        handle_text_message(event, _override_bot_api=agent_line_bot_api)
+
 
     @agent_handler.add(MessageEvent, message=FileMessage)
     def agent_handle_file(event):
