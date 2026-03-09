@@ -377,16 +377,18 @@ async def callback(request: Request):
     # 先試主Bot（龍蝦）
     try:
         handler.handle(body_text, signature)
+        print("[CALLBACK] 龍蝦 handler 處理成功")
         return "OK"
     except InvalidSignatureError:
-        pass
+        print("[CALLBACK] 龍蝦 signature 驗證失敗，改試 ELN Bot")
     # 再試第二Bot（ELN Auto-Tracking）
     if agent_handler and agent_line_bot_api:
         try:
             agent_handler.handle(body_text, signature)
+            print("[CALLBACK] ELN handler 處理成功")
             return "OK"
         except InvalidSignatureError:
-            pass
+            print("[CALLBACK] ELN signature 也驗證失敗")
     raise HTTPException(status_code=400, detail="Invalid signature")
 
 # ==============================
