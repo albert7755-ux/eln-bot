@@ -1102,7 +1102,7 @@ def handle_image_message(event, _override_bot_api=None):
 if agent_handler:
     @agent_handler.add(MessageEvent, message=TextMessage)
     def agent_handle_text(event):
-        print(f"[AGENT_TEXT] called! agent_line_bot_api={agent_line_bot_api}")
+        print(f"[AGENT_TEXT] token前20字={AGENT_LINE_CHANNEL_ACCESS_TOKEN[:20] if AGENT_LINE_CHANNEL_ACCESS_TOKEN else 'None'}")
         handle_text_message(event, _override_bot_api=agent_line_bot_api)
 
     @agent_handler.add(MessageEvent, message=FileMessage)
