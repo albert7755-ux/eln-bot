@@ -84,9 +84,20 @@ def init_db():
         CREATE TABLE IF NOT EXISTS eln_session (
             chat_key TEXT PRIMARY KEY,
             await_file BOOLEAN NOT NULL DEFAULT FALSE,
+            invest_mode TEXT NOT NULL DEFAULT '',
+            invest_image BYTEA,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         """))
+        # 舊表補欄位（已存在的 table 不會重建）
+        for col, typedef in [
+            ("invest_mode", "TEXT NOT NULL DEFAULT ''"),
+            ("invest_image", "BYTEA"),
+        ]:
+            try:
+                conn.execute(text(f"ALTER TABLE eln_session ADD COLUMN IF NOT EXISTS {col} {typedef}"))
+            except Exception:
+                pass
 
 init_db()
 
@@ -106,6 +117,28 @@ def db_is_await(chat_key: str) -> bool:
             {"k": chat_key}
         ).fetchone()
     return bool(row and row[0])
+
+# ── /invest 三步驟狀態管理 ──
+def db_invest_set(chat_key: str, mode: str, image: bytes = None):
+    """mode: '' / 'await_image' / 'await_reason'"""
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO eln_session(chat_key, await_file, invest_mode, invest_image, updated_at)
+        VALUES (:k, FALSE, :m, :img, NOW())
+        ON CONFLICT (chat_key) DO UPDATE
+        SET invest_mode=:m, invest_image=COALESCE(:img, eln_session.invest_image), updated_at=NOW()
+        """), {"k": chat_key, "m": mode, "img": image})
+
+def db_invest_get(chat_key: str):
+    """回傳 (mode, image_bytes)"""
+    with engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT invest_mode, invest_image FROM eln_session WHERE chat_key=:k"),
+            {"k": chat_key}
+        ).fetchone()
+    if row:
+        return row[0] or "", bytes(row[1]) if row[1] else None
+    return "", None
 
 def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_map: dict[str, str], agent_name_map: dict[str, str] = {}):
     with engine.begin() as conn:
@@ -445,6 +478,9 @@ def handle_text_message(event):
                     "/report <主題> hybrid — 投銀+研究混合\n"
                     "/report <主題> custom <說明> — 自訂風格\n"
                     "─────────────────\n"
+                    "📈 投資推播\n"
+                    "/invest — 上傳新聞截圖，生成投資推播文\n"
+                    "─────────────────\n"
                     "📄 PDF\n"
                     "/pdf daily — 財經日報 PDF\n"
                     "/pdf market <內容> — 市場觀點 PDF\n"
@@ -469,6 +505,44 @@ def handle_text_message(event):
                     "/help — 顯示本說明"
                 )
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
+            return
+
+        # INVEST 投資推播
+        if cmd == "invest":
+            db_invest_set(ck, "await_image")
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="📰 請上傳新聞截圖\n\n收到圖片後，我會請你補上投資理由和標的。"
+            ))
+            return
+
+        # INVEST 第三步：收到理由和標的
+        invest_mode, invest_image = db_invest_get(ck)
+        if invest_mode == "await_reason" and invest_image:
+            raw = text_raw.strip()
+            # 解析理由和標的（允許各種格式）
+            reason = ""
+            targets = ""
+            for line in raw.replace("，", ",").splitlines():
+                l = line.strip()
+                if l.startswith("理由"):
+                    reason = l.split("：", 1)[-1].split(":", 1)[-1].strip()
+                elif l.startswith("標的"):
+                    targets = l.split("：", 1)[-1].split(":", 1)[-1].strip()
+            # 若沒有明確標記，把整段當理由
+            if not reason and not targets:
+                reason = raw
+
+            db_invest_set(ck, "")  # 清除狀態
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="✍️ 整理中，請稍候..."
+            ))
+            try:
+                posts = generate_invest_post(invest_image, reason, targets)
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=posts[:4900]))
+            except Exception as e:
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                    text=f"生成失敗：{str(e)[:200]}"
+                ))
             return
 
         # DAILY REPORT
@@ -1184,6 +1258,70 @@ def analyze_image_with_claude(image_data: bytes, media_type: str) -> str:
     )
     return (resp.content[0].text or "").strip()
 
+
+def generate_invest_post(image_data: bytes, reason: str, targets: str) -> str:
+    """
+    根據新聞截圖 + 用戶理由 + 標的，生成專業版和輕鬆版投資推播文。
+    """
+    import base64
+    image_b64 = base64.b64encode(image_data).decode("utf-8")
+
+    user_input = ""
+    if reason:
+        user_input += f"投資理由：{reason}\n"
+    if targets:
+        user_input += f"建議標的：{targets}\n"
+
+    prompt = f"""你是一位台灣私人銀行的投資輔銷人員，正在為高資產客戶撰寫 LINE 群組推播文。
+
+根據上方的新聞截圖，結合以下我提供的投資觀點，生成兩個版本的推播文：
+
+{user_input}
+
+【規格要求】
+- 每個版本 100-250 字
+- 繁體中文
+- 不使用 Markdown（不用 ** # 等符號）
+- 用 emoji 當標題和分段符號
+- 結尾附上建議標的
+
+【版本一：專業版】
+適合傳給高資產客戶，語氣專業簡練，強調市場邏輯和風險意識。
+
+【版本二：輕鬆版】
+適合一般投資群組，語氣親切，用比喻讓人容易理解，帶點觀點但不失專業。
+
+格式：
+===專業版===
+（內容）
+
+===輕鬆版===
+（內容）"""
+
+    resp = claude_client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1500,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": image_b64
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": prompt
+                }
+            ]
+        }]
+    )
+    return (resp.content[0].text or "").strip()
+
+
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file_message(event):
     _bot_api = line_bot_api
@@ -1279,11 +1417,20 @@ def handle_image_message(event):
         for chunk in content.iter_content():
             image_data += chunk
 
+        # ── /invest 模式：等待圖片
+        invest_mode, _ = db_invest_get(ck)
+        if invest_mode == "await_image":
+            db_invest_set(ck, "await_reason", image=image_data)
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="✅ 收到截圖！\n\n請輸入你的投資理由和標的：\n\n理由：（你認為能投資的原因）\n標的：（股票/ETF代號）"
+            ))
+            return
+
+        # ── 一般圖片分析
         _bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text="收到圖片！正在分析，請稍候...")
         )
-
         analysis = analyze_image_with_claude(image_data, "image/jpeg")
         _bot_api.push_message(
             ck.split(":", 1)[1],
