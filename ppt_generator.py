@@ -930,8 +930,7 @@ def generate_ppt(topic: str, n_slides: int = 12, color_theme: str = "navy",
         # 7. 上傳 Drive
         safe_name = topic.replace("/","").replace(" ","_")[:30]
         filename  = f"{safe_name}_簡報.pptx"
-        url = upload_to_drive(pptx_path, filename,
-                              mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        url = upload_to_drive(pptx_path, filename)
         return url
 
 
