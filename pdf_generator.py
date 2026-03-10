@@ -68,6 +68,8 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
         mime = "image/png"
     elif file_path.endswith(".jpg") or file_path.endswith(".jpeg"):
         mime = "image/jpeg"
+    elif file_path.endswith(".pptx"):
+        mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     else:
         mime = "application/pdf"
     media = MediaFileUpload(file_path, mimetype=mime)
