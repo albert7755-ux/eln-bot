@@ -434,8 +434,11 @@ def handle_text_message(event):
                     "/daily cache — 回傳今早已生成的日報\n"
                     "/market <新聞+標的> — 生成客戶推播市場觀點\n"
                     "─────────────────\n"
-                    "📑 研究報告\n"
-                    "/report <主題> — 投資銀行風格（預設）\n"
+                    "📑 研究報告 & 簡報\n"
+                    "/report ppt <主題> — 🎨 Icon設計版PPT（深藍金）\n"
+                    "/report ppt <主題> green — 深綠金配色\n"
+                    "/report ppt <主題> dark — 純黑銀配色\n"
+                    "/report <主題> — 投資銀行風格PDF\n"
                     "/report <主題> brief — 簡報摘要\n"
                     "/report <主題> client — 客戶推播風格\n"
                     "/report <主題> academic — 學術研究\n"
@@ -653,6 +656,85 @@ def handle_text_message(event):
             style_names = {"ib":"投資銀行", "brief":"簡報摘要", "client":"客戶推播", "academic":"學術研究", "hybrid":"混合風格", "custom":"自訂風格"}
             style = "ib"
             custom_prompt = ""
+
+            # ── PPT 子指令：/report ppt <主題> [選項]
+            # 固定配色：navy / green / dark
+            # 自訂視覺：主題:深海星空
+            # 指定圖案：圖案:stars（8種內建）或 圖案:自由（Claude即時繪製）
+            if len(parts) > 1 and parts[1].lower() == "ppt":
+                ppt_color_codes = {"navy", "green", "dark"}
+                ppt_color_names = {"navy":"深藍金","green":"深綠金","dark":"純黑銀"}
+                VALID_PATTERNS  = {"circuit","wave","stars","hexagon","mountain","ripple","grid","diagonal","none"}
+
+                raw          = " ".join(parts[2:]).strip()
+                visual_theme = ""
+                color_theme  = "navy"
+                force_pattern = ""
+                custom_bg    = False
+
+                # 解析 圖案:XXX（先解析，避免干擾後面邏輯）
+                if "圖案:" in raw:
+                    pi = raw.index("圖案:")
+                    pat_val = raw[pi+3:].split()[0].strip()
+                    raw = (raw[:pi] + raw[pi+3+len(pat_val):]).strip()
+                    if pat_val == "自由":
+                        custom_bg = True
+                    elif pat_val in VALID_PATTERNS:
+                        force_pattern = pat_val
+
+                # 解析 主題:XXXX
+                if "主題:" in raw:
+                    idx = raw.index("主題:")
+                    visual_theme = raw[idx+3:].strip()
+                    raw = raw[:idx].strip()
+                    if custom_bg:
+                        color_label = f"自由繪製（{visual_theme}）"
+                    elif force_pattern:
+                        color_label = f"自訂（{visual_theme}，{force_pattern}圖案）"
+                    else:
+                        color_label = f"自訂（{visual_theme}）"
+                elif raw and raw.split()[-1].lower() in ppt_color_codes:
+                    color_theme = raw.split()[-1].lower()
+                    raw = " ".join(raw.split()[:-1]).strip()
+                    color_label = ppt_color_names[color_theme]
+                else:
+                    color_label = "深藍金"
+
+                topic = raw
+                if not topic:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text="請輸入簡報主題！\n\n─ 固定配色 ─\n/report ppt 債券投資入門\n/report ppt 債券投資入門 green\n/report ppt 信託規劃 dark\n\n─ 自訂視覺主題 ─\n/report ppt ELN介紹 主題:深海星空\n/report ppt Lombard Lending 主題:科技電路板\n\n─ 指定圖案 ─\n/report ppt 債券投資 主題:宇宙紫金 圖案:stars\n/report ppt 信託規劃 主題:日式禪風 圖案:ripple\n\n─ Claude自由繪製背景（最自由！）─\n/report ppt ELN介紹 主題:珊瑚礁海底 圖案:自由\n/report ppt 債券配置 主題:富士山日出 圖案:自由"
+                    ))
+                    return
+
+                # 等待提示
+                wait_steps = []
+                if custom_bg:    wait_steps.append("🎨 Claude自由繪製背景")
+                elif visual_theme: wait_steps.append("🎨 推導視覺風格")
+                wait_steps += ["📐 規劃架構", "🖼️ 生成投影片", "☁️ 上傳雲端"]
+                wait_text = " → ".join(wait_steps)
+
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=f"🎨 正在製作「{topic}」簡報\n\n配色：{color_label}\n風格：Icon + 大字 + 繁體中文\n頁數：12張\n\n{wait_text}\n\n請稍候約{'120' if custom_bg else '90'}秒..."
+                ))
+                try:
+                    from ppt_generator import generate_ppt
+                    link = generate_ppt(
+                        topic, n_slides=12,
+                        color_theme=color_theme,
+                        visual_theme=visual_theme,
+                        force_pattern=force_pattern,
+                        custom_bg=custom_bg
+                    )
+                    bg_note = "\n⚠️ 背景為 Claude 自由創作，風格可能每次略有不同" if custom_bg else ""
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                        text=f"✅ 簡報製作完成！\n\n📌 主題：{topic}\n🎨 配色：{color_label}\n📄 頁數：12張{bg_note}\n\n{link}\n\n💡 下載後可在 PowerPoint 自由修改內容"
+                    ))
+                except Exception as e:
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                        text=f"❌ 簡報生成失敗：{str(e)[:200]}"
+                    ))
+                return
 
             # 偵測 custom：/report <主題> custom <自訂說明>
             if "custom" in [p.lower() for p in parts[2:]]:
