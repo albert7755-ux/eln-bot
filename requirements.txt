@@ -22,3 +22,5 @@ dropbox
 Pillow
 google-cloud-speech
 google-cloud-storage
+matplotlib
+numpy
