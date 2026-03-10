@@ -340,17 +340,28 @@ def full_analysis(ticker_raw: str, months: int = 6) -> tuple[bytes, str]:
         f"EPS: {fmt_val(eps,'.2f')}，毛利率: {fmt_pct(gross_margin)}，ROE: {fmt_pct(roe)}\n"
         f"營收成長: {fmt_pct(rev_growth)}，負債比: {fmt_val(debt_equity,'.1f','x')}\n\n"
         f"【消息面 - 最新10則新聞標題】\n{news_text}\n\n"
-        "請按以下格式輸出：\n"
-        "📊 技術面分析\n（趨勢、支撐壓力、RSI訊號）\n\n"
-        "📋 基本面分析\n（估值、獲利能力、成長性評估）\n\n"
-        "📰 消息面分析\n（利多利空整理，情緒：正面/負面/中立 + 評分1-10）\n\n"
-        "🎯 綜合建議\n（一句話操作建議，結尾加上金句：「市場修正是市場送你的禮物，敢不敢拆，決定了你未來的報酬。」🎁）"
+        "請按以下格式輸出，順序不可改變：\n\n"
+        "📋 基本面分析\n"
+        "根據上方財務數據，評估：估值是否合理（P/E偏高/偏低/合理）、獲利能力（毛利率/ROE水準）、成長性（營收/EPS趨勢）、財務健康度（負債比）\n\n"
+        "📊 技術面分析\n"
+        "根據上方技術數據，評估：目前趨勢（多頭/空頭/盤整）、支撐與壓力位、RSI訊號（超買/超賣/中性）、均線多空排列\n\n"
+        "📰 消息面分析\n"
+        "根據上方新聞，整理：\n"
+        "• 利多：（列出正面消息）\n"
+        "• 利空：（列出負面消息）\n"
+        "• 情緒評分：X/10（正面10，負面1）\n\n"
+        "🎯 綜合建議\n"
+        "根據以上三面向，給出具體操作建議：\n"
+        "• 短線（1個月內）：買進/觀望/減碼，理由\n"
+        "• 中線（3-6個月）：方向與目標價位\n"
+        "• 適合客群：哪類投資人適合現在介入\n"
+        "• 主要風險：最需要注意的1-2個風險因子"
     )
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     resp = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=800,
+        max_tokens=1200,
         messages=[{"role": "user", "content": prompt}]
     )
     summary = resp.content[0].text
