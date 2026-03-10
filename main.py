@@ -1,4 +1,4 @@
-import os
+    import os
 import re
 import json
 import traceback
@@ -428,6 +428,7 @@ def handle_text_message(event):
                     "/mail unread — 只看重要未讀\n"
                     "─────────────────\n"
                     "🔔 價格警示\n"
+                    "/analysis <股票> — 完整三面向分析 (技術+基本面+消息面)\n"
                     "/tech <股票> — 技術分析圖表 (K線/RSI/成交量)\n"
                     "/tech mag7 — Magnificent Seven 比較分析\n"
                     "/alert add <標的> <價格> above/below\n"
@@ -830,6 +831,54 @@ def handle_text_message(event):
                     _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=summary[:4900]))
             except Exception as e:
                 _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=f"郵件讀取失敗：{e}"))
+            return
+
+        # ANALYSIS 完整三面向分析
+        if cmd.startswith("analysis"):
+            parts = text_raw.split(" ", 1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+
+            if not arg:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="📊 完整三面向分析指令：\n\n"
+                         "/analysis NVDA — 技術+基本面+消息面\n"
+                         "/analysis 2330 — 台積電完整分析\n"
+                         "/analysis AAPL 3 — 指定月數（預設6個月）\n\n"
+                         "包含：K線/RSI/成交量/EPS趨勢/營收成長/最新新聞情緒分析"
+                ))
+                return
+
+            arg_parts = arg.split()
+            symbol = arg_parts[0]
+            months = 6
+            if len(arg_parts) > 1 and arg_parts[1].isdigit():
+                months = min(max(int(arg_parts[1]), 1), 12)
+
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=f"📊 正在進行 {symbol.upper()} 完整三面向分析，請稍候約20秒..."
+            ))
+
+            try:
+                from stock_analyzer import full_analysis
+                from pdf_generator import upload_to_drive
+                import tempfile, os
+
+                img_bytes, summary = full_analysis(symbol, months=months)
+
+                tmp_path = f"/tmp/analysis_{symbol}_{months}.png"
+                with open(tmp_path, "wb") as f:
+                    f.write(img_bytes)
+
+                link = upload_to_drive(tmp_path, f"{symbol.upper()} Full Analysis {months}M.png")
+                os.remove(tmp_path)
+
+                msg = f"📊 {symbol.upper()} 完整分析 (近{months}個月)\n\n{summary}\n\n🔗 圖表：{link}"
+                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=msg[:4900]))
+
+            except Exception as e:
+                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(
+                    text=f"分析失敗：{str(e)[:200]}"
+                ))
             return
 
         # TECH 技術分析
