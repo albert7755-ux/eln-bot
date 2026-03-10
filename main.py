@@ -12,6 +12,10 @@ from sqlalchemy import create_engine, text
 from autotracking_core import calculate_from_file
 from market_content_generator import generate_market_content
 import anthropic
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+import pytz
 
 # ==============================
 # ENV
@@ -1151,3 +1155,102 @@ def handle_image_message(event):
     @agent_handler.add(MessageEvent, message=ImageMessage)
     def agent_handle_image(event):
         handle_image_message(event, _override_bot_api=agent_line_bot_api)
+
+# ==============================
+# 內建排程（取代獨立 Cron Jobs）
+# ==============================
+
+TZ_TAIPEI_PYTZ = pytz.timezone("Asia/Taipei")
+
+def job_daily_report():
+    """每天早上 06:00 台北時間 — 財經日報"""
+    now = datetime.now(TZ_TAIPEI_PYTZ)
+    # 只在週一到週五執行
+    if now.weekday() >= 5:
+        print("[Scheduler] 週末跳過財經日報")
+        return
+    print(f"[Scheduler] 開始產生財經日報 {now.strftime('%Y-%m-%d %H:%M')}")
+    try:
+        from daily_report import main as report_main
+        report_main()
+        print("[Scheduler] 財經日報推播成功")
+    except Exception as e:
+        print(f"[Scheduler] 財經日報失敗: {e}")
+
+def job_alert_monitor():
+    """每 15 分鐘 — 價格警示監控"""
+    print(f"[Scheduler] 執行價格警示監控 {datetime.now(TZ_TAIPEI_PYTZ).strftime('%H:%M')}")
+    try:
+        from alert_monitor import main as alert_main
+        alert_main()
+    except Exception as e:
+        print(f"[Scheduler] 價格警示失敗: {e}")
+
+def job_mail_monitor():
+    """每 15 分鐘 — 郵件監控"""
+    print(f"[Scheduler] 執行郵件監控 {datetime.now(TZ_TAIPEI_PYTZ).strftime('%H:%M')}")
+    try:
+        from mail_monitor import main as mail_main
+        mail_main()
+    except Exception as e:
+        print(f"[Scheduler] 郵件監控失敗: {e}")
+
+def job_auto_tracking():
+    """每天早上 06:00 台北時間 — ELN 自動追蹤"""
+    now = datetime.now(TZ_TAIPEI_PYTZ)
+    if now.weekday() >= 5:
+        print("[Scheduler] 週末跳過 ELN 追蹤")
+        return
+    print(f"[Scheduler] 開始 ELN 自動追蹤 {now.strftime('%Y-%m-%d %H:%M')}")
+    try:
+        from auto_tracking_cron import main as tracking_main
+        tracking_main()
+        print("[Scheduler] ELN 追蹤完成")
+    except Exception as e:
+        print(f"[Scheduler] ELN 追蹤失敗: {e}")
+
+def start_scheduler():
+    scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
+
+    # 財經日報：每天 06:00 台北時間（週一到週五）
+    scheduler.add_job(
+        job_daily_report,
+        CronTrigger(hour=6, minute=0, timezone=TZ_TAIPEI_PYTZ),
+        id="daily_report",
+        name="財經日報"
+    )
+
+    # ELN 自動追蹤：每天 06:00 台北時間（週一到週五）
+    scheduler.add_job(
+        job_auto_tracking,
+        CronTrigger(hour=6, minute=2, timezone=TZ_TAIPEI_PYTZ),
+        id="auto_tracking",
+        name="ELN自動追蹤"
+    )
+
+    # 價格警示：每 15 分鐘
+    scheduler.add_job(
+        job_alert_monitor,
+        IntervalTrigger(minutes=15),
+        id="alert_monitor",
+        name="價格警示"
+    )
+
+    # 郵件監控：每 15 分鐘（比警示延遲 5 分鐘，避免同時執行）
+    scheduler.add_job(
+        job_mail_monitor,
+        IntervalTrigger(minutes=15, start_date=datetime.now(TZ_TAIPEI_PYTZ).replace(second=0, microsecond=0)),
+        id="mail_monitor",
+        name="郵件監控"
+    )
+
+    scheduler.start()
+    print("[Scheduler] 排程啟動完成 ✅")
+    print("[Scheduler] 財經日報: 每天 06:00（週一至週五）")
+    print("[Scheduler] ELN追蹤: 每天 06:02（週一至週五）")
+    print("[Scheduler] 價格警示: 每 15 分鐘")
+    print("[Scheduler] 郵件監控: 每 15 分鐘")
+    return scheduler
+
+# 啟動排程
+_scheduler = start_scheduler()
