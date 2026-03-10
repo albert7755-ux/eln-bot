@@ -10,12 +10,8 @@ import yfinance as yf
 from datetime import datetime, timedelta
 import anthropic
 
-# ── 字體設定 ──────────────────────────────────
+# 字體設定（使用預設英文字體，避免Render環境缺少中文字體）
 import matplotlib.font_manager as fm
-_font_path = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
-if os.path.exists(_font_path):
-    fm.fontManager.addfont(_font_path)
-    matplotlib.rcParams['font.family'] = 'Noto Sans CJK JP'
 
 # ── 暴風雨前的寧靜色調（跟龍蝦日報一致）──────
 BG       = '#0D1B2A'
@@ -109,9 +105,9 @@ def analyze_single(ticker_raw: str, months: int = 6) -> tuple[bytes, str]:
     ax1.plot(df.index, df["MA20"], color=GOLD,  linewidth=1.4, label="MA20", alpha=0.9)
     ax1.plot(df.index, df["MA60"], color=CALM,  linewidth=1.4, label="MA60", alpha=0.9)
 
-    ax1.set_title(f"{name} ({ticker})  技術分析 | 近{months}個月",
+    ax1.set_title(f"{name} ({ticker}) | Past {months}M Technical Analysis",
                   color=WHITE, fontsize=13, fontweight="bold", pad=10)
-    ax1.set_ylabel(f"價格 ({currency})", color=MUTED, fontsize=9)
+    ax1.set_ylabel(f"Price ({currency})", color=MUTED, fontsize=9)
     ax1.legend(loc="upper left", fontsize=8, facecolor=BG_MID,
                edgecolor=MUTED, labelcolor=WHITE)
     ax1.tick_params(colors=MUTED, labelbottom=False)
@@ -132,7 +128,7 @@ def analyze_single(ticker_raw: str, months: int = 6) -> tuple[bytes, str]:
     vol_colors = [GREEN if df["Close"].iloc[i] >= df["Open"].iloc[i] else WARNING
                   for i in range(len(df))]
     ax2.bar(df.index, df["Volume"] / 1e6, color=vol_colors, alpha=0.75, width=0.6)
-    ax2.set_ylabel("成交量 (M)", color=MUTED, fontsize=8)
+    ax2.set_ylabel("Volume (M)", color=MUTED, fontsize=8)
     ax2.tick_params(colors=MUTED, labelbottom=False)
     for sp in ax2.spines.values(): sp.set_color(BG_LIGHT)
     ax2.grid(axis="y", color=BG_LIGHT, linewidth=0.5, alpha=0.4)
@@ -148,8 +144,8 @@ def analyze_single(ticker_raw: str, months: int = 6) -> tuple[bytes, str]:
                      where=(df["RSI"] >= 70), color=WARNING, alpha=0.15)
     ax3.fill_between(df.index, df["RSI"], 30,
                      where=(df["RSI"] <= 30), color=GREEN, alpha=0.15)
-    ax3.text(df.index[-1], 71, " 超買", color=WARNING, fontsize=7.5, va="bottom")
-    ax3.text(df.index[-1], 29, " 超賣", color=GREEN,   fontsize=7.5, va="top")
+    ax3.text(df.index[-1], 71, " Overbought", color=WARNING, fontsize=7.5, va="bottom")
+    ax3.text(df.index[-1], 29, " Oversold", color=GREEN,   fontsize=7.5, va="top")
     ax3.set_ylim(0, 100)
     ax3.set_ylabel("RSI(14)", color=MUTED, fontsize=8)
     ax3.tick_params(colors=MUTED)
@@ -264,15 +260,15 @@ def analyze_mag7(months: int = 6) -> tuple[bytes, str]:
                     color=WHITE, fontsize=9, fontweight="bold")
 
     ax.axhline(0, color=MUTED, linewidth=0.8, linestyle="--", alpha=0.6)
-    ax.set_xlabel("年化波動率 (%)", color=MUTED, fontsize=9)
-    ax.set_ylabel(f"近{months}個月報酬率 (%)", color=MUTED, fontsize=9)
-    ax.set_title("報酬率 vs 波動率", color=WHITE, fontsize=11, fontweight="bold")
+    ax.set_xlabel("Annualized Volatility (%)", color=MUTED, fontsize=9)
+    ax.set_ylabel(f"Return (%)", color=MUTED, fontsize=9)
+    ax.set_title("Return vs Volatility", color=WHITE, fontsize=11, fontweight="bold")
     ax.tick_params(colors=MUTED)
     for sp in ax.spines.values(): sp.set_color(BG_LIGHT)
     ax.grid(color=BG_LIGHT, linewidth=0.5, alpha=0.5)
 
     # 圖例說明
-    ax.text(0.02, 0.98, "圓圈大小 = Sharpe Ratio",
+    ax.text(0.02, 0.98, "Circle size = Sharpe Ratio",
             transform=ax.transAxes, color=MUTED, fontsize=7.5,
             va="top", ha="left")
 
@@ -296,15 +292,15 @@ def analyze_mag7(months: int = 6) -> tuple[bytes, str]:
                  va="center", ha="left" if ret >= 0 else "right",
                  color=WHITE, fontsize=9, fontweight="bold")
 
-    ax2.set_xlabel(f"近{months}個月報酬率 (%)", color=MUTED, fontsize=9)
-    ax2.set_title("報酬率排行", color=WHITE, fontsize=11, fontweight="bold")
+    ax2.set_xlabel(f"Return (%)", color=MUTED, fontsize=9)
+    ax2.set_title("Return Ranking", color=WHITE, fontsize=11, fontweight="bold")
     ax2.tick_params(colors=MUTED)
     ax2.invert_yaxis()
     for sp in ax2.spines.values(): sp.set_color(BG_LIGHT)
     ax2.grid(axis="x", color=BG_LIGHT, linewidth=0.5, alpha=0.5)
 
     fig.suptitle(
-        f"Magnificent Seven 技術分析 | 近{months}個月 "
+        f"Magnificent Seven Technical Analysis | Past {months} Months "
         f"({(end - timedelta(days=months*31)).strftime('%Y/%m')} - {end.strftime('%Y/%m')})",
         color=WHITE, fontsize=13, fontweight="bold", y=1.01
     )
