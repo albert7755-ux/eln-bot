@@ -424,6 +424,8 @@ def handle_text_message(event):
                     "/mail unread — 只看重要未讀\n"
                     "─────────────────\n"
                     "🔔 價格警示\n"
+                    "/tech <股票> — 技術分析圖表 (K線/RSI/成交量)\n"
+                    "/tech mag7 — Magnificent Seven 比較分析\n"
                     "/alert add <標的> <價格> above/below\n"
                     "/alert list — 查看所有警示\n"
                     "/alert del <編號> — 刪除警示\n"
@@ -824,6 +826,67 @@ def handle_text_message(event):
                     _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=summary[:4900]))
             except Exception as e:
                 _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=f"郵件讀取失敗：{e}"))
+            return
+
+        # TECH 技術分析
+        if cmd.startswith("tech"):
+            parts = text_raw.split(" ", 1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+
+            if not arg:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="📊 技術分析指令：\n\n"
+                         "/tech mag7 — Magnificent Seven 比較分析\n"
+                         "/tech AAPL — 單一股票分析 (美股)\n"
+                         "/tech 2330 — 單一股票分析 (台股)\n"
+                         "/tech AAPL 3 — 指定月數（預設6個月）\n\n"
+                         "範例：\n/tech mag7\n/tech NVDA\n/tech 2330 3"
+                ))
+                return
+
+            # 解析月數
+            arg_parts = arg.split()
+            symbol = arg_parts[0]
+            months = 6
+            if len(arg_parts) > 1 and arg_parts[1].isdigit():
+                months = min(max(int(arg_parts[1]), 1), 12)
+
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=f"📊 正在分析 {symbol.upper()}，請稍候約15秒..."
+            ))
+
+            try:
+                from tech_analyzer import analyze_single, analyze_mag7
+                import base64
+                from linebot.models import ImageSendMessage
+
+                if symbol.lower() == "mag7":
+                    img_bytes, summary = analyze_mag7(months=months)
+                    title = f"Magnificent Seven 技術分析 (近{months}個月)"
+                else:
+                    img_bytes, summary = analyze_single(symbol, months=months)
+                    title = f"{symbol.upper()} 技術分析 (近{months}個月)"
+
+                # 上傳圖片到 imgbb 或用 LINE image message
+                # 這裡先存到 /tmp 再用 LINE upload
+                import tempfile, os
+                tmp_path = f"/tmp/tech_{symbol}_{months}.png"
+                with open(tmp_path, "wb") as f:
+                    f.write(img_bytes)
+
+                # 上傳到 Google Drive 取得公開連結
+                from pdf_generator import upload_to_drive_and_get_link
+                link = upload_to_drive_and_get_link(tmp_path, f"{title}.png")
+                os.remove(tmp_path)
+
+                msg = f"📊 {title}\n\n{summary}\n\n🔗 圖表連結：{link}"
+                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=msg[:4900]))
+
+            except Exception as e:
+                import traceback
+                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(
+                    text=f"技術分析失敗：{str(e)[:200]}"
+                ))
             return
 
         # FORGET 清除記憶
