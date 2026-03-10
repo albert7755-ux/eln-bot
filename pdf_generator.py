@@ -63,7 +63,14 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
         folder_id = folder["id"]
 
     file_metadata = {"name": filename, "parents": [folder_id]}
-    media = MediaFileUpload(file_path, mimetype="application/pdf")
+    # 自動判斷 mimetype
+    if file_path.endswith(".png"):
+        mime = "image/png"
+    elif file_path.endswith(".jpg") or file_path.endswith(".jpeg"):
+        mime = "image/jpeg"
+    else:
+        mime = "application/pdf"
+    media = MediaFileUpload(file_path, mimetype=mime)
     uploaded = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
     file_id = uploaded["id"]
 
@@ -145,7 +152,7 @@ def generate_daily_report_pdf(report_text: str):
 
     story.append(Spacer(1, 12))
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
-    story.append(Paragraph("本報告由龍蝦 AI 自動生成，僅供參考。", subtitle_style))
+    story.append(Paragraph("本報告內容僅供參考，不構成投資建議或買賣依據。投資涉及風險，過去績效不代表未來表現，投資人應審慎評估自身風險承受能力，並自行負擔投資損益。", subtitle_style))
     doc.build(story)
     return tmp_path, filename
 
@@ -178,7 +185,7 @@ def generate_market_pdf(content: str):
 
     story.append(Spacer(1, 12))
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
-    story.append(Paragraph("本報告由龍蝦 AI 自動生成，僅供參考。", subtitle_style))
+    story.append(Paragraph("本報告內容僅供參考，不構成投資建議或買賣依據。投資涉及風險，過去績效不代表未來表現，投資人應審慎評估自身風險承受能力，並自行負擔投資損益。", subtitle_style))
     doc.build(story)
     return tmp_path, filename
 
@@ -215,7 +222,7 @@ def generate_analysis_pdf(analysis: str, original_filename: str):
 
     story.append(Spacer(1, 12))
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
-    story.append(Paragraph("本報告由龍蝦 AI 自動生成，僅供參考。", subtitle_style))
+    story.append(Paragraph("本報告內容僅供參考，不構成投資建議或買賣依據。投資涉及風險，過去績效不代表未來表現，投資人應審慎評估自身風險承受能力，並自行負擔投資損益。", subtitle_style))
     doc.build(story)
     return tmp_path, filename
 
@@ -229,6 +236,44 @@ def create_and_upload_pdf(pdf_type: str, content: str, original_filename: str = 
         tmp_path, filename = generate_market_pdf(content)
     elif pdf_type == "analysis":
         tmp_path, filename = generate_analysis_pdf(content, original_filename)
+    elif pdf_type == "news":
+        tmp_path, filename = generate_news_pdf(content)
     else:
         raise ValueError(f"Unknown pdf_type: {pdf_type}")
     return upload_to_drive(tmp_path, filename)
+
+# ==============================
+# 新聞摘要 PDF
+# ==============================
+def generate_news_pdf(news_report: str):
+    now = datetime.now(TZ_TAIPEI)
+    filename = f"財經新聞_{now.strftime('%Y%m%d')}.pdf"
+    tmp_path = os.path.join(tempfile.gettempdir(), filename)
+
+    doc = SimpleDocTemplate(tmp_path, pagesize=A4,
+        rightMargin=20*mm, leftMargin=20*mm,
+        topMargin=20*mm, bottomMargin=20*mm)
+
+    title_style, subtitle_style, section_style, body_style = get_styles()
+    story = []
+
+    story.append(Paragraph("每日財經新聞摘要", title_style))
+    story.append(Paragraph(now.strftime("%Y年%m月%d日"), subtitle_style))
+    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1a1a2e")))
+    story.append(Spacer(1, 8))
+
+    for line in news_report.split("\n"):
+        line = line.strip()
+        if not line:
+            story.append(Spacer(1, 4))
+            continue
+        if line.startswith("【"):
+            story.append(Paragraph(line, section_style))
+        else:
+            story.append(Paragraph(line, body_style))
+
+    story.append(Spacer(1, 12))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
+    story.append(Paragraph("本報告內容僅供參考，不構成投資建議或買賣依據。投資涉及風險，過去績效不代表未來表現，投資人應審慎評估自身風險承受能力，並自行負擔投資損益。", subtitle_style))
+    doc.build(story)
+    return tmp_path, filename
