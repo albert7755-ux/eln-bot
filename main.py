@@ -875,8 +875,8 @@ def handle_text_message(event):
                     f.write(img_bytes)
 
                 # 上傳到 Google Drive 取得公開連結
-                from pdf_generator import upload_to_drive_and_get_link
-                link = upload_to_drive_and_get_link(tmp_path, f"{title}.png")
+                from pdf_generator import upload_to_drive
+                link = upload_to_drive(tmp_path, f"{title}.png")
                 os.remove(tmp_path)
 
                 msg = f"📊 {title}\n\n{summary}\n\n🔗 圖表連結：{link}"
