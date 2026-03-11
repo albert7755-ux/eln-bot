@@ -170,24 +170,15 @@ def db_get_report(chat_key: str) -> str | None:
         ).fetchone()
     return row[0] if row else None
 
-def db_list_bonds(chat_key: str, limit: int = 50, agent_filter: str = "") -> list[tuple[str, str]]:
+def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str]]:
     with engine.begin() as conn:
-        if agent_filter:
-            rows = conn.execute(text("""
-            SELECT bond_id, COALESCE(agent_name, '-')
-            FROM eln_detail
-            WHERE chat_key=:k AND agent_name ILIKE :a
-            ORDER BY agent_name ASC, bond_id ASC
-            LIMIT :lim
-            """), {"k": chat_key, "lim": int(limit), "a": f"%{agent_filter}%"}).fetchall()
-        else:
-            rows = conn.execute(text("""
-            SELECT bond_id, COALESCE(agent_name, '-')
-            FROM eln_detail
-            WHERE chat_key=:k
-            ORDER BY agent_name ASC, bond_id ASC
-            LIMIT :lim
-            """), {"k": chat_key, "lim": int(limit)}).fetchall()
+        rows = conn.execute(text("""
+        SELECT bond_id, COALESCE(agent_name, '-')
+        FROM eln_detail
+        WHERE chat_key=:k
+        ORDER BY agent_name ASC, bond_id ASC
+        LIMIT :lim
+        """), {"k": chat_key, "lim": int(limit)}).fetchall()
     return [(r[0], r[1]) for r in rows] if rows else []
 
 def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, list[str]]:
@@ -444,10 +435,10 @@ def handle_text_message(event):
         print("[TEXT]", ck, repr(text_raw))
 
         if tl.startswith("/"):
-            cmd = tl[1:]
+            cmd = tl[1:].split()[0] if tl[1:].split() else ""
             raw_cmd = text_raw[1:]
         else:
-            cmd = tl
+            cmd = tl.split()[0] if tl.split() else tl
             raw_cmd = text_raw
 
         # 群組模式：非指令訊息直接靜音
@@ -722,49 +713,28 @@ def handle_text_message(event):
 
         # LIST
         if cmd == "list":
-            parts = raw_cmd.split(" ", 1)
-            agent_filter = parts[1].strip() if len(parts) > 1 else ""
-            bonds = db_list_bonds(ck, limit=100, agent_filter=agent_filter)
+            bonds = db_list_bonds(ck, limit=100)
             if not bonds:
-                if agent_filter:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text=f"找不到理專「{agent_filter}」的商品。\n\n打 /list 可看全部。"
-                    ))
-                else:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text="目前尚無已保存結果。請先 /calc 上傳 Excel。"
-                    ))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="目前尚無已保存結果。請先 /calc 上傳 Excel。"
+                ))
                 return
 
-            # 按理專分組（支援一格多人，逗號分隔）
             from collections import defaultdict
             grouped = defaultdict(list)
             for bond_id, agent_raw in bonds:
-                # 拆開多個理專名字
                 agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()]
                 if not agents:
                     agents = ["未指定"]
                 for agent in agents:
                     grouped[agent].append(bond_id)
 
-            # 排序
-            sorted_groups = sorted(grouped.items(), key=lambda x: x[0])
-
-            lines = []
-            if agent_filter:
-                lines.append(f"🔍 理專「{agent_filter}」的商品：\n")
-            else:
-                lines.append(f"📋 全部商品（共 {len(bonds)} 筆，按理專排列）：\n")
-
-            for agent, bond_ids in sorted_groups:
-                # 去重複（同一筆可能對應多個理專）
+            lines = [f"📋 全部商品（共 {len(bonds)} 筆，按理專排列）：\n"]
+            for agent, bond_ids in sorted(grouped.items()):
                 unique_bonds = list(dict.fromkeys(bond_ids))
                 lines.append(f"👤 {agent}（{len(unique_bonds)} 筆）")
                 for b in unique_bonds:
                     lines.append(f"   • {b}")
-
-            if not agent_filter:
-                lines.append(f"\n💡 篩選：/list 理專姓名")
 
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text="\n".join(lines)[:4900]
