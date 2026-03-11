@@ -1496,6 +1496,29 @@ def handle_file_message(event):
             for chunk in content.iter_content():
                 f.write(chunk)
 
+        # 音檔轉文字（mp3/m4a/wav/ogg/mp4）
+        if ext in (".mp3", ".m4a", ".wav", ".ogg", ".mp4", ".webm"):
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=f"🎙️ 收到音檔 {filename}，轉文字中，請稍候..."
+            ))
+            with open(tmp_path, "rb") as f:
+                audio_data = f.read()
+            text_result = transcribe_audio(audio_data)
+            if not text_result:
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                    text="❌ 無法辨識語音內容，請確認音檔有聲音。"
+                ))
+                return
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                text=f"📝 語音轉文字：\n\n{text_result}"
+            ))
+            # 把轉出來的文字當對話繼續處理
+            save_chat_history(ck, "user", f"[語音訊息] {text_result}")
+            reply = chat_with_claude(ck, text_result)
+            save_chat_history(ck, "assistant", reply)
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=reply[:4900]))
+            return
+
         # ELN 模式：有先打 /calc 且是 Excel
         if ext in (".xlsx", ".xls") and db_is_await(ck):
             db_set_await(ck, False)
@@ -1629,7 +1652,7 @@ def transcribe_audio(audio_data: bytes) -> str:
     MAX_BYTES = 24 * 1024 * 1024  # 24MB 安全緩衝
 
     with tempfile.TemporaryDirectory() as tmp:
-        src_path = os.path.join(tmp, "audio.m4a")
+        src_path = os.path.join(tmp, "audio_input")
         with open(src_path, "wb") as f:
             f.write(audio_data)
 
