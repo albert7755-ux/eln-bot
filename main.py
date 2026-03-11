@@ -1503,7 +1503,7 @@ def handle_file_message(event):
             ))
             with open(tmp_path, "rb") as f:
                 audio_data = f.read()
-            text_result = transcribe_audio(audio_data)
+            text_result = transcribe_audio(audio_data, filename=filename)
             if not text_result:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
                     text="❌ 無法辨識語音內容，請確認音檔有聲音。"
@@ -1640,7 +1640,7 @@ def handle_image_message(event):
         handle_image_message(event, _override_bot_api=agent_line_bot_api)
 
 
-def transcribe_audio(audio_data: bytes) -> str:
+def transcribe_audio(audio_data: bytes, filename: str = "audio.m4a") -> str:
     """
     將音檔壓縮後送 Whisper API 轉文字。
     超過 24MB 先用 pydub 壓縮成低位元率 mp3。
@@ -1652,7 +1652,8 @@ def transcribe_audio(audio_data: bytes) -> str:
     MAX_BYTES = 24 * 1024 * 1024  # 24MB 安全緩衝
 
     with tempfile.TemporaryDirectory() as tmp:
-        src_path = os.path.join(tmp, "audio_input")
+        ext = os.path.splitext(filename)[1].lower() or ".m4a"
+        src_path = os.path.join(tmp, f"audio_input{ext}")
         with open(src_path, "wb") as f:
             f.write(audio_data)
 
@@ -1675,7 +1676,7 @@ def transcribe_audio(audio_data: bytes) -> str:
         with open(send_path, "rb") as f:
             resp = openai_client.audio.transcriptions.create(
                 model="whisper-1",
-                file=f,
+                file=(os.path.basename(send_path), f),
                 language="zh"
             )
         return resp.text.strip()
