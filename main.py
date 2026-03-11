@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, HTTPException
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage, ImageMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage, ImageMessage, AudioMessage
 from sqlalchemy import create_engine, text
 from autotracking_core import calculate_from_file
 from market_content_generator import generate_market_content
@@ -1457,6 +1457,97 @@ def handle_image_message(event):
     @agent_handler.add(MessageEvent, message=ImageMessage)
     def agent_handle_image(event):
         handle_image_message(event, _override_bot_api=agent_line_bot_api)
+
+
+def transcribe_audio(audio_data: bytes) -> str:
+    """
+    將音檔壓縮後送 Whisper API 轉文字。
+    超過 24MB 先用 pydub 壓縮成低位元率 mp3。
+    """
+    import tempfile, os
+    from openai import OpenAI
+    openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+
+    MAX_BYTES = 24 * 1024 * 1024  # 24MB 安全緩衝
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src_path = os.path.join(tmp, "audio.m4a")
+        with open(src_path, "wb") as f:
+            f.write(audio_data)
+
+        # 判斷是否需要壓縮
+        if len(audio_data) > MAX_BYTES:
+            try:
+                from pydub import AudioSegment
+                out_path = os.path.join(tmp, "audio_compressed.mp3")
+                audio = AudioSegment.from_file(src_path)
+                # 壓縮：單聲道、16kHz、32kbps — 足夠語音辨識
+                audio = audio.set_channels(1).set_frame_rate(16000)
+                audio.export(out_path, format="mp3", bitrate="32k")
+                send_path = out_path
+            except Exception as e:
+                print(f"[Audio] 壓縮失敗，嘗試直接送原檔: {e}")
+                send_path = src_path
+        else:
+            send_path = src_path
+
+        with open(send_path, "rb") as f:
+            resp = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=f,
+                language="zh"
+            )
+        return resp.text.strip()
+
+
+@handler.add(MessageEvent, message=AudioMessage)
+def handle_audio_message(event, _override_bot_api=None):
+    _bot_api = _override_bot_api or line_bot_api
+    ck = chat_key_of(event)
+    print(f"[AUDIO] {ck}")
+
+    try:
+        _bot_api.reply_message(event.reply_token, TextSendMessage(
+            text="🎙️ 收到語音，轉文字中，請稍候..."
+        ))
+
+        # 下載音檔
+        message_id = event.message.id
+        content = _bot_api.get_message_content(message_id)
+        audio_data = b""
+        for chunk in content.iter_content():
+            audio_data += chunk
+
+        # 轉文字
+        text_result = transcribe_audio(audio_data)
+
+        if not text_result:
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                text="❌ 無法辨識語音內容，請確認音檔有聲音。"
+            ))
+            return
+
+        # 推播轉文字結果
+        _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+            text=f"📝 語音轉文字：\n\n{text_result}"
+        ))
+
+        # 把轉出來的文字當對話繼續處理（存入對話記憶）
+        save_chat_history(ck, "user", f"[語音訊息] {text_result}")
+        reply = chat_with_claude(ck, text_result)
+        save_chat_history(ck, "assistant", reply)
+        _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+            text=reply[:4900]
+        ))
+
+    except Exception as e:
+        print(f"[ERROR] handle_audio_message: {e}")
+        try:
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                text=f"❌ 語音處理失敗：{str(e)[:200]}"
+            ))
+        except Exception:
+            pass
 
 # ==============================
 # 內建排程（取代獨立 Cron Jobs）
