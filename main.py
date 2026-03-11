@@ -797,7 +797,7 @@ def handle_text_message(event):
             return
 
         # REPORT
-        if cmd == "report":
+        if cmd == "report" and len(raw_cmd.strip().split()) == 1:
             summary = db_get_report(ck)
             if not summary:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無已保存結果，請先 /calc 上傳 Excel。"))
