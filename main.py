@@ -481,6 +481,13 @@ def handle_text_message(event):
                     "📈 投資推播\n"
                     "/invest — 上傳新聞截圖，生成投資推播文\n"
                     "─────────────────\n"
+                    "📤 ELN 理專通知\n"
+                    "/send <編號> — 發送第N筆通知給理專\n"
+                    "/skip <編號> — 略過第N筆通知\n"
+                    "/send all — 全部發送\n"
+                    "/skip all — 全部略過\n"
+                    "/send list — 查看待確認清單\n"
+                    "─────────────────\n"
                     "📄 PDF\n"
                     "/pdf daily — 財經日報 PDF\n"
                     "/pdf market <內容> — 市場觀點 PDF\n"
@@ -505,6 +512,108 @@ def handle_text_message(event):
                     "/help — 顯示本說明"
                 )
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
+            return
+
+        # SEND / SKIP — ELN 理專通知確認
+        if cmd in ("send", "skip"):
+            arg = parts[1].strip().lower() if len(parts) > 1 else ""
+            if not arg:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="請指定編號或 all\n範例：/send 1　/skip 2　/send all"
+                ))
+                return
+
+            # 從 DB 撈 pending 清單
+            with engine.begin() as conn:
+                rows = conn.execute(text(
+                    "SELECT id, target_id, agent_name, bond_id, status, msg "
+                    "FROM eln_pending_notifications WHERE chat_key=:k ORDER BY id"
+                ), {"k": ck}).fetchall()
+
+            if not rows:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="目前沒有待確認的通知。"
+                ))
+                return
+
+            # 決定要處理哪幾筆
+            if arg == "all":
+                targets = list(rows)
+            else:
+                try:
+                    idx = int(arg) - 1
+                    if idx < 0 or idx >= len(rows):
+                        raise ValueError
+                    targets = [rows[idx]]
+                except ValueError:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text=f"編號不正確，請輸入 1～{len(rows)} 或 all"
+                    ))
+                    return
+
+            if cmd == "send":
+                sent, failed = 0, 0
+                for row in targets:
+                    try:
+                        line_bot_api.push_message(
+                            row.target_id,
+                            TextSendMessage(text=row.msg[:4900])
+                        )
+                        sent += 1
+                        print(f"[SEND] {row.agent_name} | {row.bond_id} | {row.status}")
+                    except Exception as e:
+                        failed += 1
+                        print(f"[SEND ERROR] {row.target_id}: {e}")
+                    # 發完就從 pending 刪掉
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            "DELETE FROM eln_pending_notifications WHERE id=:i"
+                        ), {"i": row.id})
+
+                result_text = f"✅ 已發送 {sent} 筆"
+                if failed:
+                    result_text += f"，失敗 {failed} 筆"
+            else:  # skip
+                for row in targets:
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            "DELETE FROM eln_pending_notifications WHERE id=:i"
+                        ), {"i": row.id})
+                result_text = f"⏭️ 已略過 {len(targets)} 筆"
+
+            # 看看還有沒有剩的
+            with engine.begin() as conn:
+                remaining = conn.execute(text(
+                    "SELECT COUNT(*) FROM eln_pending_notifications WHERE chat_key=:k"
+                ), {"k": ck}).scalar()
+
+            if remaining > 0:
+                result_text += f"\n\n還有 {remaining} 筆待處理，打 /send list 查看"
+            else:
+                result_text += "\n\n✅ 所有通知已處理完畢"
+
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=result_text))
+            return
+
+        # SEND LIST — 查看待確認清單
+        if cmd == "send" and len(parts) > 1 and parts[1].strip().lower() == "list":
+            with engine.begin() as conn:
+                rows = conn.execute(text(
+                    "SELECT id, agent_name, bond_id, status "
+                    "FROM eln_pending_notifications WHERE chat_key=:k ORDER BY id"
+                ), {"k": ck}).fetchall()
+            if not rows:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="目前沒有待確認的通知。"
+                ))
+            else:
+                lines = [f"📋 待確認通知（{len(rows)}筆）\n"]
+                for i, row in enumerate(rows, start=1):
+                    lines.append(f"{i}️⃣ {row.agent_name} | {row.bond_id} | {row.status}\n  /send {i}　/skip {i}")
+                lines.append("\n/send all 全部發送　/skip all 全部略過")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="\n\n".join(lines)
+                ))
             return
 
         # INVEST 投資推播
