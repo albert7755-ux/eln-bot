@@ -181,6 +181,26 @@ def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str]]:
         """), {"k": chat_key, "lim": int(limit)}).fetchall()
     return [(r[0], r[1]) for r in rows] if rows else []
 
+def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
+    """長文字自動分段 push_message"""
+    if not text:
+        return
+    lines = text.split("\n")
+    chunks = []
+    current = ""
+    for line in lines:
+        if len(current) + len(line) + 1 > max_len:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current = current + "\n" + line if current else line
+    if current:
+        chunks.append(current)
+    for chunk in chunks:
+        bot_api.push_message(target_id, TextSendMessage(text=chunk))
+
+
 def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, list[str]]:
     q_norm = query.strip().upper()
     if not q_norm:
@@ -736,9 +756,22 @@ def handle_text_message(event):
                 for b in unique_bonds:
                     lines.append(f"   • {b}")
 
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="\n".join(lines)[:4900]
-            ))
+            # 分段發送，每段不超過 4800 字元
+            full_text = "\n".join(lines)
+            chunks = []
+            current = ""
+            for line in full_text.split("\n"):
+                if len(current) + len(line) + 1 > 4800:
+                    chunks.append(current)
+                    current = line
+                else:
+                    current = current + "\n" + line if current else line
+            if current:
+                chunks.append(current)
+
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=chunks[0]))
+            for chunk in chunks[1:]:
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=chunk))
             return
 
         # CALC
@@ -1479,14 +1512,12 @@ def handle_file_message(event):
                     text="❌ 無法辨識語音內容，請確認音檔有聲音。"
                 ))
                 return
-            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                text=f"📝 語音轉文字：\n\n{text_result}"
-            ))
+            push_long_message(_bot_api, ck.split(":", 1)[1], f"📝 語音轉文字：\n\n{text_result}")
             # 把轉出來的文字當對話繼續處理
             save_chat_history(ck, "user", f"[語音訊息] {text_result}")
             reply = chat_with_claude(ck, text_result)
             save_chat_history(ck, "assistant", reply)
-            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=reply[:4900]))
+            push_long_message(_bot_api, ck.split(":", 1)[1], reply)
             return
 
         # ELN 模式：有先打 /calc 且是 Excel
@@ -1680,17 +1711,13 @@ def handle_audio_message(event, _override_bot_api=None):
             return
 
         # 推播轉文字結果
-        _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-            text=f"📝 語音轉文字：\n\n{text_result}"
-        ))
+        push_long_message(_bot_api, ck.split(":", 1)[1], f"📝 語音轉文字：\n\n{text_result}")
 
         # 把轉出來的文字當對話繼續處理（存入對話記憶）
         save_chat_history(ck, "user", f"[語音訊息] {text_result}")
         reply = chat_with_claude(ck, text_result)
         save_chat_history(ck, "assistant", reply)
-        _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-            text=reply[:4900]
-        ))
+        push_long_message(_bot_api, ck.split(":", 1)[1], reply)
 
     except Exception as e:
         print(f"[ERROR] handle_audio_message: {e}")
