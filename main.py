@@ -1274,7 +1274,6 @@ def handle_text_message(event):
                 _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=msg[:4900]))
 
             except Exception as e:
-                import traceback
                 _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(
                     text=f"技術分析失敗：{str(e)[:200]}"
                 ))
