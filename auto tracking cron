@@ -143,9 +143,42 @@ def main():
         save_result_to_db(engine, chat_key, summary, top5_lines, detail_map, agent_name_map)
         print(f"Saved {len(detail_map)} bonds to DB")
 
-        # 4. 推播到 LINE
+        # 4. 推播總結給你
         print("Sending to LINE...")
         line_bot_api.push_message(user_id, TextSendMessage(text=summary[:4900]))
+
+        # 5. 把個別通知存進 pending 表，等你確認後才發
+        individual_messages = out.get("individual_messages", [])
+        if individual_messages:
+            # 先清掉舊的 pending
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM eln_pending_notifications WHERE chat_key=:k"), {"k": chat_key})
+                for msg in individual_messages:
+                    conn.execute(text("""
+                        INSERT INTO eln_pending_notifications
+                            (chat_key, target_id, agent_name, bond_id, status, msg)
+                        VALUES (:k, :t, :n, :b, :s, :m)
+                    """), {
+                        "k": chat_key,
+                        "t": msg.get("target", ""),
+                        "n": msg.get("name", ""),
+                        "b": msg.get("id", ""),
+                        "s": msg.get("status", ""),
+                        "m": msg.get("msg", "")
+                    })
+
+            # 推播待確認清單
+            lines = [f"📋 今日 ELN 通知待確認（{len(individual_messages)}筆）\n"]
+            for i, msg in enumerate(individual_messages, start=1):
+                lines.append(
+                    f"{i}️⃣ {msg.get('name','')} | {msg.get('id','')} | {msg.get('status','')}\n"
+                    f"  /send {i} 發送　/skip {i} 略過"
+                )
+            lines.append("\n/send all 全部發送　/skip all 全部略過")
+            line_bot_api.push_message(user_id, TextSendMessage(text="\n\n".join(lines)))
+        else:
+            line_bot_api.push_message(user_id, TextSendMessage(text="✅ 今日無需通知理專"))
+
         print("Done!")
 
     except Exception as e:
