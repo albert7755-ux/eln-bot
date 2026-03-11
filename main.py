@@ -1,7 +1,7 @@
 import os
 import re
 import json
-import traceback
+import traceback as _traceback
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, HTTPException
@@ -722,7 +722,8 @@ def handle_text_message(event):
 
         # LIST
         if cmd == "list":
-            agent_filter = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
+            parts = raw_cmd.split(" ", 1)
+            agent_filter = parts[1].strip() if len(parts) > 1 else ""
             bonds = db_list_bonds(ck, limit=100, agent_filter=agent_filter)
             if not bonds:
                 if agent_filter:
@@ -1295,7 +1296,7 @@ def handle_text_message(event):
 
     except Exception as e:
         print("[ERROR] handle_text_message:", e)
-        print(traceback.format_exc())
+        print(_traceback.format_exc())
         try:
             _bot_api.reply_message(
                 event.reply_token,
@@ -1567,7 +1568,7 @@ def handle_file_message(event):
 
     except Exception as e:
         print("[ERROR] handle_file_message:", e)
-        print(traceback.format_exc())
+        print(_traceback.format_exc())
         try:
             db_set_await(chat_key_of(event), False)
         except Exception:
@@ -1619,7 +1620,7 @@ def handle_image_message(event):
 
     except Exception as e:
         print("[ERROR] handle_image_message:", e)
-        print(traceback.format_exc())
+        print(_traceback.format_exc())
         try:
             _bot_api.reply_message(
                 event.reply_token,
