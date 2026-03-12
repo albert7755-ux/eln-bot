@@ -1,8 +1,8 @@
 import os
 import json
-import html
 import tempfile
 from datetime import datetime
+from html import escape as html_escape
 
 import pytz
 from reportlab.lib.pagesizes import A4
@@ -19,72 +19,18 @@ from googleapiclient.http import MediaFileUpload
 
 TZ_TAIPEI = pytz.timezone("Asia/Taipei")
 
-# ==============================
-# 中文字型（ReportLab 內建 CJK 字型，Render / Linux 可直接使用）
-# ==============================
-for _font in ["HeiseiKakuGo-W5", "STSong-Light"]:
-    try:
-        pdfmetrics.registerFont(UnicodeCIDFont(_font))
-    except Exception:
-        pass
+pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
+pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
 
 FONT_NORMAL = "HeiseiKakuGo-W5"
 FONT_BOLD = "HeiseiKakuGo-W5"
 
-DISCLAIMER_TEXT = (
-    "本報告內容僅供參考，不構成投資建議或買賣依據。投資涉及風險，過去績效不代表未來表現，"
-    "投資人應審慎評估自身風險承受能力，並自行負擔投資損益。"
-)
 
-
-# ==============================
-# 工具函式
-# ==============================
-def _safe_text(text: str) -> str:
-    """避免 Paragraph 因特殊字元或換行導致失敗。"""
-    if text is None:
-        return ""
-    text = str(text).replace("\r\n", "\n").replace("\r", "\n")
-    text = html.escape(text, quote=False)
-    text = text.replace("\t", "    ")
-    text = text.replace("\n", "<br/>")
-    return text
-
-
-def _section_like(line: str) -> bool:
-    prefixes = [
-        "一、", "二、", "三、", "四、", "五、", "六、", "七、", "八、", "九、", "十、",
-        "【", "📌", "📊", "⚖️", "🔭", "💡", "📋", "👤", "⚠️", "🔧", "💬"
-    ]
-    return any(line.startswith(p) for p in prefixes)
-
-
-def _add_body_lines(story: list, content: str, section_style, body_style):
-    for raw_line in str(content).split("\n"):
-        line = raw_line.strip()
-        if not line:
-            story.append(Spacer(1, 4))
-            continue
-        safe = _safe_text(line)
-        if _section_like(line):
-            story.append(Paragraph(safe, section_style))
-        else:
-            story.append(Paragraph(safe, body_style))
-
-
-# ==============================
-# Google Drive 上傳
-# ==============================
 def get_drive_service():
     token_json = os.environ.get("GOOGLE_TOKEN_JSON", "")
     if not token_json:
         raise RuntimeError("Missing GOOGLE_TOKEN_JSON env var")
-
-    try:
-        token_data = json.loads(token_json)
-    except Exception as e:
-        raise RuntimeError(f"GOOGLE_TOKEN_JSON 不是合法 JSON：{e}") from e
-
+    token_data = json.loads(token_json)
     creds = Credentials(
         token=token_data.get("token"),
         refresh_token=token_data.get("refresh_token"),
@@ -108,13 +54,12 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
     else:
         folder_metadata = {
             "name": folder_name,
-            "mimeType": "application/vnd.google-apps.folder",
+            "mimeType": "application/vnd.google-apps.folder"
         }
         folder = service.files().create(body=folder_metadata, fields="id").execute()
         folder_id = folder["id"]
 
     file_metadata = {"name": filename, "parents": [folder_id]}
-
     if file_path.endswith(".png"):
         mime = "image/png"
     elif file_path.endswith(".jpg") or file_path.endswith(".jpeg"):
@@ -136,15 +81,12 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
     return f"https://drive.google.com/file/d/{file_id}/view"
 
 
-# ==============================
-# 樣式設定
-# ==============================
 def get_styles():
     title_style = ParagraphStyle(
         "ReportTitle",
         fontSize=18,
         leading=26,
-        textColor=colors.HexColor("#1a1a2e"),
+        textColor=colors.HexColor("#1A1A2E"),
         spaceAfter=6,
         fontName=FONT_BOLD,
     )
@@ -160,7 +102,7 @@ def get_styles():
         "Section",
         fontSize=13,
         leading=20,
-        textColor=colors.HexColor("#16213e"),
+        textColor=colors.HexColor("#16213E"),
         spaceBefore=10,
         spaceAfter=4,
         fontName=FONT_BOLD,
@@ -176,123 +118,123 @@ def get_styles():
     return title_style, subtitle_style, section_style, body_style
 
 
-# ==============================
-# 建立 PDF 基底
-# ==============================
-def _build_doc(tmp_path: str):
-    return SimpleDocTemplate(
+def _safe_text(text: str) -> str:
+    if text is None:
+        return ""
+    return str(text).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _paragraph_html(line: str) -> str:
+    safe = html_escape(_safe_text(line))
+    return safe.replace("\n", "<br/>")
+
+
+def _is_section_line(line: str) -> bool:
+    prefixes = (
+        "一、", "二、", "三、", "四、", "五、", "六、", "七、", "八、", "九、", "十、",
+        "【", "📌", "📊", "⚖️", "🔭", "💡", "📋", "✅", "❌"
+    )
+    return line.startswith(prefixes)
+
+
+def _append_lines(story, text: str, section_style, body_style):
+    for raw_line in _safe_text(text).split("\n"):
+        line = raw_line.strip()
+        if not line:
+            story.append(Spacer(1, 4))
+            continue
+        html = _paragraph_html(line)
+        story.append(Paragraph(html, section_style if _is_section_line(line) else body_style))
+
+
+def _build_doc(tmp_path: str, header_title: str, sublines: list[str], content: str):
+    doc = SimpleDocTemplate(
         tmp_path,
         pagesize=A4,
         rightMargin=20 * mm,
         leftMargin=20 * mm,
         topMargin=20 * mm,
-        bottomMargin=20 * mm,
+        bottomMargin=20 * mm
     )
 
+    title_style, subtitle_style, section_style, body_style = get_styles()
+    story = []
 
-def _append_footer(story: list, subtitle_style):
+    story.append(Paragraph(_paragraph_html(header_title), title_style))
+    for sub in sublines:
+        if sub:
+            story.append(Paragraph(_paragraph_html(sub), subtitle_style))
+
+    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1A1A2E")))
+    story.append(Spacer(1, 8))
+
+    _append_lines(story, content, section_style, body_style)
+
     story.append(Spacer(1, 12))
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
-    story.append(Paragraph(_safe_text(DISCLAIMER_TEXT), subtitle_style))
+    disclaimer = (
+        "本報告內容僅供參考，不構成投資建議或買賣依據。"
+        "投資涉及風險，過去績效不代表未來表現，投資人應審慎評估自身風險承受能力，並自行負擔投資損益。"
+    )
+    story.append(Paragraph(_paragraph_html(disclaimer), subtitle_style))
+    doc.build(story)
 
 
-# ==============================
-# 財經日報 PDF
-# ==============================
 def generate_daily_report_pdf(report_text: str):
     now = datetime.now(TZ_TAIPEI)
     filename = f"財經日報_{now.strftime('%Y%m%d')}.pdf"
     tmp_path = os.path.join(tempfile.gettempdir(), filename)
-
-    doc = _build_doc(tmp_path)
-    title_style, subtitle_style, section_style, body_style = get_styles()
-    story = []
-
-    story.append(Paragraph("每日財經日報", title_style))
-    story.append(Paragraph(_safe_text(now.strftime("%Y年%m月%d日")), subtitle_style))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1a1a2e")))
-    story.append(Spacer(1, 8))
-
-    _add_body_lines(story, report_text, section_style, body_style)
-    _append_footer(story, subtitle_style)
-    doc.build(story)
+    _build_doc(
+        tmp_path=tmp_path,
+        header_title="每日財經日報",
+        sublines=[now.strftime("%Y年%m月%d日")],
+        content=report_text,
+    )
     return tmp_path, filename
 
 
-# ==============================
-# 市場觀點 PDF
-# ==============================
 def generate_market_pdf(content: str):
     now = datetime.now(TZ_TAIPEI)
     filename = f"市場觀點_{now.strftime('%Y%m%d_%H%M')}.pdf"
     tmp_path = os.path.join(tempfile.gettempdir(), filename)
-
-    doc = _build_doc(tmp_path)
-    title_style, subtitle_style, section_style, body_style = get_styles()
-    story = []
-
-    story.append(Paragraph("市場觀點報告", title_style))
-    story.append(Paragraph(_safe_text(now.strftime("%Y年%m月%d日 %H:%M")), subtitle_style))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1a1a2e")))
-    story.append(Spacer(1, 8))
-
-    _add_body_lines(story, content, section_style, body_style)
-    _append_footer(story, subtitle_style)
-    doc.build(story)
+    _build_doc(
+        tmp_path=tmp_path,
+        header_title="市場觀點報告",
+        sublines=[now.strftime("%Y年%m月%d日 %H:%M")],
+        content=content,
+    )
     return tmp_path, filename
 
 
-# ==============================
-# 檔案分析 / AI 報告 PDF
-# ==============================
 def generate_analysis_pdf(analysis: str, original_filename: str):
     now = datetime.now(TZ_TAIPEI)
     filename = f"分析報告_{now.strftime('%Y%m%d_%H%M')}.pdf"
     tmp_path = os.path.join(tempfile.gettempdir(), filename)
-
-    doc = _build_doc(tmp_path)
-    title_style, subtitle_style, section_style, body_style = get_styles()
-    story = []
-
-    story.append(Paragraph("檔案分析報告", title_style))
-    if original_filename:
-        story.append(Paragraph(_safe_text(f"原始檔案：{original_filename}"), subtitle_style))
-    story.append(Paragraph(_safe_text(now.strftime("%Y年%m月%d日 %H:%M")), subtitle_style))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1a1a2e")))
-    story.append(Spacer(1, 8))
-
-    _add_body_lines(story, analysis, section_style, body_style)
-    _append_footer(story, subtitle_style)
-    doc.build(story)
+    _build_doc(
+        tmp_path=tmp_path,
+        header_title="檔案分析報告",
+        sublines=[
+            f"原始檔案：{original_filename or 'AI自動生成報告'}",
+            now.strftime("%Y年%m月%d日 %H:%M")
+        ],
+        content=analysis,
+    )
     return tmp_path, filename
 
 
-# ==============================
-# 新聞摘要 PDF
-# ==============================
 def generate_news_pdf(news_report: str):
     now = datetime.now(TZ_TAIPEI)
     filename = f"財經新聞_{now.strftime('%Y%m%d')}.pdf"
     tmp_path = os.path.join(tempfile.gettempdir(), filename)
-
-    doc = _build_doc(tmp_path)
-    title_style, subtitle_style, section_style, body_style = get_styles()
-    story = []
-
-    story.append(Paragraph("每日財經新聞摘要", title_style))
-    story.append(Paragraph(_safe_text(now.strftime("%Y年%m月%d日")), subtitle_style))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1a1a2e")))
-    story.append(Spacer(1, 8))
-
-    _add_body_lines(story, news_report, section_style, body_style)
-    _append_footer(story, subtitle_style)
-    doc.build(story)
+    _build_doc(
+        tmp_path=tmp_path,
+        header_title="每日財經新聞摘要",
+        sublines=[now.strftime("%Y年%m月%d日")],
+        content=news_report,
+    )
     return tmp_path, filename
 
 
-# ==============================
-# 統一入口
-# ==============================
 def create_and_upload_pdf(pdf_type: str, content: str, original_filename: str = "") -> str:
     if pdf_type == "daily":
         tmp_path, filename = generate_daily_report_pdf(content)
