@@ -472,6 +472,22 @@ def ai_claude(user_text: str, chat_key: str = "") -> str:
         save_chat_history(chat_key, "assistant", f"[claude] {reply}")
     return reply
 
+
+def ai_claude_long(user_text: str, chat_key: str = "") -> str:
+    history = _normalize_history_for_chat(chat_key)
+    messages = history + [{"role": "user", "content": user_text}]
+    resp = claude_client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=3500,
+        system=SYSTEM_PROMPT,
+        messages=messages
+    )
+    reply = (resp.content[0].text or "").strip()
+    if chat_key:
+        save_chat_history(chat_key, "user", user_text)
+        save_chat_history(chat_key, "assistant", f"[claude-long] {reply}")
+    return reply
+
 def ai_chatgpt(user_text: str, chat_key: str = "") -> str:
     if not openai_client:
         return ai_claude(user_text, chat_key)
@@ -553,30 +569,156 @@ def ai_router(user_text: str, chat_key: str = "", forced_model: str = "") -> str
     return ai_chatgpt(user_text, chat_key)
 
 
-def build_pdf_report_content(user_request: str, chat_key: str = "") -> str:
-    prompt = (
-        "你是華爾街投資研究員兼台灣銀行財富管理顧問，請把使用者需求整理成一份可直接輸出為 PDF 的專業研究報告。\n\n"
-        "寫作要求：\n"
-        "1. 使用繁體中文，語氣專業、精煉、可信。\n"
-        "2. 不要使用 Markdown 符號，不要用表格。\n"
-        "3. 請明確分成以下章節，且每個章節都要有內容：\n"
-        "【執行摘要】\n【市場背景】\n【核心分析】\n【對金融業/產業的影響】\n【投資機會】\n【主要風險】\n【結論與建議】\n"
-        "4. 若主題涉及市場、金融、產業或投資，請加入具體脈絡、傳導機制與投資人應關注的指標。\n"
-        "5. 若使用者題目不夠完整，請合理補足成一份可讀性高的研究報告。\n"
-        "6. 內容長度請明顯比一般聊天回覆更完整，至少 900 字。\n\n"
-        f"使用者需求：\n{user_request}"
-    )
-    return ai_router(prompt, chat_key=chat_key, forced_model="claude")
+def classify_report_topic(user_text: str) -> str:
+    text_l = (user_text or "").lower()
+    macro_keywords = [
+        "戰爭", "衝突", "重建", "制裁", "關稅", "降息", "升息", "聯準會", "fed", "通膨",
+        "景氣", "衰退", "地緣政治", "原油", "油價", "中東", "美元", "公債", "殖利率",
+        "金融市場", "總經", "非農", "cpi", "pce", "失業率", "財政", "重建行情"
+    ]
+    equity_keywords = [
+        "股票", "股價", "公司", "企業", "財報", "估值", "獲利", "eps", "ai", "gpu",
+        "供應鏈", "半導體", "伺服器", "金融股", "銀行股", "科技股", "產業", "競爭力",
+        "台積電", "nvidia", "nvda", "amd", "avgo", "smci", "aapl", "meta"
+    ]
+    product_keywords = [
+        "基金", "債券", "etf", "eln", "結構型", "信託", "質借", "lombard", "票據",
+        "商品", "配息", "收益", "信用債", "投資等級", "高收益債", "可轉債"
+    ]
+    if any(k in text_l for k in macro_keywords):
+        return "macro"
+    if any(k in text_l for k in equity_keywords):
+        return "equity"
+    if any(k in text_l for k in product_keywords):
+        return "product"
+    return "general"
 
 
-def build_ppt_topic_from_request(user_request: str, chat_key: str = "") -> str:
-    prompt = (
-        "請從以下使用者需求中，抽出最適合做成簡報的主題。\n"
-        "只回傳一行繁體中文主題，不要加前言、不要加引號、不要加編號。\n\n"
-        f"使用者需求：\n{user_request}"
-    )
-    topic = ai_router(prompt, chat_key=chat_key, forced_model="claude").strip().splitlines()[0]
-    return topic[:80] if topic else user_request[:40]
+def build_macro_prompt(user_text: str) -> str:
+    return f"""
+你是一位頂級總經與跨資產策略研究員，服務對象為高資產客戶、機構投資人與銀行投顧團隊。
+請根據以下主題，撰寫一份可直接輸出成 PDF 的繁體中文深度研究報告。
+
+研究主題：
+{user_text}
+
+請依序撰寫以下章節，且每一節都要有足夠內容，不可過短：
+【封面摘要】
+【一、事件與市場背景】
+【二、行情形成機制】
+【三、受惠產業與資產主線】
+【四、金融市場影響】
+【五、情境分析】
+【六、投資機會與策略建議】
+【七、主要風險與反證】
+【八、結論】
+
+寫作要求：
+• 採正式 sell-side / 投資銀行研究報告語氣
+• 內容要有脈絡、有推演、有跨資產傳導
+• 要寫出市場為何交易這個主題，而不只是摘要事件
+• 每節至少 2 到 4 段，內容充實
+• 可使用【】作章節標題
+• 禁止 Markdown 符號，例如 #、*、-、---
+• 直接輸出完整報告正文
+"""
+
+
+def build_equity_prompt(user_text: str) -> str:
+    return f"""
+你是一位資深產業與股票研究員，請根據以下主題撰寫一份可直接輸出成 PDF 的繁體中文深度研究報告。
+
+研究主題：
+{user_text}
+
+請依序撰寫以下章節：
+【封面摘要】
+【一、產業與公司背景】
+【二、成長動能與投資邏輯】
+【三、競爭格局與關鍵優勢】
+【四、財務與估值觀察】
+【五、市場可能如何交易這個題材】
+【六、投資機會與布局方式】
+【七、主要風險與反證】
+【八、結論】
+
+寫作要求：
+• 語氣像大型券商或資產管理公司的產業研究報告
+• 不能只講故事，必須講商業模式、獲利邏輯、估值與市場預期
+• 每節至少 2 到 4 段，內容充實
+• 若題目涉及單一公司，也要帶出其所屬產業位置與市場定價邏輯
+• 可使用【】作章節標題
+• 禁止 Markdown 符號
+• 直接輸出完整報告正文
+"""
+
+
+def build_product_prompt(user_text: str) -> str:
+    return f"""
+你是一位銀行財富管理研究員，請根據以下主題撰寫一份可直接輸出成 PDF 的繁體中文深度研究報告。
+
+研究主題：
+{user_text}
+
+請依序撰寫以下章節：
+【封面摘要】
+【一、商品定位與市場背景】
+【二、報酬來源與運作機制】
+【三、適合客群與資產配置角色】
+【四、優勢、限制與常見誤解】
+【五、目前市場環境下的投資價值】
+【六、投資建議與配置思維】
+【七、主要風險與注意事項】
+【八、結論】
+
+寫作要求：
+• 語氣像銀行投顧或產品研究報告
+• 要兼具專業性與可銷售性，讓內容可以拿去和高資產客戶討論
+• 內容要有深度，不可只有商品說明書口吻
+• 每節至少 2 到 4 段，內容充實
+• 可使用【】作章節標題
+• 禁止 Markdown 符號
+• 直接輸出完整報告正文
+"""
+
+
+def build_general_prompt(user_text: str) -> str:
+    return f"""
+你是一位資深投資研究員，請根據以下主題撰寫一份可直接輸出成 PDF 的繁體中文深度研究報告。
+
+研究主題：
+{user_text}
+
+請依序撰寫以下章節：
+【封面摘要】
+【一、主題背景】
+【二、核心分析】
+【三、市場與產業影響】
+【四、投資機會】
+【五、主要風險】
+【六、結論與建議】
+
+寫作要求：
+• 採正式研究報告語氣
+• 要有完整段落與分析，不可像聊天摘要
+• 每節至少 2 到 4 段，內容充實
+• 可使用【】作章節標題
+• 禁止 Markdown 符號
+• 直接輸出完整報告正文
+"""
+
+
+def build_pdf_report_content(user_text: str, chat_key: str = "") -> str:
+    topic_type = classify_report_topic(user_text)
+    if topic_type == "macro":
+        prompt = build_macro_prompt(user_text)
+    elif topic_type == "equity":
+        prompt = build_equity_prompt(user_text)
+    elif topic_type == "product":
+        prompt = build_product_prompt(user_text)
+    else:
+        prompt = build_general_prompt(user_text)
+    return ai_claude_long(prompt, chat_key)
 
 # ==============================
 # Webhook endpoint
@@ -982,14 +1124,14 @@ def handle_text_message(event):
 
         # 自然語言 PDF 生成（保留原 /pdf 指令）
         if (not tl.startswith("/pdf")) and any(k in tl for k in PDF_NL_KEYWORDS):
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在以研究員模式整理內容並生成 PDF，請稍候..."))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在整理內容並生成研究報告 PDF，請稍候..."))
             try:
                 from pdf_generator import create_and_upload_pdf
                 report_text = build_pdf_report_content(text_raw, chat_key=ck)
-                link = create_and_upload_pdf("analysis", report_text, "AI自動生成報告")
+                link = create_and_upload_pdf("analysis", report_text, "AI自動生成研究報告")
                 _bot_api.push_message(
                     ck.split(":", 1)[1],
-                    TextSendMessage(text=f"✅ PDF 已生成完成！\n\n{link}")
+                    TextSendMessage(text=f"✅ 研究報告 PDF 已生成完成！\n\n{link}")
                 )
             except Exception as e:
                 _bot_api.push_message(
@@ -1008,7 +1150,12 @@ def handle_text_message(event):
             try:
                 from ppt_generator import generate_ppt
 
-                topic = build_ppt_topic_from_request(text_raw, chat_key=ck)
+                topic_prompt = (
+                    "請從以下使用者需求中，抽出最適合做成簡報的主題，"
+                    "只回傳一行繁體中文主題，不要加任何前言或符號。\n\n"
+                    f"使用者需求：{text_raw}"
+                )
+                topic = ai_claude(topic_prompt, chat_key=ck).strip().splitlines()[0][:80]
                 if not topic:
                     topic = text_raw[:40]
 
@@ -1058,20 +1205,23 @@ def handle_text_message(event):
                 content_text = parts[2].strip() if len(parts) > 2 else ""
                 if not content_text:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text="請在指令後面直接輸入內容\n\n範例：\n/pdf make 私人信貸如何影響美國金融業，請整理成專業研究報告"
+                        text="請在指令後面直接輸入內容\n\n範例：\n/pdf make 美伊戰爭後的重建行情研究報告"
                     ))
                     return
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在以研究員模式整理內容並產生 PDF，請稍候..."))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="整理內容並產生研究報告 PDF 中，請稍候..."))
                 try:
-                    organized = build_pdf_report_content(content_text, chat_key=ck)
-                    link = create_and_upload_pdf("analysis", organized, "自訂報告")
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📄 PDF 已產生！\n\n{link}"))
+                    report_text = build_pdf_report_content(content_text, chat_key=ck)
+                    link = create_and_upload_pdf("analysis", report_text, "自訂研究報告")
+                    _bot_api.push_message(
+                        ck.split(":", 1)[1],
+                        TextSendMessage(text=f"📄 研究報告 PDF 已產生！\n\n{link}")
+                    )
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"PDF 產生失敗: {e}"))
                 return
 
             _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="PDF 指令用法：\n/pdf daily → 財經日報 PDF\n/pdf market <內容> → 市場觀點 PDF\n/pdf make <內容> → 自訂內容 PDF"
+                text="PDF 指令用法：\n/pdf daily → 財經日報 PDF\n/pdf market <內容> → 市場觀點 PDF\n/pdf make <內容> → 研究報告 PDF"
             ))
             return
 
