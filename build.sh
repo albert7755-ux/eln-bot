@@ -13,8 +13,8 @@ python -c "
 import urllib.request, os
 
 files = {
-    'fonts/NotoSansTC-Regular.ttf': 'https://github.com/googlefonts/noto-cjk/raw/main/Sans/SubsetTTF/TC/NotoSansCJKtc-Regular.ttf',
-    'fonts/NotoSansTC-Bold.ttf':    'https://github.com/googlefonts/noto-cjk/raw/main/Sans/SubsetTTF/TC/NotoSansCJKtc-Bold.ttf',
+    'fonts/NotoSansTC-Regular.ttf': 'https://github.com/indigofeather/fonts/raw/master/NotoSansCJKtc-Regular.ttf',
+    'fonts/NotoSansTC-Bold.ttf':    'https://github.com/indigofeather/fonts/raw/master/NotoSansCJKtc-Bold.ttf',
 }
 for path, url in files.items():
     if not os.path.exists(path):
