@@ -933,6 +933,59 @@ def handle_text_message(event):
             )
             return
 
+        # 自然語言 PDF 生成（保留原 /pdf 指令）
+        if (not tl.startswith("/pdf")) and any(k in tl for k in PDF_NL_KEYWORDS):
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在整理內容並生成 PDF，請稍候..."))
+            try:
+                from pdf_generator import create_and_upload_pdf
+                report_text = build_pdf_report_content(text_raw, chat_key=ck)
+                link = create_and_upload_pdf("analysis", report_text, "AI自動生成報告")
+                _bot_api.push_message(
+                    ck.split(":", 1)[1],
+                    TextSendMessage(text=f"✅ PDF 已生成完成！
+
+{link}")
+                )
+            except Exception as e:
+                _bot_api.push_message(
+                    ck.split(":", 1)[1],
+                    TextSendMessage(text=f"❌ PDF 生成失敗：{str(e)[:250]}")
+                )
+            return
+
+        # 自然語言 PPT / 簡報生成
+        ppt_keywords = ["ppt", "PPT", "簡報", "投影片", "簡報檔"]
+        ppt_action_keywords = ["做", "生成", "產生", "整理", "輸出", "轉成", "轉為"]
+        if (
+            any(k in text_raw for k in ppt_keywords)
+            and any(k in text_raw for k in ppt_action_keywords)
+            and not tl.startswith("/report")
+        ):
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 正在整理內容並生成簡報，請稍候約60至90秒..."))
+            try:
+                from ppt_generator import generate_ppt
+
+                topic_prompt = (
+                    "請從以下使用者需求中，抽出最適合做成簡報的主題，"
+                    "只回傳一行繁體中文主題，不要加任何前言或符號。\n\n"
+                    f"使用者需求：{text_raw}"
+                )
+                topic = ai_router(topic_prompt, chat_key=ck).strip().splitlines()[0][:80]
+                if not topic:
+                    topic = text_raw[:40]
+
+                link = generate_ppt(topic, n_slides=12)
+                _bot_api.push_message(
+                    ck.split(":", 1)[1],
+                    TextSendMessage(text=f"✅ 簡報已生成完成！\n\n📌 主題：{topic}\n\n{link}")
+                )
+            except Exception as e:
+                _bot_api.push_message(
+                    ck.split(":", 1)[1],
+                    TextSendMessage(text=f"❌ 簡報生成失敗：{str(e)[:250]}")
+                )
+            return
+
         # PDF 生成
         if cmd.startswith("pdf"):
             from pdf_generator import create_and_upload_pdf
@@ -1312,7 +1365,7 @@ def handle_text_message(event):
             try:
                 from stock_analyzer import full_analysis
                 from pdf_generator import upload_to_drive
-                import tempfile, os
+                import tempfile
 
                 img_bytes, summary = full_analysis(symbol, months=months)
 
@@ -1373,7 +1426,7 @@ def handle_text_message(event):
 
                 # 上傳圖片到 imgbb 或用 LINE image message
                 # 這裡先存到 /tmp 再用 LINE upload
-                import tempfile, os
+                import tempfile
                 tmp_path = f"/tmp/tech_{symbol}_{months}.png"
                 with open(tmp_path, "wb") as f:
                     f.write(img_bytes)
@@ -1808,7 +1861,7 @@ def transcribe_audio(audio_data: bytes, filename: str = "audio.m4a") -> str:
     將音檔壓縮後送 Whisper API 轉文字。
     超過 24MB 先用 pydub 壓縮成低位元率 mp3。
     """
-    import tempfile, os
+    import tempfile
     if not openai_client:
         raise RuntimeError("缺少 OPENAI_API_KEY，無法使用語音轉文字")
 
