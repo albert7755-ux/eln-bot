@@ -95,6 +95,14 @@ def init_db():
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         """))
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS transcript_cache (
+            chat_key TEXT PRIMARY KEY,
+            transcript TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """))
         # 舊表補欄位（已存在的 table 不會重建）
         for col, typedef in [
             ("invest_mode", "TEXT NOT NULL DEFAULT ''"),
@@ -145,6 +153,26 @@ def db_invest_get(chat_key: str):
     if row:
         return row[0] or "", bytes(row[1]) if row[1] else None
     return "", None
+
+def db_set_transcript_cache(chat_key: str, transcript: str, summary: str):
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO transcript_cache(chat_key, transcript, summary, updated_at)
+        VALUES (:k, :t, :s, NOW())
+        ON CONFLICT (chat_key) DO UPDATE
+        SET transcript=:t, summary=:s, updated_at=NOW()
+        """), {"k": chat_key, "t": transcript[:200000], "s": summary[:50000]})
+
+def db_get_transcript_cache(chat_key: str):
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT transcript, summary FROM transcript_cache WHERE chat_key=:k"), {"k": chat_key}).fetchone()
+    if row:
+        return {"transcript": row[0] or "", "summary": row[1] or ""}
+    return None
+
+def db_clear_transcript_cache(chat_key: str):
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM transcript_cache WHERE chat_key=:k"), {"k": chat_key})
 
 def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_map: dict[str, str], agent_name_map: dict[str, str] = {}):
     with engine.begin() as conn:
@@ -831,6 +859,51 @@ def handle_text_message(event):
                 )
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
             return
+
+        transcript_cache = db_get_transcript_cache(ck)
+        if transcript_cache:
+            if any(x in tl for x in ["不用", "不用了", "先不用", "取消", "不用做"]):
+                db_clear_transcript_cache(ck)
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="👌 好的，已保留逐字稿與摘要回覆，不另外生成 PDF 或 PPT。"))
+                return
+
+            if any(x in tl for x in ["做成pdf", "生成pdf", "轉成pdf", "做成 pdf", "生成 pdf", "轉成 pdf", "輸出pdf", "輸出 pdf"]):
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在根據逐字稿重點生成 PDF，請稍候..."))
+                try:
+                    from pdf_generator import create_and_upload_pdf
+                    report_text = build_transcript_pdf_content(
+                        transcript_cache["transcript"],
+                        transcript_cache["summary"],
+                        chat_key=ck
+                    )
+                    link = create_and_upload_pdf("analysis", report_text, "會議重點報告")
+                    db_clear_transcript_cache(ck)
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 會議重點 PDF 已生成完成！
+
+{link}"))
+                except Exception as e:
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ PDF 生成失敗：{str(e)[:250]}"))
+                return
+
+            if any(x in tl for x in ["做成ppt", "生成ppt", "轉成ppt", "做成 ppt", "生成 ppt", "轉成 ppt", "做成簡報", "生成簡報", "轉成簡報"]):
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 正在根據逐字稿重點生成簡報，請稍候約60至90秒..."))
+                try:
+                    from ppt_generator import generate_ppt
+                    topic = build_transcript_ppt_topic(
+                        transcript_cache["transcript"],
+                        transcript_cache["summary"],
+                        chat_key=ck
+                    )
+                    link = generate_ppt(topic, n_slides=12)
+                    db_clear_transcript_cache(ck)
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 會議重點簡報已生成完成！
+
+📌 主題：{topic}
+
+{link}"))
+                except Exception as e:
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 簡報生成失敗：{str(e)[:250]}"))
+                return
 
         # SEND / SKIP — ELN 理專通知確認
         if cmd in ("send", "skip"):
