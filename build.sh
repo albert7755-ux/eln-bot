@@ -9,6 +9,7 @@ pip install -r requirements.txt
 
 echo "🔤 下載 Noto Sans TC 字型（TTF）..."
 mkdir -p fonts
+rm -f fonts/NotoSansTC-Regular.otf fonts/NotoSansTC-Bold.otf
 python -c "
 import urllib.request, os
 
