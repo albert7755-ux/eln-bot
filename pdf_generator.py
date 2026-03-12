@@ -2,10 +2,11 @@ import os
 import json
 import tempfile
 from datetime import datetime
-import pytz
+from xml.sax.saxutils import escape
 
+import pytz
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
@@ -18,14 +19,16 @@ from googleapiclient.http import MediaFileUpload
 
 TZ_TAIPEI = pytz.timezone("Asia/Taipei")
 
-# 註冊中文字型
-pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
-pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+# ==============================
+# 字型（使用 ReportLab 內建 CJK 字型，Render / Linux 可直接用）
+# ==============================
 pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
 pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
 
 FONT_NORMAL = "HeiseiKakuGo-W5"
 FONT_BOLD = "HeiseiKakuGo-W5"
+DISCLAIMER = "本報告內容僅供參考，不構成投資建議或買賣依據。投資涉及風險，過去績效不代表未來表現，投資人應審慎評估自身風險承受能力，並自行負擔投資損益。"
+
 
 # ==============================
 # Google Drive 上傳
@@ -45,6 +48,7 @@ def get_drive_service():
     )
     return build("drive", "v3", credentials=creds)
 
+
 def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報告") -> str:
     service = get_drive_service()
 
@@ -63,7 +67,6 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
         folder_id = folder["id"]
 
     file_metadata = {"name": filename, "parents": [folder_id]}
-    # 自動判斷 mimetype
     if file_path.endswith(".png"):
         mime = "image/png"
     elif file_path.endswith(".jpg") or file_path.endswith(".jpeg"):
@@ -72,6 +75,7 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
         mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     else:
         mime = "application/pdf"
+
     media = MediaFileUpload(file_path, mimetype=mime)
     uploaded = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
     file_id = uploaded["id"]
@@ -83,23 +87,24 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
 
     return f"https://drive.google.com/file/d/{file_id}/view"
 
+
 # ==============================
-# 樣式設定（中文字型）
+# 樣式設定
 # ==============================
 def get_styles():
     title_style = ParagraphStyle(
         "ReportTitle",
-        fontSize=18,
-        leading=26,
-        textColor=colors.HexColor("#1a1a2e"),
+        fontSize=20,
+        leading=28,
+        textColor=colors.HexColor("#0f172a"),
         spaceAfter=6,
         fontName=FONT_BOLD,
     )
     subtitle_style = ParagraphStyle(
         "Subtitle",
-        fontSize=11,
-        leading=16,
-        textColor=colors.HexColor("#555555"),
+        fontSize=10,
+        leading=15,
+        textColor=colors.HexColor("#475569"),
         spaceAfter=10,
         fontName=FONT_NORMAL,
     )
@@ -107,7 +112,7 @@ def get_styles():
         "Section",
         fontSize=13,
         leading=20,
-        textColor=colors.HexColor("#16213e"),
+        textColor=colors.HexColor("#1d4ed8"),
         spaceBefore=10,
         spaceAfter=4,
         fontName=FONT_BOLD,
@@ -116,11 +121,81 @@ def get_styles():
         "Body",
         fontSize=10,
         leading=16,
-        textColor=colors.HexColor("#333333"),
+        textColor=colors.HexColor("#111827"),
+        spaceAfter=4,
+        fontName=FONT_NORMAL,
+    )
+    bullet_style = ParagraphStyle(
+        "Bullet",
+        fontSize=10,
+        leading=16,
+        textColor=colors.HexColor("#111827"),
+        leftIndent=10,
+        firstLineIndent=-2,
         spaceAfter=3,
         fontName=FONT_NORMAL,
     )
-    return title_style, subtitle_style, section_style, body_style
+    return title_style, subtitle_style, section_style, body_style, bullet_style
+
+
+def _safe_line(line: str) -> str:
+    line = (line or "").strip()
+    if not line:
+        return ""
+    return escape(line).replace("
+", "<br/>")
+
+
+def _is_section_line(line: str) -> bool:
+    prefixes = ("一、", "二、", "三、", "四、", "五、", "六、", "七、", "【", "📌", "📊", "⚖️", "🔭", "💡", "📋", "👤", "⚠️", "💬")
+    return any(line.startswith(p) for p in prefixes)
+
+
+def _append_content_lines(story, content: str, section_style, body_style, bullet_style):
+    for raw_line in content.split("
+"):
+        line = raw_line.strip()
+        if not line:
+            story.append(Spacer(1, 4))
+            continue
+
+        safe = _safe_line(line)
+        if _is_section_line(line):
+            story.append(Paragraph(safe, section_style))
+        elif line.startswith(("•", "-", "→")):
+            story.append(Paragraph(safe, bullet_style))
+        else:
+            story.append(Paragraph(safe, body_style))
+
+
+def _build_pdf(tmp_path: str, title: str, subtitle_lines: list[str], content: str):
+    doc = SimpleDocTemplate(
+        tmp_path,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+    )
+
+    title_style, subtitle_style, section_style, body_style, bullet_style = get_styles()
+    story = []
+
+    story.append(Paragraph(_safe_line(title), title_style))
+    for item in subtitle_lines:
+        if item:
+            story.append(Paragraph(_safe_line(item), subtitle_style))
+    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1e3a8a")))
+    story.append(Spacer(1, 8))
+
+    _append_content_lines(story, content, section_style, body_style, bullet_style)
+
+    story.append(Spacer(1, 12))
+    story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#94a3b8")))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(_safe_line(DISCLAIMER), subtitle_style))
+    doc.build(story)
+
 
 # ==============================
 # 財經日報 PDF
@@ -129,34 +204,9 @@ def generate_daily_report_pdf(report_text: str):
     now = datetime.now(TZ_TAIPEI)
     filename = f"財經日報_{now.strftime('%Y%m%d')}.pdf"
     tmp_path = os.path.join(tempfile.gettempdir(), filename)
-
-    doc = SimpleDocTemplate(tmp_path, pagesize=A4,
-        rightMargin=20*mm, leftMargin=20*mm,
-        topMargin=20*mm, bottomMargin=20*mm)
-
-    title_style, subtitle_style, section_style, body_style = get_styles()
-    story = []
-
-    story.append(Paragraph("每日財經日報", title_style))
-    story.append(Paragraph(now.strftime("%Y年%m月%d日"), subtitle_style))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1a1a2e")))
-    story.append(Spacer(1, 8))
-
-    for line in report_text.split("\n"):
-        line = line.strip()
-        if not line:
-            story.append(Spacer(1, 4))
-            continue
-        if any(line.startswith(p) for p in ["一、","二、","三、","四、","五、","【"]):
-            story.append(Paragraph(line, section_style))
-        else:
-            story.append(Paragraph(line, body_style))
-
-    story.append(Spacer(1, 12))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
-    story.append(Paragraph("本報告內容僅供參考，不構成投資建議或買賣依據。投資涉及風險，過去績效不代表未來表現，投資人應審慎評估自身風險承受能力，並自行負擔投資損益。", subtitle_style))
-    doc.build(story)
+    _build_pdf(tmp_path, "每日財經日報", [now.strftime("%Y年%m月%d日")], report_text)
     return tmp_path, filename
+
 
 # ==============================
 # 市場觀點 PDF
@@ -165,31 +215,9 @@ def generate_market_pdf(content: str):
     now = datetime.now(TZ_TAIPEI)
     filename = f"市場觀點_{now.strftime('%Y%m%d_%H%M')}.pdf"
     tmp_path = os.path.join(tempfile.gettempdir(), filename)
-
-    doc = SimpleDocTemplate(tmp_path, pagesize=A4,
-        rightMargin=20*mm, leftMargin=20*mm,
-        topMargin=20*mm, bottomMargin=20*mm)
-
-    title_style, subtitle_style, section_style, body_style = get_styles()
-    story = []
-
-    story.append(Paragraph("市場觀點報告", title_style))
-    story.append(Paragraph(now.strftime("%Y年%m月%d日 %H:%M"), subtitle_style))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1a1a2e")))
-    story.append(Spacer(1, 8))
-
-    for line in content.split("\n"):
-        line = line.strip()
-        if not line:
-            story.append(Spacer(1, 4))
-            continue
-        story.append(Paragraph(line, body_style))
-
-    story.append(Spacer(1, 12))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
-    story.append(Paragraph("本報告內容僅供參考，不構成投資建議或買賣依據。投資涉及風險，過去績效不代表未來表現，投資人應審慎評估自身風險承受能力，並自行負擔投資損益。", subtitle_style))
-    doc.build(story)
+    _build_pdf(tmp_path, "市場觀點報告", [now.strftime("%Y年%m月%d日 %H:%M")], content)
     return tmp_path, filename
+
 
 # ==============================
 # 檔案分析 PDF
@@ -198,35 +226,24 @@ def generate_analysis_pdf(analysis: str, original_filename: str):
     now = datetime.now(TZ_TAIPEI)
     filename = f"分析報告_{now.strftime('%Y%m%d_%H%M')}.pdf"
     tmp_path = os.path.join(tempfile.gettempdir(), filename)
-
-    doc = SimpleDocTemplate(tmp_path, pagesize=A4,
-        rightMargin=20*mm, leftMargin=20*mm,
-        topMargin=20*mm, bottomMargin=20*mm)
-
-    title_style, subtitle_style, section_style, body_style = get_styles()
-    story = []
-
-    story.append(Paragraph("檔案分析報告", title_style))
-    story.append(Paragraph(f"原始檔案：{original_filename}", subtitle_style))
-    story.append(Paragraph(now.strftime("%Y年%m月%d日 %H:%M"), subtitle_style))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1a1a2e")))
-    story.append(Spacer(1, 8))
-
-    for line in analysis.split("\n"):
-        line = line.strip()
-        if not line:
-            story.append(Spacer(1, 4))
-            continue
-        if any(line.startswith(e) for e in ["📌","📊","⚖️","🔭","💡","📋"]):
-            story.append(Paragraph(line, section_style))
-        else:
-            story.append(Paragraph(line, body_style))
-
-    story.append(Spacer(1, 12))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
-    story.append(Paragraph("本報告內容僅供參考，不構成投資建議或買賣依據。投資涉及風險，過去績效不代表未來表現，投資人應審慎評估自身風險承受能力，並自行負擔投資損益。", subtitle_style))
-    doc.build(story)
+    subtitles = []
+    if original_filename:
+        subtitles.append(f"原始檔案：{original_filename}")
+    subtitles.append(now.strftime("%Y年%m月%d日 %H:%M"))
+    _build_pdf(tmp_path, "檔案分析報告", subtitles, analysis)
     return tmp_path, filename
+
+
+# ==============================
+# 新聞摘要 PDF
+# ==============================
+def generate_news_pdf(news_report: str):
+    now = datetime.now(TZ_TAIPEI)
+    filename = f"財經新聞_{now.strftime('%Y%m%d')}.pdf"
+    tmp_path = os.path.join(tempfile.gettempdir(), filename)
+    _build_pdf(tmp_path, "每日財經新聞摘要", [now.strftime("%Y年%m月%d日")], news_report)
+    return tmp_path, filename
+
 
 # ==============================
 # 統一入口
@@ -243,39 +260,3 @@ def create_and_upload_pdf(pdf_type: str, content: str, original_filename: str = 
     else:
         raise ValueError(f"Unknown pdf_type: {pdf_type}")
     return upload_to_drive(tmp_path, filename)
-
-# ==============================
-# 新聞摘要 PDF
-# ==============================
-def generate_news_pdf(news_report: str):
-    now = datetime.now(TZ_TAIPEI)
-    filename = f"財經新聞_{now.strftime('%Y%m%d')}.pdf"
-    tmp_path = os.path.join(tempfile.gettempdir(), filename)
-
-    doc = SimpleDocTemplate(tmp_path, pagesize=A4,
-        rightMargin=20*mm, leftMargin=20*mm,
-        topMargin=20*mm, bottomMargin=20*mm)
-
-    title_style, subtitle_style, section_style, body_style = get_styles()
-    story = []
-
-    story.append(Paragraph("每日財經新聞摘要", title_style))
-    story.append(Paragraph(now.strftime("%Y年%m月%d日"), subtitle_style))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1a1a2e")))
-    story.append(Spacer(1, 8))
-
-    for line in news_report.split("\n"):
-        line = line.strip()
-        if not line:
-            story.append(Spacer(1, 4))
-            continue
-        if line.startswith("【"):
-            story.append(Paragraph(line, section_style))
-        else:
-            story.append(Paragraph(line, body_style))
-
-    story.append(Spacer(1, 12))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
-    story.append(Paragraph("本報告內容僅供參考，不構成投資建議或買賣依據。投資涉及風險，過去績效不代表未來表現，投資人應審慎評估自身風險承受能力，並自行負擔投資損益。", subtitle_style))
-    doc.build(story)
-    return tmp_path, filename
