@@ -552,6 +552,32 @@ def ai_router(user_text: str, chat_key: str = "", forced_model: str = "") -> str
         return ai_gemini(user_text, chat_key)
     return ai_chatgpt(user_text, chat_key)
 
+
+def build_pdf_report_content(user_request: str, chat_key: str = "") -> str:
+    prompt = (
+        "你是華爾街投資研究員兼台灣銀行財富管理顧問，請把使用者需求整理成一份可直接輸出為 PDF 的專業研究報告。\n\n"
+        "寫作要求：\n"
+        "1. 使用繁體中文，語氣專業、精煉、可信。\n"
+        "2. 不要使用 Markdown 符號，不要用表格。\n"
+        "3. 請明確分成以下章節，且每個章節都要有內容：\n"
+        "【執行摘要】\n【市場背景】\n【核心分析】\n【對金融業/產業的影響】\n【投資機會】\n【主要風險】\n【結論與建議】\n"
+        "4. 若主題涉及市場、金融、產業或投資，請加入具體脈絡、傳導機制與投資人應關注的指標。\n"
+        "5. 若使用者題目不夠完整，請合理補足成一份可讀性高的研究報告。\n"
+        "6. 內容長度請明顯比一般聊天回覆更完整，至少 900 字。\n\n"
+        f"使用者需求：\n{user_request}"
+    )
+    return ai_router(prompt, chat_key=chat_key, forced_model="claude")
+
+
+def build_ppt_topic_from_request(user_request: str, chat_key: str = "") -> str:
+    prompt = (
+        "請從以下使用者需求中，抽出最適合做成簡報的主題。\n"
+        "只回傳一行繁體中文主題，不要加前言、不要加引號、不要加編號。\n\n"
+        f"使用者需求：\n{user_request}"
+    )
+    topic = ai_router(prompt, chat_key=chat_key, forced_model="claude").strip().splitlines()[0]
+    return topic[:80] if topic else user_request[:40]
+
 # ==============================
 # Webhook endpoint
 # ==============================
@@ -956,7 +982,7 @@ def handle_text_message(event):
 
         # 自然語言 PDF 生成（保留原 /pdf 指令）
         if (not tl.startswith("/pdf")) and any(k in tl for k in PDF_NL_KEYWORDS):
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在整理內容並生成 PDF，請稍候..."))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在以研究員模式整理內容並生成 PDF，請稍候..."))
             try:
                 from pdf_generator import create_and_upload_pdf
                 report_text = build_pdf_report_content(text_raw, chat_key=ck)
@@ -982,12 +1008,7 @@ def handle_text_message(event):
             try:
                 from ppt_generator import generate_ppt
 
-                topic_prompt = (
-                    "請從以下使用者需求中，抽出最適合做成簡報的主題，"
-                    "只回傳一行繁體中文主題，不要加任何前言或符號。\n\n"
-                    f"使用者需求：{text_raw}"
-                )
-                topic = ai_router(topic_prompt, chat_key=ck).strip().splitlines()[0][:80]
+                topic = build_ppt_topic_from_request(text_raw, chat_key=ck)
                 if not topic:
                     topic = text_raw[:40]
 
@@ -1037,22 +1058,12 @@ def handle_text_message(event):
                 content_text = parts[2].strip() if len(parts) > 2 else ""
                 if not content_text:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text="請在指令後面直接輸入內容\n\n範例：\n/pdf make 第一點：市場回顧 第二點：投資建議"
+                        text="請在指令後面直接輸入內容\n\n範例：\n/pdf make 私人信貸如何影響美國金融業，請整理成專業研究報告"
                     ))
                     return
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="整理內容並產生 PDF 中，請稍候..."))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在以研究員模式整理內容並產生 PDF，請稍候..."))
                 try:
-                    import anthropic as _anthropic
-                    _client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-                    _resp = _client.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=2000,
-                        messages=[{
-                            "role": "user",
-                            "content": f"請將以下內容整理成清楚的報告格式，使用繁體中文，標題用【】標示，條列用•符號，不要用Markdown語法：\n\n{content_text}"
-                        }]
-                    )
-                    organized = _resp.content[0].text
+                    organized = build_pdf_report_content(content_text, chat_key=ck)
                     link = create_and_upload_pdf("analysis", organized, "自訂報告")
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📄 PDF 已產生！\n\n{link}"))
                 except Exception as e:
