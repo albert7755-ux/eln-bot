@@ -501,21 +501,28 @@ def ai_gemini(user_text: str, chat_key: str = "") -> str:
         headers={"Content-Type": "application/json"},
         method="POST"
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    reply = (
-        data.get("candidates", [{}])[0]
-        .get("content", {})
-        .get("parts", [{}])[0]
-        .get("text", "")
-        .strip()
-    )
-    if not reply:
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        reply = (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+            .strip()
+        )
+        if not reply:
+            return ai_claude(user_text, chat_key)
+        if chat_key:
+            save_chat_history(chat_key, "user", user_text)
+            save_chat_history(chat_key, "assistant", f"[gemini] {reply}")
+        return reply
+    except urllib.error.HTTPError as e:
+        print(f"[Gemini HTTPError] {e}")
         return ai_claude(user_text, chat_key)
-    if chat_key:
-        save_chat_history(chat_key, "user", user_text)
-        save_chat_history(chat_key, "assistant", f"[gemini] {reply}")
-    return reply
+    except Exception as e:
+        print(f"[Gemini Error] {e}")
+        return ai_claude(user_text, chat_key)
 
 def ai_router(user_text: str, chat_key: str = "", forced_model: str = "") -> str:
     text_l = (user_text or "").lower().strip()
@@ -942,9 +949,7 @@ def handle_text_message(event):
                 link = create_and_upload_pdf("analysis", report_text, "AI自動生成報告")
                 _bot_api.push_message(
                     ck.split(":", 1)[1],
-                    TextSendMessage(text=f"✅ PDF 已生成完成！
-
-{link}")
+                    TextSendMessage(text=f"✅ PDF 已生成完成！\n\n{link}")
                 )
             except Exception as e:
                 _bot_api.push_message(
