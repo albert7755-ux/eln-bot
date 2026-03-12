@@ -1283,6 +1283,32 @@ def handle_text_message(event):
                 ))
             return
 
+        # TRACKLOG — 查看排程執行記錄
+        if cmd == "tracklog":
+            with engine.begin() as conn:
+                rows = conn.execute(text("""
+                    SELECT job_name, status, message, executed_at
+                    FROM eln_job_log
+                    ORDER BY executed_at DESC
+                    LIMIT 20
+                """)).fetchall()
+            if not rows:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="目前沒有執行記錄。"
+                ))
+                return
+            lines = ["📋 最近排程記錄（最新20筆）：\n"]
+            status_icon = {"success": "✅", "error": "❌", "started": "🔄", "skipped": "⏭️"}
+            for r in rows:
+                icon = status_icon.get(r[1], "•")
+                tw_time = r[3].astimezone(TZ_TAIPEI_PYTZ).strftime("%m/%d %H:%M")
+                msg = f"  {r[2]}" if r[2] else ""
+                lines.append(f"{icon} {tw_time} {r[0]}{msg}")
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="\n".join(lines)[:4900]
+            ))
+            return
+
         # FORGET 清除記憶
         if cmd == "forget":
             try:
@@ -1737,17 +1763,20 @@ TZ_TAIPEI_PYTZ = pytz.timezone("Asia/Taipei")
 def job_daily_report():
     """每天早上 06:00 台北時間 — 財經日報"""
     now = datetime.now(TZ_TAIPEI_PYTZ)
-    # 只在週一到週五執行
     if now.weekday() >= 5:
         print("[Scheduler] 週末跳過財經日報")
+        write_job_log("財經日報", "skipped", "週末跳過")
         return
     print(f"[Scheduler] 開始產生財經日報 {now.strftime('%Y-%m-%d %H:%M')}")
+    write_job_log("財經日報", "started", now.strftime('%Y-%m-%d %H:%M'))
     try:
         from daily_report import main as report_main
         report_main()
         print("[Scheduler] 財經日報推播成功")
+        write_job_log("財經日報", "success", "推播成功")
     except Exception as e:
         print(f"[Scheduler] 財經日報失敗: {e}")
+        write_job_log("財經日報", "error", str(e))
 
 def job_alert_monitor():
     """每 15 分鐘 — 價格警示監控"""
@@ -1767,19 +1796,33 @@ def job_mail_monitor():
     except Exception as e:
         print(f"[Scheduler] 郵件監控失敗: {e}")
 
+def write_job_log(job_name: str, status: str, message: str = ""):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO eln_job_log (job_name, status, message, executed_at)
+                VALUES (:j, :s, :m, NOW())
+            """), {"j": job_name, "s": status, "m": message[:1000]})
+    except Exception as e:
+        print(f"[LOG] 寫入失敗: {e}")
+
 def job_auto_tracking():
-    """每天早上 06:00 台北時間 — ELN 自動追蹤"""
+    """每天早上 06:02 台北時間 — ELN 自動追蹤"""
     now = datetime.now(TZ_TAIPEI_PYTZ)
     if now.weekday() >= 5:
         print("[Scheduler] 週末跳過 ELN 追蹤")
+        write_job_log("ELN追蹤", "skipped", "週末跳過")
         return
     print(f"[Scheduler] 開始 ELN 自動追蹤 {now.strftime('%Y-%m-%d %H:%M')}")
+    write_job_log("ELN追蹤", "started", now.strftime('%Y-%m-%d %H:%M'))
     try:
         from auto_tracking_cron import main as tracking_main
         tracking_main()
         print("[Scheduler] ELN 追蹤完成")
+        write_job_log("ELN追蹤", "success", "追蹤完成")
     except Exception as e:
         print(f"[Scheduler] ELN 追蹤失敗: {e}")
+        write_job_log("ELN追蹤", "error", str(e))
 
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
