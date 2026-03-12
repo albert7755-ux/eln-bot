@@ -103,6 +103,16 @@ def init_db():
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         """))
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS meeting_transcripts (
+            id BIGSERIAL PRIMARY KEY,
+            chat_key TEXT NOT NULL,
+            file_name TEXT,
+            transcript TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """))
         # 舊表補欄位（已存在的 table 不會重建）
         for col, typedef in [
             ("invest_mode", "TEXT NOT NULL DEFAULT ''"),
@@ -174,6 +184,19 @@ def db_clear_transcript_cache(chat_key: str):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM transcript_cache WHERE chat_key=:k"), {"k": chat_key})
 
+
+def db_save_meeting_transcript(chat_key: str, file_name: str, transcript: str, summary: str = ""):
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO meeting_transcripts(chat_key, file_name, transcript, summary, created_at)
+        VALUES (:k, :f, :t, :s, NOW())
+        """), {
+            "k": chat_key,
+            "f": file_name[:255] if file_name else "",
+            "t": (transcript or "")[:500000],
+            "s": (summary or "")[:100000],
+        })
+
 def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_map: dict[str, str], agent_name_map: dict[str, str] = {}):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -216,25 +239,30 @@ def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str]]:
     return [(r[0], r[1]) for r in rows] if rows else []
 
 def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
-    """長文字自動分段 push_message"""
+    """長文字自動分段 push_message；即使沒有換行也能切段。"""
     if not text:
         return
-    lines = text.split("\n")
+    text = str(text)
     chunks = []
     current = ""
-    for line in lines:
-        if len(current) + len(line) + 1 > max_len:
+    for line in text.split("\n"):
+        while len(line) > max_len:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:max_len])
+            line = line[max_len:]
+        candidate = line if not current else current + "\n" + line
+        if len(candidate) <= max_len:
+            current = candidate
+        else:
             if current:
                 chunks.append(current)
             current = line
-        else:
-            current = current + "\n" + line if current else line
     if current:
         chunks.append(current)
     for chunk in chunks:
         bot_api.push_message(target_id, TextSendMessage(text=chunk))
-
-
 def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, list[str]]:
     q_norm = query.strip().upper()
     if not q_norm:
@@ -748,6 +776,66 @@ def build_pdf_report_content(user_text: str, chat_key: str = "") -> str:
         prompt = build_general_prompt(user_text)
     return ai_claude_long(prompt, chat_key)
 
+
+def build_transcript_summary(transcript: str, chat_key: str = "") -> str:
+    prompt = f"""
+請將以下逐字稿整理成會議摘要。
+
+要求：
+1. 使用繁體中文
+2. 條列出 5 到 10 個重點
+3. 補一段「結論與後續行動」
+4. 保留重要名詞、數字、決策與待辦
+5. 不要使用 Markdown 符號
+
+逐字稿：
+{transcript}
+"""
+    return ai_claude(prompt, chat_key)
+
+
+def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = "") -> str:
+    prompt = f"""
+你是一位專業會議研究整理顧問，請根據以下逐字稿與摘要，生成一份適合輸出成 PDF 的正式會議重點報告。
+
+請依序輸出以下章節：
+【封面摘要】
+【一、會議背景與目的】
+【二、核心討論重點】
+【三、重要決策】
+【四、待辦事項與後續行動】
+【五、風險與需追蹤事項】
+【六、結論】
+
+要求：
+• 使用繁體中文
+• 內容具體、完整，不可太短
+• 不要使用 Markdown 符號
+• 可直接做成正式 PDF 報告
+
+逐字稿：
+{transcript}
+
+摘要：
+{summary}
+"""
+    return ai_claude_long(prompt, chat_key)
+
+
+def build_transcript_ppt_topic(transcript: str, summary: str, chat_key: str = "") -> str:
+    prompt = f"""
+請根據以下會議逐字稿與摘要，萃取出最適合做成簡報的主題。
+只回覆一行繁體中文標題，不要解釋，不要加符號。
+
+逐字稿：
+{transcript[:8000]}
+
+摘要：
+{summary[:3000]}
+"""
+    topic = ai_claude(prompt, chat_key).strip().splitlines()[0][:80]
+    return topic or "會議重點簡報"
+
 # ==============================
 # Webhook endpoint
 # ==============================
@@ -878,9 +966,7 @@ def handle_text_message(event):
                     )
                     link = create_and_upload_pdf("analysis", report_text, "會議重點報告")
                     db_clear_transcript_cache(ck)
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 會議重點 PDF 已生成完成！
-
-{link}"))
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 會議重點 PDF 已生成完成！\n\n{link}"))
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ PDF 生成失敗：{str(e)[:250]}"))
                 return
@@ -896,11 +982,7 @@ def handle_text_message(event):
                     )
                     link = generate_ppt(topic, n_slides=12)
                     db_clear_transcript_cache(ck)
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 會議重點簡報已生成完成！
-
-📌 主題：{topic}
-
-{link}"))
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 會議重點簡報已生成完成！\n\n📌 主題：{topic}\n\n{link}"))
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 簡報生成失敗：{str(e)[:250]}"))
                 return
@@ -1991,10 +2073,16 @@ def handle_file_message(event):
                     text="❌ 無法辨識語音內容，請確認音檔有聲音。"
                 ))
                 return
-            push_long_message(_bot_api, ck.split(":", 1)[1], f"📝 語音轉文字：\n\n{text_result}")
-            # 把轉出來的文字當對話繼續處理
-            reply = ai_router(text_result, chat_key=ck)
-            push_long_message(_bot_api, ck.split(":", 1)[1], reply)
+            preview = text_result[:2000]
+            push_long_message(_bot_api, ck.split(":", 1)[1], f"📝 逐字稿（前段）：\n\n{preview}")
+            summary = build_transcript_summary(text_result, chat_key=ck)
+            db_set_transcript_cache(ck, text_result, summary)
+            db_save_meeting_transcript(ck, filename, text_result, summary)
+            push_long_message(_bot_api, ck.split(":", 1)[1], f"📌 會議摘要：\n\n{summary}")
+            _bot_api.push_message(
+                ck.split(":", 1)[1],
+                TextSendMessage(text="要不要把這份會議重點做成 PDF 或 PPT？\n\n可直接回：做成 PDF / 做成 PPT / 不用")
+            )
             return
 
         # ELN 模式：有先打 /calc 且是 Excel
@@ -2160,15 +2248,13 @@ def handle_audio_message(event, _override_bot_api=None):
             text="🎙️ 收到語音，轉文字中，請稍候..."
         ))
 
-        # 下載音檔
         message_id = event.message.id
         content = _bot_api.get_message_content(message_id)
         audio_data = b""
         for chunk in content.iter_content():
             audio_data += chunk
 
-        # 轉文字
-        text_result = transcribe_audio(audio_data)
+        text_result = transcribe_audio(audio_data, filename="audio_message.m4a")
 
         if not text_result:
             _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
@@ -2176,12 +2262,18 @@ def handle_audio_message(event, _override_bot_api=None):
             ))
             return
 
-        # 推播轉文字結果
-        push_long_message(_bot_api, ck.split(":", 1)[1], f"📝 語音轉文字：\n\n{text_result}")
+        preview = text_result[:2000]
+        push_long_message(_bot_api, ck.split(":", 1)[1], f"📝 逐字稿（前段）：\n\n{preview}")
 
-        # 把轉出來的文字當對話繼續處理
-        reply = ai_router(text_result, chat_key=ck)
-        push_long_message(_bot_api, ck.split(":", 1)[1], reply)
+        summary = build_transcript_summary(text_result, chat_key=ck)
+        db_set_transcript_cache(ck, text_result, summary)
+        db_save_meeting_transcript(ck, "audio_message.m4a", text_result, summary)
+
+        push_long_message(_bot_api, ck.split(":", 1)[1], f"📌 會議摘要：\n\n{summary}")
+        _bot_api.push_message(
+            ck.split(":", 1)[1],
+            TextSendMessage(text="要不要把這份會議重點做成 PDF 或 PPT？\n\n可直接回：做成 PDF / 做成 PPT / 不用")
+        )
 
     except Exception as e:
         print(f"[ERROR] handle_audio_message: {e}")
