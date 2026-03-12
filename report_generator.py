@@ -26,13 +26,19 @@ TZ_TAIPEI = pytz.timezone("Asia/Taipei")
 # ── 字型
 def _register_fonts():
     base = os.path.join(os.path.dirname(__file__), "fonts")
-    reg  = os.path.join(base, "NotoSansTC-Regular.otf")
-    bold = os.path.join(base, "NotoSansTC-Bold.otf")
-    if os.path.exists(reg) and os.path.exists(bold):
-        pdfmetrics.registerFont(TTFont("NotoSansTC",      reg))
-        pdfmetrics.registerFont(TTFont("NotoSansTC-Bold", bold))
-        return "NotoSansTC", "NotoSansTC-Bold"
+    for ext in ["ttf", "otf"]:
+        reg  = os.path.join(base, f"NotoSansTC-Regular.{ext}")
+        bold = os.path.join(base, f"NotoSansTC-Bold.{ext}")
+        if os.path.exists(reg) and os.path.exists(bold):
+            try:
+                pdfmetrics.registerFont(TTFont("NotoSansTC",      reg))
+                pdfmetrics.registerFont(TTFont("NotoSansTC-Bold", bold))
+                print(f"[Font] 載入成功：{ext}")
+                return "NotoSansTC", "NotoSansTC-Bold"
+            except Exception as e:
+                print(f"[Font] {ext} 載入失敗: {e}")
     pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
+    print("[Font] 退回內建字型 HeiseiKakuGo-W5")
     return "HeiseiKakuGo-W5", "HeiseiKakuGo-W5"
 
 FONT, FONT_BOLD = _register_fonts()
