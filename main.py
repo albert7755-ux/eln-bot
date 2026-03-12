@@ -16,6 +16,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 import pytz
+import urllib.request
+import urllib.error
+from openai import OpenAI
 
 # ==============================
 # ENV
@@ -23,6 +26,8 @@ import pytz
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
@@ -42,6 +47,7 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 app = FastAPI()
 
 VERSION = "eln-autotracking-db-v3-2026-03-05"
@@ -408,20 +414,122 @@ def save_chat_history(chat_key: str, role: str, content: str):
     except Exception as e:
         print(f"save_chat_history error: {e}")
 
-def ai_reply(user_text: str, chat_key: str = "") -> str:
+AUTO_FINANCE_KEYWORDS = [
+    "財經", "市場", "美股", "台股", "債券", "殖利率", "基金", "匯率", "美元",
+    "聯準會", "fed", "fomc", "通膨", "cpi", "pce", "非農", "失業率",
+    "投資", "分析", "總經", "景氣", "eln", "結構型", "信用利差", "公司債"
+]
+
+AUTO_FILE_KEYWORDS = [
+    "pdf", "ppt", "pptx", "簡報", "圖片", "圖表", "文件", "檔案", "word", "excel"
+]
+
+def _normalize_history_for_chat(chat_key: str) -> list[dict]:
     history = get_chat_history(chat_key) if chat_key else []
+    cleaned = []
+    for item in history:
+        role = item.get("role", "user")
+        content = item.get("content", "")
+        if not content:
+            continue
+        if role not in ("user", "assistant"):
+            role = "user"
+        if content.startswith("[claude] "):
+            content = content[len("[claude] "):]
+        elif content.startswith("[gpt] "):
+            content = content[len("[gpt] "):]
+        elif content.startswith("[gemini] "):
+            content = content[len("[gemini] "):]
+        cleaned.append({"role": role, "content": content})
+    return cleaned
+
+def ai_claude(user_text: str, chat_key: str = "") -> str:
+    history = _normalize_history_for_chat(chat_key)
     messages = history + [{"role": "user", "content": user_text}]
     resp = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=1500,
+        max_tokens=1800,
         system=SYSTEM_PROMPT,
         messages=messages
     )
     reply = (resp.content[0].text or "").strip()
     if chat_key:
         save_chat_history(chat_key, "user", user_text)
-        save_chat_history(chat_key, "assistant", reply)
+        save_chat_history(chat_key, "assistant", f"[claude] {reply}")
     return reply
+
+def ai_chatgpt(user_text: str, chat_key: str = "") -> str:
+    if not openai_client:
+        return ai_claude(user_text, chat_key)
+    history = _normalize_history_for_chat(chat_key)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": user_text}]
+    resp = openai_client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=messages,
+        temperature=0.4,
+        max_tokens=1800
+    )
+    reply = (resp.choices[0].message.content or "").strip()
+    if chat_key:
+        save_chat_history(chat_key, "user", user_text)
+        save_chat_history(chat_key, "assistant", f"[gpt] {reply}")
+    return reply
+
+def ai_gemini(user_text: str, chat_key: str = "") -> str:
+    if not GEMINI_API_KEY:
+        return ai_claude(user_text, chat_key)
+    history = _normalize_history_for_chat(chat_key)
+    history_text = "\n".join([f"{m['role']}: {m['content']}" for m in history[-10:]])
+    prompt = (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"以下是近期對話：\n{history_text}\n\n"
+        f"使用者最新問題：\n{user_text}"
+    )
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ]
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    reply = (
+        data.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [{}])[0]
+        .get("text", "")
+        .strip()
+    )
+    if not reply:
+        return ai_claude(user_text, chat_key)
+    if chat_key:
+        save_chat_history(chat_key, "user", user_text)
+        save_chat_history(chat_key, "assistant", f"[gemini] {reply}")
+    return reply
+
+def ai_router(user_text: str, chat_key: str = "", forced_model: str = "") -> str:
+    text_l = (user_text or "").lower().strip()
+    if forced_model == "claude":
+        return ai_claude(user_text, chat_key)
+    if forced_model == "gpt":
+        return ai_chatgpt(user_text, chat_key)
+    if forced_model == "gemini":
+        return ai_gemini(user_text, chat_key)
+    if any(k in text_l for k in AUTO_FINANCE_KEYWORDS):
+        return ai_claude(user_text, chat_key)
+    if any(k in text_l for k in AUTO_FILE_KEYWORDS):
+        return ai_gemini(user_text, chat_key)
+    return ai_chatgpt(user_text, chat_key)
 
 # ==============================
 # Webhook endpoint
@@ -460,6 +568,7 @@ def handle_text_message(event):
         else:
             cmd = tl.split()[0] if tl.split() else tl
             raw_cmd = text_raw
+        parts = text_raw.split(" ", 1)
 
         # 群組模式：非指令訊息直接靜音
         if is_group and not tl.startswith("/"):
@@ -1328,6 +1437,27 @@ def handle_text_message(event):
             ))
             return
 
+        # 手動指定模型：/claude /gpt /gemini
+        if cmd in ("claude", "gpt", "gemini"):
+            forced_prompt = text_raw.split(" ", 1)[1].strip() if " " in text_raw else ""
+            if not forced_prompt:
+                _bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=f"請在 /{cmd} 後面加上問題\n\n例如：/{cmd} 今天美股怎麼看？")
+                )
+                return
+            model_map = {
+                "claude": "Claude",
+                "gpt": "ChatGPT",
+                "gemini": "Gemini"
+            }
+            reply = ai_router(forced_prompt, chat_key=ck, forced_model=cmd)
+            _bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=f"🦞 龍蝦（{model_map[cmd]}）\n\n{reply[:4700]}")
+            )
+            return
+
         # FORGET 清除記憶
         if cmd == "forget":
             try:
@@ -1338,9 +1468,9 @@ def handle_text_message(event):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"清除失敗：{e}"))
             return
 
-        # AI fallback (Claude)
-        reply = ai_reply(text_raw, chat_key=ck)
-        _bot_api.reply_message(event.reply_token, TextSendMessage(text=reply[:4900]))
+        # AI fallback（自動選模型）
+        reply = ai_router(text_raw, chat_key=ck)
+        _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🦞 龍蝦\n\n{reply[:4700]}"))
 
     except Exception as e:
         print("[ERROR] handle_text_message:", e)
@@ -1559,9 +1689,7 @@ def handle_file_message(event):
                 return
             push_long_message(_bot_api, ck.split(":", 1)[1], f"📝 語音轉文字：\n\n{text_result}")
             # 把轉出來的文字當對話繼續處理
-            save_chat_history(ck, "user", f"[語音訊息] {text_result}")
-            reply = chat_with_claude(ck, text_result)
-            save_chat_history(ck, "assistant", reply)
+            reply = ai_router(text_result, chat_key=ck)
             push_long_message(_bot_api, ck.split(":", 1)[1], reply)
             return
 
@@ -1675,25 +1803,14 @@ def handle_image_message(event):
         except Exception:
             pass
 
-
-
-    @agent_handler.add(MessageEvent, message=FileMessage)
-    def agent_handle_file(event):
-        handle_file_message(event, _override_bot_api=agent_line_bot_api)
-
-    @agent_handler.add(MessageEvent, message=ImageMessage)
-    def agent_handle_image(event):
-        handle_image_message(event, _override_bot_api=agent_line_bot_api)
-
-
 def transcribe_audio(audio_data: bytes, filename: str = "audio.m4a") -> str:
     """
     將音檔壓縮後送 Whisper API 轉文字。
     超過 24MB 先用 pydub 壓縮成低位元率 mp3。
     """
     import tempfile, os
-    from openai import OpenAI
-    openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+    if not openai_client:
+        raise RuntimeError("缺少 OPENAI_API_KEY，無法使用語音轉文字")
 
     MAX_BYTES = 24 * 1024 * 1024  # 24MB 安全緩衝
 
@@ -1758,10 +1875,8 @@ def handle_audio_message(event, _override_bot_api=None):
         # 推播轉文字結果
         push_long_message(_bot_api, ck.split(":", 1)[1], f"📝 語音轉文字：\n\n{text_result}")
 
-        # 把轉出來的文字當對話繼續處理（存入對話記憶）
-        save_chat_history(ck, "user", f"[語音訊息] {text_result}")
-        reply = chat_with_claude(ck, text_result)
-        save_chat_history(ck, "assistant", reply)
+        # 把轉出來的文字當對話繼續處理
+        reply = ai_router(text_result, chat_key=ck)
         push_long_message(_bot_api, ck.split(":", 1)[1], reply)
 
     except Exception as e:
@@ -1849,7 +1964,7 @@ def start_scheduler():
     # 財經日報：每天 06:00 台北時間（週一到週五）
     scheduler.add_job(
         job_daily_report,
-        CronTrigger(hour=6, minute=0, timezone=TZ_TAIPEI_PYTZ),
+        CronTrigger(day_of_week="mon-fri", hour=6, minute=0, timezone=TZ_TAIPEI_PYTZ),
         id="daily_report",
         name="財經日報"
     )
@@ -1857,7 +1972,7 @@ def start_scheduler():
     # ELN 自動追蹤：每天 06:00 台北時間（週一到週五）
     scheduler.add_job(
         job_auto_tracking,
-        CronTrigger(hour=6, minute=2, timezone=TZ_TAIPEI_PYTZ),
+        CronTrigger(day_of_week="mon-fri", hour=6, minute=2, timezone=TZ_TAIPEI_PYTZ),
         id="auto_tracking",
         name="ELN自動追蹤"
     )
@@ -1873,7 +1988,7 @@ def start_scheduler():
     # 郵件監控：每 15 分鐘（比警示延遲 5 分鐘，避免同時執行）
     scheduler.add_job(
         job_mail_monitor,
-        IntervalTrigger(minutes=15, start_date=datetime.now(TZ_TAIPEI_PYTZ).replace(second=0, microsecond=0)),
+        IntervalTrigger(minutes=15, start_date=datetime.now(TZ_TAIPEI_PYTZ).replace(second=0, microsecond=0) + timedelta(minutes=5)),
         id="mail_monitor",
         name="郵件監控"
     )
