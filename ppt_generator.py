@@ -82,7 +82,7 @@ def design_theme(visual_desc: str, force_pattern: str = "") -> dict:
     根據使用者輸入的主題描述，讓 Claude 推導完整視覺規格。
     force_pattern: 若有填寫，直接覆蓋 Claude 選的圖案。
     """
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     VALID_PATTERNS = {"circuit","wave","stars","hexagon","mountain","ripple","grid","diagonal","none"}
     pattern_hint = f"\n注意：圖案類型已由使用者指定為「{force_pattern}」，pattern 欄位請直接填 \"{force_pattern}\"，不要自行選擇。" if force_pattern else ""
@@ -151,7 +151,7 @@ def generate_custom_background(icon_dir: str, visual_desc: str, spec: dict) -> b
     讓 Claude 即時生成 PIL 繪圖程式碼，畫出符合描述的背景圖。
     成功回傳 True，失敗回傳 False（由呼叫者 fallback 到 generate_background）。
     """
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     def hex_to_rgb_str(h):
         h = h.lstrip("#")
@@ -239,7 +239,7 @@ def generate_custom_background(icon_dir: str, visual_desc: str, spec: dict) -> b
 
 def plan_slides(topic: str, n_slides: int = 9) -> list:
     """呼叫 Claude 根據主題規劃投影片架構，回傳 JSON list"""
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     prompt = f"""
 你是一位資深投資銀行簡報設計師，熟悉台灣高資產客戶（HNW）的投資商品。
