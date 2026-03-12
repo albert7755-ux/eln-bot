@@ -1283,6 +1283,25 @@ def handle_text_message(event):
                 ))
             return
 
+        # RUNNOW — 手動立即觸發 ELN 追蹤
+        if cmd == "runnow":
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="🔄 手動觸發 ELN 追蹤中，請稍候約30秒..."
+            ))
+            try:
+                from auto_tracking_cron import main as tracking_main
+                tracking_main()
+                write_job_log("ELN追蹤(手動)", "success", "手動觸發完成")
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                    text="✅ ELN 追蹤執行完成！\n\n打 /tracklog 查看記錄"
+                ))
+            except Exception as e:
+                write_job_log("ELN追蹤(手動)", "error", str(e))
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                    text=f"❌ 執行失敗：{str(e)[:300]}"
+                ))
+            return
+
         # TRACKLOG — 查看排程執行記錄
         if cmd == "tracklog":
             with engine.begin() as conn:
