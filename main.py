@@ -424,6 +424,20 @@ AUTO_FILE_KEYWORDS = [
     "pdf", "ppt", "pptx", "簡報", "圖片", "圖表", "文件", "檔案", "word", "excel"
 ]
 
+PDF_NL_KEYWORDS = [
+    "pdf", "做成pdf", "生成pdf", "轉成pdf", "輸出pdf", "匯出pdf",
+    "做成 pdf", "生成 pdf", "轉成 pdf", "輸出 pdf", "匯出 pdf",
+    "做成報告", "生成報告", "轉成報告"
+]
+
+PPT_NL_KEYWORDS = [
+    "ppt", "做成ppt", "生成ppt", "轉成ppt",
+    "做成 ppt", "生成 ppt", "轉成 ppt",
+    "簡報", "投影片", "簡報檔"
+]
+
+PPT_ACTION_KEYWORDS = ["做", "生成", "產生", "整理", "輸出", "轉成", "轉為"]
+
 def _normalize_history_for_chat(chat_key: str) -> list[dict]:
     history = get_chat_history(chat_key) if chat_key else []
     cleaned = []
@@ -959,11 +973,9 @@ def handle_text_message(event):
             return
 
         # 自然語言 PPT / 簡報生成
-        ppt_keywords = ["ppt", "PPT", "簡報", "投影片", "簡報檔"]
-        ppt_action_keywords = ["做", "生成", "產生", "整理", "輸出", "轉成", "轉為"]
         if (
-            any(k in text_raw for k in ppt_keywords)
-            and any(k in text_raw for k in ppt_action_keywords)
+            any(k in tl for k in PPT_NL_KEYWORDS)
+            and any(k in text_raw for k in PPT_ACTION_KEYWORDS)
             and not tl.startswith("/report")
         ):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 正在整理內容並生成簡報，請稍候約60至90秒..."))
