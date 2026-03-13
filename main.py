@@ -19,7 +19,22 @@ import pytz
 import urllib.request
 import urllib.error
 from openai import OpenAI
-from eln_storage import upload_eln_excel, download_latest_eln, list_history
+
+# --- Alert ticker aliases ---
+ALERT_TICKER_ALIAS = {
+    "dxy": "DX-Y.NYB",
+    "spx": "^GSPC",
+    "sp500": "^GSPC",
+    "ndx": "^NDX",
+    "nasdaq100": "^NDX",
+    "sox": "^SOX",
+    "vix": "^VIX",
+    "ust10y": "^TNX",
+    "gold": "GC=F",
+    "silver": "SI=F",
+    "oil": "CL=F",
+}
+
 
 # ==============================
 # ENV
@@ -30,7 +45,6 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ELN_GROUP_ID = os.getenv("ELN_GROUP_ID", "").strip()
 
 if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
     raise RuntimeError("Missing LINE env vars: LINE_CHANNEL_SECRET / LINE_CHANNEL_ACCESS_TOKEN")
@@ -186,6 +200,26 @@ def db_clear_transcript_cache(chat_key: str):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM transcript_cache WHERE chat_key=:k"), {"k": chat_key})
 
+def db_save_meeting_transcript(chat_key: str, file_name: str, transcript: str, summary: str):
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO meeting_transcripts(chat_key, file_name, transcript, summary, created_at)
+        VALUES (:k, :f, :t, :s, NOW())
+        """), {"k": chat_key, "f": file_name, "t": transcript[:500000], "s": summary[:100000]})
+
+def db_get_latest_meeting_transcript(chat_key: str):
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+        SELECT transcript, summary, file_name, created_at
+        FROM meeting_transcripts
+        WHERE chat_key=:k
+        ORDER BY created_at DESC
+        LIMIT 1
+        """), {"k": chat_key}).fetchone()
+    if not row:
+        return None
+    return {"transcript": row[0] or "", "summary": row[1] or "", "file_name": row[2] or "", "created_at": row[3]}
+
 def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_map: dict[str, str], agent_name_map: dict[str, str] = {}):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -228,15 +262,43 @@ def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str]]:
     return [(r[0], r[1]) for r in rows] if rows else []
 
 def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
-    """長文字自動分段 push_message，強制切片避免超過 LINE 5000 字限制"""
+    """長文字自動分段 push_message，兼容無換行長文"""
     if not text:
         return
-    text = str(text)
-    while text:
-        chunk = text[:max_len]
-        text = text[max_len:]
-        bot_api.push_message(target_id, TextSendMessage(text=chunk))
 
+    text = str(text)
+    chunks = []
+    current = ""
+
+    for line in text.split("\n"):
+        while len(line) > max_len:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:max_len])
+            line = line[max_len:]
+
+        candidate = line if not current else current + "\n" + line
+        if len(candidate) <= max_len:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            current = line
+
+    if current:
+        chunks.append(current)
+
+    safe_chunks = []
+    for chunk in chunks:
+        while len(chunk) > max_len:
+            safe_chunks.append(chunk[:max_len])
+            chunk = chunk[max_len:]
+        if chunk:
+            safe_chunks.append(chunk)
+
+    for chunk in safe_chunks:
+        bot_api.push_message(target_id, TextSendMessage(text=chunk))
 
 def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, list[str]]:
     q_norm = query.strip().upper()
@@ -751,48 +813,62 @@ def build_pdf_report_content(user_text: str, chat_key: str = "") -> str:
         prompt = build_general_prompt(user_text)
     return ai_claude_long(prompt, chat_key)
 
-
-def db_save_meeting_transcript(chat_key: str, file_name: str, transcript: str, summary: str):
-    with engine.begin() as conn:
-        conn.execute(text("""
-        INSERT INTO meeting_transcripts(chat_key, file_name, transcript, summary, created_at)
-        VALUES (:k, :f, :t, :s, NOW())
-        """), {"k": chat_key, "f": file_name[:255], "t": transcript[:200000], "s": summary[:50000]})
-
-
 def build_transcript_summary(transcript: str, chat_key: str = "") -> str:
-    prompt = (
-        "請將以下逐字稿整理成清楚的會議摘要。\n"
-        "要求：\n"
-        "1. 使用繁體中文\n"
-        "2. 條列 5 到 8 個重點\n"
-        "3. 若有決策、結論、行動事項要特別標示\n"
-        "4. 不要使用 Markdown 符號\n\n"
-        f"逐字稿：\n{transcript}"
-    )
-    return ai_claude(prompt, chat_key=chat_key)
+    prompt = f"""
+你是一位專業會議紀錄助理。請將以下逐字稿整理為繁體中文重點摘要。
 
+要求：
+1. 先寫【會議摘要】
+2. 再寫【重點整理】
+3. 再寫【待辦事項】
+4. 條列清楚、內容具體
+5. 禁止 Markdown 符號
+6. 內容務必根據逐字稿，不要憑空補充
+
+逐字稿：
+{transcript}
+"""
+    return ai_claude(prompt, chat_key)
 
 def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = "") -> str:
-    prompt = (
-        "請根據以下逐字稿與摘要，整理成一份正式的繁體中文會議重點報告，適合輸出為 PDF。\n"
-        "請包含：\n"
-        "【封面摘要】\n【一、會議背景】\n【二、核心討論重點】\n【三、重要決策】\n【四、後續行動事項】\n【五、結論】\n"
-        "不要使用 Markdown 符號。\n\n"
-        f"摘要：\n{summary}\n\n逐字稿：\n{transcript[:12000]}"
-    )
-    return ai_claude_long(prompt, chat_key=chat_key)
+    prompt = f"""
+你是一位專業研究助理，請把以下會議逐字稿與摘要整理成可直接輸出為 PDF 的繁體中文正式會議報告。
 
+請使用這個結構：
+【封面摘要】
+【一、會議背景】
+【二、會議重點】
+【三、逐字稿重點整理】
+【四、結論】
+【五、待辦事項】
+
+要求：
+• 語氣正式、清楚、可直接給主管或客戶閱讀
+• 不要使用 Markdown 符號
+• 內容比摘要更完整，但不要逐字照抄全部逐字稿
+• 以摘要為主、逐字稿為輔，整理成正式文件
+
+會議摘要：
+{summary}
+
+逐字稿：
+{transcript[:120000]}
+"""
+    return ai_claude_long(prompt, chat_key)
 
 def build_transcript_ppt_topic(transcript: str, summary: str, chat_key: str = "") -> str:
-    prompt = (
-        "請根據以下會議摘要與逐字稿，抽出最適合做成簡報的主題。"
-        "只回傳一行繁體中文主題，不要加任何前言。\n\n"
-        f"摘要：\n{summary}\n\n逐字稿：\n{transcript[:6000]}"
-    )
-    return ai_claude(prompt, chat_key=chat_key).strip().splitlines()[0][:80]
+    prompt = f"""
+請根據以下會議摘要與逐字稿，提煉出最適合做成簡報的一行繁體中文主題。
+只回傳主題，不要加任何前言或符號。
 
+會議摘要：
+{summary}
 
+逐字稿：
+{transcript[:50000]}
+"""
+    out = ai_claude(prompt, chat_key).strip().splitlines()
+    return (out[0].strip() if out else "會議重點簡報")[:80]
 
 # ==============================
 # Webhook endpoint
@@ -823,11 +899,6 @@ def handle_text_message(event):
         tl = text_raw.lower().strip()
         ck = chat_key_of(event)
         is_group = event.source.type in ("group", "room")
-        is_eln_restricted_group = (
-            event.source.type == "group"
-            and bool(ELN_GROUP_ID)
-            and getattr(event.source, "group_id", "") == ELN_GROUP_ID
-        )
         print("[TEXT]", ck, repr(text_raw))
 
         if tl.startswith("/"):
@@ -842,87 +913,88 @@ def handle_text_message(event):
         if is_group and not tl.startswith("/"):
             return
 
-        # ELN 專用群組：只允許 /list /detail /help
-        if is_eln_restricted_group and cmd not in ("help", "?", "指令", "幫助", "list", "detail"):
-            _bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="此群組僅開放 /list 與 /detail 查詢。")
-            )
-            return
-
         # 群組模式 HELP：只顯示查詢相關指令
         if cmd in ("help", "?", "指令", "幫助"):
+            help_arg = parts[1].strip().lower() if len(parts) > 1 else ""
             if is_group:
                 msg = (
                     "群組可用指令：\n"
                     "/detail <商品代號>：查詢標的完整狀況（支援模糊搜尋）\n"
                     "/list：列出所有可查商品代號\n"
-                    "/help：顯示本說明\n"
                 )
             else:
-                msg = (
-                    "🦞 龍蝦指令清單\n"
-                    "─────────────────\n"
-                    "📊 ELN 追蹤\n"
-                    "/calc — 上傳 Excel 計算並保存\n"
-                    "/eln upload — 上傳 Excel 並同步更新 Storage\n"
-                    "/eln run — 立即用最新 Excel 重新計算\n"
-                    "/eln history — 查看歷史 Excel 版本\n"
-                    "/eln result — 查看最近 ELN 結果\n"
-                    "/list — 列出所有可查商品代號\n"
-                    "/detail <代號> — 查詢單筆 KO/KI/狀態\n"
-                    "─────────────────\n"
-                    "📰 財經資訊\n"
-                    "/daily — 產生今日財經日報\n"
-                    "/daily cache — 回傳今早已生成的日報\n"
-                    "/market <新聞+標的> — 生成客戶推播市場觀點\n"
-                    "─────────────────\n"
-                    "📑 研究報告 & 簡報\n"
-                    "/report ppt <主題> — 🎨 Icon設計版PPT（深藍金）\n"
-                    "/report ppt <主題> green — 深綠金配色\n"
-                    "/report ppt <主題> dark — 純黑銀配色\n"
-                    "/report <主題> — 投資銀行風格PDF\n"
-                    "/report <主題> brief — 簡報摘要\n"
-                    "/report <主題> client — 客戶推播風格\n"
-                    "/report <主題> academic — 學術研究\n"
-                    "/report <主題> hybrid — 投銀+研究混合\n"
-                    "/report <主題> custom <說明> — 自訂風格\n"
-                    "─────────────────\n"
-                    "📈 投資推播\n"
-                    "/invest — 上傳新聞截圖，生成投資推播文\n"
-                    "─────────────────\n"
-                    "📤 ELN 理專通知\n"
-                    "/send <編號> — 發送第N筆通知給理專\n"
-                    "/skip <編號> — 略過第N筆通知\n"
-                    "/send all — 全部發送\n"
-                    "/skip all — 全部略過\n"
-                    "/send list — 查看待確認清單\n"
-                    "─────────────────\n"
-                    "📄 PDF\n"
-                    "/pdf daily — 財經日報 PDF\n"
-                    "/pdf market <內容> — 市場觀點 PDF\n"
-                    "/news pdf — 最新新聞整理成 PDF\n"
-                    "─────────────────\n"
-                    "📧 郵件\n"
-                    "/mail — 未讀郵件摘要\n"
-                    "/mail unread — 只看重要未讀\n"
-                    "─────────────────\n"
-                    "🔔 價格警示\n"
-                    "/analysis <股票> — 完整三面向分析 (技術+基本面+消息面)\n"
-                    "/tech <股票> — 技術分析圖表 (K線/RSI/成交量)\n"
-                    "/tech mag7 — Magnificent Seven 比較分析\n"
-                    "/alert add <標的> <價格> above/below\n"
-                    "/alert list — 查看所有警示\n"
-                    "/alert del <編號> — 刪除警示\n"
-                    "─────────────────\n"
-                    "⚙️ 其他\n"
-                    "/runnow — 立即執行一次 ELN 追蹤\n"
-                    "/tracklog — 查看最近排程與手動執行記錄\n"
-                    "其他文字 — Claude AI 對話（有記憶）\n"
-                    "上傳檔案 — 自動分析 PDF/Excel/Word/PPT\n"
-                    "/forget — 清除對話記憶\n"
-                    "/help — 顯示本說明"
-                )
+                if help_arg in ("alert", "警示"):
+                    msg = (
+                        "🔔 Alert 指令說明\n"
+                        "─────────────────\n"
+                        "/alert add <標的> <價格> above/below\n"
+                        "/alert add <標的> above/below <價格>\n"
+                        "/alert add <標的> ma20 above/below\n"
+                        "/alert add <標的> ma5 cross ma20\n"
+                        "/alert add <標的> ma5 under ma20\n"
+                        "/alert list\n"
+                        "/alert del <編號>\n"
+                        "─────────────────\n"
+                        "別名：dxy / spx / ndx / sox / vix / ust10y / gold / silver / oil\n"
+                        "範例：\n"
+                        "/alert add dxy below 100\n"
+                        "/alert add ust10y above 45\n"
+                        "/alert add NVDA ma20 above\n"
+                        "/alert add NVDA ma5 cross ma20"
+                    )
+                elif help_arg in ("eln",):
+                    msg = (
+                        "📊 ELN 指令說明\n"
+                        "─────────────────\n"
+                        "/calc — 上傳 Excel 計算並保存\n"
+                        "/list — 列出所有可查商品代號\n"
+                        "/detail <代號> — 查詢單筆 KO/KI/狀態\n"
+                        "/eln upload — 上傳 Excel 並同步到 Supabase\n"
+                        "/eln run — 立即重跑最新 ELN\n"
+                        "/eln history — 查看歷史 Excel\n"
+                        "/eln result — 查看最近結果\n"
+                        "/runnow — 手動執行追蹤\n"
+                        "/tracklog — 查看最近排程紀錄"
+                    )
+                elif help_arg in ("report", "pdf", "ppt", "報告", "簡報"):
+                    msg = (
+                        "📑 報告 / 簡報 指令說明\n"
+                        "─────────────────\n"
+                        "/report <主題>\n"
+                        "/report ppt <主題>\n"
+                        "/pdf daily\n"
+                        "/pdf market <內容>\n"
+                        "/pdf make <內容>\n"
+                        "自然語言也可直接說：\n"
+                        "請幫我做一份 XX 的 pdf\n"
+                        "請幫我做一份 XX 的簡報"
+                    )
+                else:
+                    msg = (
+                        "🦞 龍蝦指令清單\n"
+                        "─────────────────\n"
+                        "📊 ELN\n"
+                        "/calc  /list  /detail\n"
+                        "/eln upload  /eln run  /eln history  /eln result\n"
+                        "/runnow  /tracklog\n"
+                        "─────────────────\n"
+                        "📰 財經\n"
+                        "/daily  /daily cache  /market\n"
+                        "─────────────────\n"
+                        "📑 報告\n"
+                        "/report  /report ppt  /pdf\n"
+                        "─────────────────\n"
+                        "🔔 警示\n"
+                        "/alert add  /alert list  /alert del\n"
+                        "輸入 /help alert 看完整範例\n"
+                        "─────────────────\n"
+                        "📧 其他\n"
+                        "/mail  /invest  /forget\n"
+                        "上傳錄音 → 自動逐字稿 / 摘要\n"
+                        "上傳檔案 → 自動分析\n"
+                        "─────────────────\n"
+                        "進階說明：/help alert、/help eln、/help report"
+                    )
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
             return
 
@@ -1162,42 +1234,51 @@ def handle_text_message(event):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="已設定您為預設推播對象"))
             return
 
-
         # ELN v3 指令
         if cmd == "eln":
-            subparts = text_raw.split(" ", 2)
-            sub = subparts[1].strip().lower() if len(subparts) > 1 else ""
+            sub_parts = text_raw.split()
+            sub = sub_parts[1].lower() if len(sub_parts) > 1 else ""
             if sub == "upload":
                 db_set_await(ck, True)
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📥 請上傳 ELN Excel 檔案，我會同步更新 Storage 並計算。"))
+                _bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text="📥 請直接上傳 ELN Excel 檔案，我會計算並同步保存到 Supabase。")
+                )
                 return
             if sub == "run":
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="⚙️ 正在用最新 Excel 重新計算 ELN，請稍候..."))
+                _bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text="🔄 正在重新計算最新 ELN，請稍候...")
+                )
                 try:
-                    latest_file = download_latest_eln("/tmp/latest_eln.xlsx")
+                    try:
+                        from eln_storage import download_latest_eln
+                        latest_file = download_latest_eln("/tmp/latest_eln.xlsx")
+                    except Exception:
+                        latest_file = "/tmp/latest_eln.xlsx"
                     summary, top5_lines, detail_map, agent_name_map = run_autotracking(latest_file)
                     db_save_result(ck, summary, top5_lines, detail_map, agent_name_map)
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=(summary or "已完成，但沒有結果")[:4900]))
+                    msg = "✅ ELN 已重新計算完成\n\n" + ("\n".join(top5_lines[:5]) if top5_lines else (summary or "沒有可顯示摘要"))
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=msg[:4900]))
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ ELN 計算失敗：{str(e)[:250]}"))
                 return
             if sub == "history":
                 try:
+                    from eln_storage import list_history
                     items = list_history()
-                    msg = "📁 ELN Excel 歷史版本\n\n" + ("\n".join(items[:15]) if items else "目前沒有歷史版本。")
+                    msg = "📁 ELN Excel 歷史版本\n\n" + ("\n".join(items[:20]) if items else "目前沒有歷史 Excel")
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg[:4900]))
                 except Exception as e:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"讀取失敗：{str(e)[:200]}"))
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"讀取歷史失敗：{str(e)[:250]}"))
                 return
             if sub == "result":
                 summary = db_get_report(ck)
                 if not summary:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有 ELN 結果。"))
-                else:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有 ELN 結果，請先 /calc 或 /eln run。"))
+                    return
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
                 return
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="ELN 指令：\n/eln upload\n/eln run\n/eln history\n/eln result"))
-            return
 
         # LIST
         if cmd == "list":
@@ -1581,47 +1662,84 @@ def handle_text_message(event):
 
             # /alert add <symbol> <target/maXX> <above/below>
             if sub == "add":
-                # 格式：/alert add AAPL 200 above
-                #       /alert add AAPL ma20 below
+                # 支援：
+                # /alert add NVDA 190 above
+                # /alert add NVDA above 190
+                # /alert add NVDA ma20 above
+                # /alert add NVDA ma5 cross ma20
+                # /alert add dxy below 100
                 if len(parts) < 5:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text="格式說明：\n\n目標價：\n/alert add AAPL 200 above\n/alert add 0050.TW 150 below\n/alert add USDTWD=X 32.5 below\n\n均線突破：\n/alert add AAPL ma20 below\n/alert add 2330.TW ma60 above"
+                        text="格式說明：\n\n價格警示：\n/alert add NVDA 190 above\n/alert add NVDA above 190\n/alert add dxy below 100\n/alert add ust10y above 45\n\n價格 vs 均線：\n/alert add NVDA ma20 above\n/alert add 2330.TW ma60 below\n\n均線交叉：\n/alert add NVDA ma5 cross ma20\n/alert add NVDA ma5 under ma20"
                     ))
                     return
-                symbol = parts[2].upper()
-                value_str = parts[3].lower()
-                direction = parts[4].lower()
 
-                if direction not in ("above", "below"):
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="方向請輸入 above（漲到/漲破）或 below（跌到/跌破）"))
-                    return
+                raw_symbol = parts[2]
+                symbol = ALERT_TICKER_ALIAS.get(raw_symbol.lower(), raw_symbol).upper()
+                p3 = parts[3].lower()
+                p4 = parts[4].lower()
+                p5 = parts[5].lower() if len(parts) > 5 else ""
 
                 try:
-                    if value_str.startswith("ma"):
-                        # 均線警示
-                        ma_period = int(value_str[2:])
+                    # 均線交叉：ma5 cross ma20 / ma5 under ma20
+                    if p3.startswith("ma") and p4 in ("cross", "under") and p5.startswith("ma"):
+                        ma_short = int(p3[2:])
+                        ma_long = int(p5[2:])
                         with engine.begin() as conn:
-                            conn.execute(text("""\n                            INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, ma_period)\n                            VALUES (:k, :s, 'ma', :c, :m)\n                            """), {"k": ck, "s": symbol, "c": direction, "m": ma_period})
-                        cross = "漲破" if direction == "above" else "跌破"
+                            conn.execute(text("""
+                            INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, ma_short, ma_long)
+                            VALUES (:k, :s, 'ma_cross', :c, :ms, :ml)
+                            """), {"k": ck, "s": symbol, "c": p4, "ms": ma_short, "ml": ma_long})
+                        label = "黃金交叉" if p4 == "cross" else "死亡交叉"
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(
+                            text=f"✅ 均線交叉警示已設定！\n標的：{symbol}\n條件：MA{ma_short} {label} MA{ma_long}\n\n當條件成立時龍蝦會通知你 🔔"
+                        ))
+                        return
+
+                    # 價格 vs 均線：ma20 above/below
+                    if p3.startswith("ma") and p4 in ("above", "below"):
+                        ma_period = int(p3[2:])
+                        with engine.begin() as conn:
+                            conn.execute(text("""
+                            INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, ma_period)
+                            VALUES (:k, :s, 'ma', :c, :m)
+                            """), {"k": ck, "s": symbol, "c": p4, "m": ma_period})
+                        cross = "漲破" if p4 == "above" else "跌破"
                         _bot_api.reply_message(event.reply_token, TextSendMessage(
                             text=f"✅ 均線警示已設定！\n標的：{symbol}\n條件：{cross} MA{ma_period}\n\n當條件成立時龍蝦會通知你 🔔"
                         ))
+                        return
+
+                    # 價格：支援 value direction 或 direction value
+                    if p3 in ("above", "below"):
+                        direction = p3
+                        value_str = p4
+                    elif p4 in ("above", "below"):
+                        value_str = p3
+                        direction = p4
                     else:
-                        # 目標價警示
-                        target = float(value_str)
-                        with engine.begin() as conn:
-                            conn.execute(text("""\n                            INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, target_value)\n                            VALUES (:k, :s, 'price', :c, :t)\n                            """), {"k": ck, "s": symbol, "c": direction, "t": target})
-                        cond_str = "漲到" if direction == "above" else "跌到"
                         _bot_api.reply_message(event.reply_token, TextSendMessage(
-                            text=f"✅ 價格警示已設定！\n標的：{symbol}\n條件：{cond_str} {target}\n\n當條件成立時龍蝦會通知你 🔔"
+                            text="方向請輸入 above 或 below，或使用 ma / 均線交叉格式\n\n例：\n/alert add NVDA above 190\n/alert add NVDA ma20 above\n/alert add NVDA ma5 cross ma20"
                         ))
+                        return
+
+                    target = float(value_str)
+                    with engine.begin() as conn:
+                        conn.execute(text("""
+                        INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, target_value)
+                        VALUES (:k, :s, 'price', :c, :t)
+                        """), {"k": ck, "s": symbol, "c": direction, "t": target})
+                    cond_str = "漲到" if direction == "above" else "跌到"
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text=f"✅ 價格警示已設定！\n標的：{symbol}\n條件：{cond_str} {target}\n\n當條件成立時龍蝦會通知你 🔔"
+                    ))
                 except Exception as e:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"設定失敗：{e}"))
                 return
 
-            # /alert 說明
+            # /alert 說明# /alert 說明
             _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="價格警示指令：\n/alert add <標的> <目標價/均線> <above/below>\n/alert list → 查看清單\n/alert del <編號> → 刪除\n\n範例：\n/alert add AAPL 200 above\n/alert add 2330.TW ma20 below\n/alert add USDTWD=X 32.5 below"
+                text="價格警示指令：\n/alert add <標的> <價格> <above/below>\n/alert add <標的> <above/below> <價格>\n/alert add <標的> ma20 <above/below>\n/alert add <標的> ma5 cross ma20\n/alert add <標的> ma5 under ma20\n/alert list → 查看清單\n/alert del <編號> → 刪除\n\n別名：dxy / spx / ndx / sox / vix / ust10y / gold / silver / oil\n\n範例：\n/alert add dxy below 100\n/alert add ust10y above 45\n/alert add NVDA ma20 above\n/alert add NVDA ma5 cross ma20"
             ))
             return
 
@@ -2068,15 +2186,6 @@ def handle_file_message(event):
         ext = Path(filename).suffix.lower()
         print("[FILE]", ck, filename)
 
-        is_eln_restricted_group = (
-            event.source.type == "group"
-            and bool(ELN_GROUP_ID)
-            and getattr(event.source, "group_id", "") == ELN_GROUP_ID
-        )
-        if is_eln_restricted_group:
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="此群組僅開放 /list 與 /detail 查詢。"))
-            return
-
         message_id = event.message.id
         content = _bot_api.get_message_content(message_id)
         tmp_path = UPLOAD_DIR / f"upload_{int(datetime.now(TZ_TAIPEI).timestamp())}{ext}"
@@ -2087,7 +2196,7 @@ def handle_file_message(event):
         # 音檔轉文字（mp3/m4a/wav/ogg/mp4）
         if ext in (".mp3", ".m4a", ".wav", ".ogg", ".mp4", ".webm"):
             _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text=f"🎙️ 收到音檔 {filename}，轉文字中，請稍候..."
+                text=f"🎙️ 收到音檔 {filename}，正在轉逐字稿..."
             ))
             with open(tmp_path, "rb") as f:
                 audio_data = f.read()
@@ -2107,7 +2216,7 @@ def handle_file_message(event):
             push_long_message(_bot_api, ck.split(":", 1)[1], f"📌 會議摘要：\n\n{summary}")
             _bot_api.push_message(
                 ck.split(":", 1)[1],
-                TextSendMessage(text="要不要把這份會議重點做成 PDF 或 PPT？\n\n回覆：做成 PDF / 做成 PPT / 不用")
+                TextSendMessage(text="要不要把這份會議重點做成 PDF 或 PPT？\n\n可直接回：做成 PDF / 做成 PPT / 不用")
             )
             return
 
@@ -2116,10 +2225,14 @@ def handle_file_message(event):
             db_set_await(ck, False)
             summary, top5_lines, detail_map, agent_name_map = run_autotracking(str(tmp_path))
             db_save_result(ck, summary, top5_lines, detail_map, agent_name_map)
+
             try:
-                upload_eln_excel(str(tmp_path))
-            except Exception as storage_e:
-                print("[ELN Storage upload error]", storage_e)
+                from eln_storage import upload_eln_excel
+                storage_info = upload_eln_excel(str(tmp_path))
+                print("[ELN Storage] uploaded:", storage_info)
+            except Exception as e:
+                print("[ELN Storage] upload failed:", e)
+
             _bot_api.reply_message(
                 event.reply_token,
                 TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900])
@@ -2186,15 +2299,6 @@ def handle_image_message(event):
     try:
         ck = chat_key_of(event)
         print("[IMAGE]", ck)
-
-        is_eln_restricted_group = (
-            event.source.type == "group"
-            and bool(ELN_GROUP_ID)
-            and getattr(event.source, "group_id", "") == ELN_GROUP_ID
-        )
-        if is_eln_restricted_group:
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="此群組僅開放 /list 與 /detail 查詢。"))
-            return
 
         message_id = event.message.id
         content = _bot_api.get_message_content(message_id)
