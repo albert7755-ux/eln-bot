@@ -19,6 +19,7 @@ import pytz
 import urllib.request
 import urllib.error
 from openai import OpenAI
+from eln_storage import upload_eln_excel, download_latest_eln, list_history
 
 # ==============================
 # ENV
@@ -29,6 +30,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL")
+ELN_GROUP_ID = os.getenv("ELN_GROUP_ID", "").strip()
 
 if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
     raise RuntimeError("Missing LINE env vars: LINE_CHANNEL_SECRET / LINE_CHANNEL_ACCESS_TOKEN")
@@ -184,26 +186,6 @@ def db_clear_transcript_cache(chat_key: str):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM transcript_cache WHERE chat_key=:k"), {"k": chat_key})
 
-def db_save_meeting_transcript(chat_key: str, file_name: str, transcript: str, summary: str):
-    with engine.begin() as conn:
-        conn.execute(text("""
-        INSERT INTO meeting_transcripts(chat_key, file_name, transcript, summary, created_at)
-        VALUES (:k, :f, :t, :s, NOW())
-        """), {"k": chat_key, "f": file_name, "t": transcript[:500000], "s": summary[:100000]})
-
-def db_get_latest_meeting_transcript(chat_key: str):
-    with engine.begin() as conn:
-        row = conn.execute(text("""
-        SELECT transcript, summary, file_name, created_at
-        FROM meeting_transcripts
-        WHERE chat_key=:k
-        ORDER BY created_at DESC
-        LIMIT 1
-        """), {"k": chat_key}).fetchone()
-    if not row:
-        return None
-    return {"transcript": row[0] or "", "summary": row[1] or "", "file_name": row[2] or "", "created_at": row[3]}
-
 def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_map: dict[str, str], agent_name_map: dict[str, str] = {}):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -246,43 +228,15 @@ def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str]]:
     return [(r[0], r[1]) for r in rows] if rows else []
 
 def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
-    """長文字自動分段 push_message，兼容無換行長文"""
+    """長文字自動分段 push_message，強制切片避免超過 LINE 5000 字限制"""
     if not text:
         return
-
     text = str(text)
-    chunks = []
-    current = ""
-
-    for line in text.split("\n"):
-        while len(line) > max_len:
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks.append(line[:max_len])
-            line = line[max_len:]
-
-        candidate = line if not current else current + "\n" + line
-        if len(candidate) <= max_len:
-            current = candidate
-        else:
-            if current:
-                chunks.append(current)
-            current = line
-
-    if current:
-        chunks.append(current)
-
-    safe_chunks = []
-    for chunk in chunks:
-        while len(chunk) > max_len:
-            safe_chunks.append(chunk[:max_len])
-            chunk = chunk[max_len:]
-        if chunk:
-            safe_chunks.append(chunk)
-
-    for chunk in safe_chunks:
+    while text:
+        chunk = text[:max_len]
+        text = text[max_len:]
         bot_api.push_message(target_id, TextSendMessage(text=chunk))
+
 
 def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, list[str]]:
     q_norm = query.strip().upper()
@@ -797,62 +751,48 @@ def build_pdf_report_content(user_text: str, chat_key: str = "") -> str:
         prompt = build_general_prompt(user_text)
     return ai_claude_long(prompt, chat_key)
 
+
+def db_save_meeting_transcript(chat_key: str, file_name: str, transcript: str, summary: str):
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO meeting_transcripts(chat_key, file_name, transcript, summary, created_at)
+        VALUES (:k, :f, :t, :s, NOW())
+        """), {"k": chat_key, "f": file_name[:255], "t": transcript[:200000], "s": summary[:50000]})
+
+
 def build_transcript_summary(transcript: str, chat_key: str = "") -> str:
-    prompt = f"""
-你是一位專業會議紀錄助理。請將以下逐字稿整理為繁體中文重點摘要。
+    prompt = (
+        "請將以下逐字稿整理成清楚的會議摘要。\n"
+        "要求：\n"
+        "1. 使用繁體中文\n"
+        "2. 條列 5 到 8 個重點\n"
+        "3. 若有決策、結論、行動事項要特別標示\n"
+        "4. 不要使用 Markdown 符號\n\n"
+        f"逐字稿：\n{transcript}"
+    )
+    return ai_claude(prompt, chat_key=chat_key)
 
-要求：
-1. 先寫【會議摘要】
-2. 再寫【重點整理】
-3. 再寫【待辦事項】
-4. 條列清楚、內容具體
-5. 禁止 Markdown 符號
-6. 內容務必根據逐字稿，不要憑空補充
-
-逐字稿：
-{transcript}
-"""
-    return ai_claude(prompt, chat_key)
 
 def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = "") -> str:
-    prompt = f"""
-你是一位專業研究助理，請把以下會議逐字稿與摘要整理成可直接輸出為 PDF 的繁體中文正式會議報告。
+    prompt = (
+        "請根據以下逐字稿與摘要，整理成一份正式的繁體中文會議重點報告，適合輸出為 PDF。\n"
+        "請包含：\n"
+        "【封面摘要】\n【一、會議背景】\n【二、核心討論重點】\n【三、重要決策】\n【四、後續行動事項】\n【五、結論】\n"
+        "不要使用 Markdown 符號。\n\n"
+        f"摘要：\n{summary}\n\n逐字稿：\n{transcript[:12000]}"
+    )
+    return ai_claude_long(prompt, chat_key=chat_key)
 
-請使用這個結構：
-【封面摘要】
-【一、會議背景】
-【二、會議重點】
-【三、逐字稿重點整理】
-【四、結論】
-【五、待辦事項】
-
-要求：
-• 語氣正式、清楚、可直接給主管或客戶閱讀
-• 不要使用 Markdown 符號
-• 內容比摘要更完整，但不要逐字照抄全部逐字稿
-• 以摘要為主、逐字稿為輔，整理成正式文件
-
-會議摘要：
-{summary}
-
-逐字稿：
-{transcript[:120000]}
-"""
-    return ai_claude_long(prompt, chat_key)
 
 def build_transcript_ppt_topic(transcript: str, summary: str, chat_key: str = "") -> str:
-    prompt = f"""
-請根據以下會議摘要與逐字稿，提煉出最適合做成簡報的一行繁體中文主題。
-只回傳主題，不要加任何前言或符號。
+    prompt = (
+        "請根據以下會議摘要與逐字稿，抽出最適合做成簡報的主題。"
+        "只回傳一行繁體中文主題，不要加任何前言。\n\n"
+        f"摘要：\n{summary}\n\n逐字稿：\n{transcript[:6000]}"
+    )
+    return ai_claude(prompt, chat_key=chat_key).strip().splitlines()[0][:80]
 
-會議摘要：
-{summary}
 
-逐字稿：
-{transcript[:50000]}
-"""
-    out = ai_claude(prompt, chat_key).strip().splitlines()
-    return (out[0].strip() if out else "會議重點簡報")[:80]
 
 # ==============================
 # Webhook endpoint
@@ -883,6 +823,11 @@ def handle_text_message(event):
         tl = text_raw.lower().strip()
         ck = chat_key_of(event)
         is_group = event.source.type in ("group", "room")
+        is_eln_restricted_group = (
+            event.source.type == "group"
+            and bool(ELN_GROUP_ID)
+            and getattr(event.source, "group_id", "") == ELN_GROUP_ID
+        )
         print("[TEXT]", ck, repr(text_raw))
 
         if tl.startswith("/"):
@@ -897,6 +842,14 @@ def handle_text_message(event):
         if is_group and not tl.startswith("/"):
             return
 
+        # ELN 專用群組：只允許 /list /detail /help
+        if is_eln_restricted_group and cmd not in ("help", "?", "指令", "幫助", "list", "detail"):
+            _bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="此群組僅開放 /list 與 /detail 查詢。")
+            )
+            return
+
         # 群組模式 HELP：只顯示查詢相關指令
         if cmd in ("help", "?", "指令", "幫助"):
             if is_group:
@@ -904,6 +857,7 @@ def handle_text_message(event):
                     "群組可用指令：\n"
                     "/detail <商品代號>：查詢標的完整狀況（支援模糊搜尋）\n"
                     "/list：列出所有可查商品代號\n"
+                    "/help：顯示本說明\n"
                 )
             else:
                 msg = (
@@ -911,14 +865,12 @@ def handle_text_message(event):
                     "─────────────────\n"
                     "📊 ELN 追蹤\n"
                     "/calc — 上傳 Excel 計算並保存\n"
+                    "/eln upload — 上傳 Excel 並同步更新 Storage\n"
+                    "/eln run — 立即用最新 Excel 重新計算\n"
+                    "/eln history — 查看歷史 Excel 版本\n"
+                    "/eln result — 查看最近 ELN 結果\n"
                     "/list — 列出所有可查商品代號\n"
                     "/detail <代號> — 查詢單筆 KO/KI/狀態\n"
-                    "/eln upload — 上傳並同步保存最新 ELN Excel\n"
-                    "/eln run — 立即以最新 ELN Excel 重新計算\n"
-                    "/eln history — 查看 Supabase 歷史 Excel 版本\n"
-                    "/eln result — 查看最近一次 ELN 摘要\n"
-                    "/runnow — 立即手動觸發 ELN 排程\n"
-                    "/tracklog — 查看最近排程與追蹤記錄\n"
                     "─────────────────\n"
                     "📰 財經資訊\n"
                     "/daily — 產生今日財經日報\n"
@@ -964,6 +916,8 @@ def handle_text_message(event):
                     "/alert del <編號> — 刪除警示\n"
                     "─────────────────\n"
                     "⚙️ 其他\n"
+                    "/runnow — 立即執行一次 ELN 追蹤\n"
+                    "/tracklog — 查看最近排程與手動執行記錄\n"
                     "其他文字 — Claude AI 對話（有記憶）\n"
                     "上傳檔案 — 自動分析 PDF/Excel/Word/PPT\n"
                     "/forget — 清除對話記憶\n"
@@ -1208,51 +1162,42 @@ def handle_text_message(event):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="已設定您為預設推播對象"))
             return
 
+
         # ELN v3 指令
         if cmd == "eln":
-            sub_parts = text_raw.split()
-            sub = sub_parts[1].lower() if len(sub_parts) > 1 else ""
+            subparts = text_raw.split(" ", 2)
+            sub = subparts[1].strip().lower() if len(subparts) > 1 else ""
             if sub == "upload":
                 db_set_await(ck, True)
-                _bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text="📥 請直接上傳 ELN Excel 檔案，我會計算並同步保存到 Supabase。")
-                )
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📥 請上傳 ELN Excel 檔案，我會同步更新 Storage 並計算。"))
                 return
             if sub == "run":
-                _bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text="🔄 正在重新計算最新 ELN，請稍候...")
-                )
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="⚙️ 正在用最新 Excel 重新計算 ELN，請稍候..."))
                 try:
-                    try:
-                        from eln_storage import download_latest_eln
-                        latest_file = download_latest_eln("/tmp/latest_eln.xlsx")
-                    except Exception:
-                        latest_file = "/tmp/latest_eln.xlsx"
+                    latest_file = download_latest_eln("/tmp/latest_eln.xlsx")
                     summary, top5_lines, detail_map, agent_name_map = run_autotracking(latest_file)
                     db_save_result(ck, summary, top5_lines, detail_map, agent_name_map)
-                    msg = "✅ ELN 已重新計算完成\n\n" + ("\n".join(top5_lines[:5]) if top5_lines else (summary or "沒有可顯示摘要"))
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=msg[:4900]))
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=(summary or "已完成，但沒有結果")[:4900]))
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ ELN 計算失敗：{str(e)[:250]}"))
                 return
             if sub == "history":
                 try:
-                    from eln_storage import list_history
                     items = list_history()
-                    msg = "📁 ELN Excel 歷史版本\n\n" + ("\n".join(items[:20]) if items else "目前沒有歷史 Excel")
+                    msg = "📁 ELN Excel 歷史版本\n\n" + ("\n".join(items[:15]) if items else "目前沒有歷史版本。")
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg[:4900]))
                 except Exception as e:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"讀取歷史失敗：{str(e)[:250]}"))
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"讀取失敗：{str(e)[:200]}"))
                 return
             if sub == "result":
                 summary = db_get_report(ck)
                 if not summary:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有 ELN 結果，請先 /calc 或 /eln run。"))
-                    return
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有 ELN 結果。"))
+                else:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
                 return
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="ELN 指令：\n/eln upload\n/eln run\n/eln history\n/eln result"))
+            return
 
         # LIST
         if cmd == "list":
@@ -2123,6 +2068,15 @@ def handle_file_message(event):
         ext = Path(filename).suffix.lower()
         print("[FILE]", ck, filename)
 
+        is_eln_restricted_group = (
+            event.source.type == "group"
+            and bool(ELN_GROUP_ID)
+            and getattr(event.source, "group_id", "") == ELN_GROUP_ID
+        )
+        if is_eln_restricted_group:
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="此群組僅開放 /list 與 /detail 查詢。"))
+            return
+
         message_id = event.message.id
         content = _bot_api.get_message_content(message_id)
         tmp_path = UPLOAD_DIR / f"upload_{int(datetime.now(TZ_TAIPEI).timestamp())}{ext}"
@@ -2133,7 +2087,7 @@ def handle_file_message(event):
         # 音檔轉文字（mp3/m4a/wav/ogg/mp4）
         if ext in (".mp3", ".m4a", ".wav", ".ogg", ".mp4", ".webm"):
             _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text=f"🎙️ 收到音檔 {filename}，正在轉逐字稿..."
+                text=f"🎙️ 收到音檔 {filename}，轉文字中，請稍候..."
             ))
             with open(tmp_path, "rb") as f:
                 audio_data = f.read()
@@ -2153,7 +2107,7 @@ def handle_file_message(event):
             push_long_message(_bot_api, ck.split(":", 1)[1], f"📌 會議摘要：\n\n{summary}")
             _bot_api.push_message(
                 ck.split(":", 1)[1],
-                TextSendMessage(text="要不要把這份會議重點做成 PDF 或 PPT？\n\n可直接回：做成 PDF / 做成 PPT / 不用")
+                TextSendMessage(text="要不要把這份會議重點做成 PDF 或 PPT？\n\n回覆：做成 PDF / 做成 PPT / 不用")
             )
             return
 
@@ -2162,14 +2116,10 @@ def handle_file_message(event):
             db_set_await(ck, False)
             summary, top5_lines, detail_map, agent_name_map = run_autotracking(str(tmp_path))
             db_save_result(ck, summary, top5_lines, detail_map, agent_name_map)
-
             try:
-                from eln_storage import upload_eln_excel
-                storage_info = upload_eln_excel(str(tmp_path))
-                print("[ELN Storage] uploaded:", storage_info)
-            except Exception as e:
-                print("[ELN Storage] upload failed:", e)
-
+                upload_eln_excel(str(tmp_path))
+            except Exception as storage_e:
+                print("[ELN Storage upload error]", storage_e)
             _bot_api.reply_message(
                 event.reply_token,
                 TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900])
@@ -2236,6 +2186,15 @@ def handle_image_message(event):
     try:
         ck = chat_key_of(event)
         print("[IMAGE]", ck)
+
+        is_eln_restricted_group = (
+            event.source.type == "group"
+            and bool(ELN_GROUP_ID)
+            and getattr(event.source, "group_id", "") == ELN_GROUP_ID
+        )
+        if is_eln_restricted_group:
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="此群組僅開放 /list 與 /detail 查詢。"))
+            return
 
         message_id = event.message.id
         content = _bot_api.get_message_content(message_id)
