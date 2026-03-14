@@ -1,7 +1,7 @@
 import os
 import requests
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime
 import anthropic
 import pytz
 
@@ -26,8 +26,8 @@ def _safe_close_pair(symbol: str):
     last_close = float(close.iloc[-1])
 
     if symbol == "^TNX":
-        prev_close = prev_close / 1
-        last_close = last_close / 1
+        prev_close = prev_close / 10.0
+        last_close = last_close / 10.0
 
     change = last_close - prev_close
     pct = (change / prev_close) * 100 if prev_close else 0.0
@@ -61,10 +61,15 @@ def get_market_data():
     return results
 
 
+def updown_mark(value: float):
+    # LINE 純文字不能局部變色，改用 emoji 模擬紅漲綠跌
+    return "🔺" if value >= 0 else "▼"
+
+
 def _line_for_index(label: str, d: dict, suffix: str = "點") -> str:
     if not d:
         return f"{label}：數據抓取失敗"
-    arrow = "▲" if d["change"] >= 0 else "▼"
+    arrow = updown_mark(d["change"])
     return f"{label}：{d['price']:,.2f} {suffix} {arrow}{abs(d['change']):,.2f} ({d['pct']:+.2f}%)"
 
 
@@ -88,28 +93,28 @@ def build_market_snapshot(data):
 
     d_us10y = data.get("US10Y")
     if d_us10y:
-        arrow = "▲" if d_us10y["change"] >= 0 else "▼"
+        arrow = updown_mark(d_us10y["change"])
         lines.append(f"美國10年期公債：{d_us10y['price']:.2f}% {arrow}{abs(d_us10y['change']):.2f}")
     else:
         lines.append("美國10年期公債：數據抓取失敗")
 
     d_dxy = data.get("DXY")
     if d_dxy:
-        arrow = "▲" if d_dxy["change"] >= 0 else "▼"
+        arrow = updown_mark(d_dxy["change"])
         lines.append(f"美元指數 (DXY)：{d_dxy['price']:.2f} {arrow}{abs(d_dxy['change']):.2f}")
     else:
         lines.append("美元指數 (DXY)：數據抓取失敗")
 
     d_wti = data.get("WTI")
     if d_wti:
-        arrow = "▲" if d_wti["change"] >= 0 else "▼"
+        arrow = updown_mark(d_wti["change"])
         lines.append(f"WTI 原油：{d_wti['price']:.2f} {arrow}{abs(d_wti['change']):.2f}")
     else:
         lines.append("WTI 原油：數據抓取失敗")
 
     d_gold = data.get("Gold")
     if d_gold:
-        arrow = "▲" if d_gold["change"] >= 0 else "▼"
+        arrow = updown_mark(d_gold["change"])
         lines.append(f"黃金：{d_gold['price']:.2f} {arrow}{abs(d_gold['change']):.2f}")
     else:
         lines.append("黃金：數據抓取失敗")
@@ -124,19 +129,20 @@ def generate_commentary_with_claude(snapshot_text: str) -> str:
         "你是一位專業的財經日報撰寫助理，服務對象是銀行分行的理財專員。\n\n"
         "以下是今日固定版型的市場數據：\n\n"
         f"{snapshot_text}\n\n"
-        "請根據這些數據與最新市場情況，撰寫以下內容，內容需簡潔、專業、口語易讀，方便理財專員晨會閱讀與對客戶說明。\n\n"
+        "請上網搜尋最新、最相關的國際財經消息，再根據這些數據與新聞事件，撰寫以下內容。\n"
+        "重點是要有新聞感與事件感，不要只寫空泛結論。\n\n"
         "請完成：\n"
-        "1. 開頭前言：2句，直接放在標題下方，不要加任何小標題。\n"
-        "2. 撰寫【總經總覽】：2-3句，涵蓋全球總體經濟關鍵動態（例如利率、通膨、政策或地緣政治）。\n"
-        "3. 撰寫【美國市場】：1-2句，重點說明美股走勢與主要驅動因素（例如科技股、利率、經濟數據）。\n"
-        "4. 撰寫【債券市場】：1-2句，說明美國利率走向與固定收益商品觀察重點。\n\n"
-        "風格要求：\n"
-        "- 整體語氣：專業但口語化，像分行晨會摘要\n"
-        "- 讓理財專員可以快速看懂重點\n"
-        "- 避免過度學術化或過度冗長\n"
-        "- 避免過度誇張或恐慌字眼\n"
-        "- 每段不要過長\n"
-        "- 總長度控制精簡\n\n"
+        "1. 開頭前言：2句，直接放在標題下方，不要加任何小標題。前言要點出當晚最重要的市場交易主線。\n"
+        "2. 撰寫【總經總覽】：2-3句，必須提到具體事件或消息，例如聯準會官員談話、重要經濟數據、政策、關稅、地緣政治、油價變化等。\n"
+        "3. 撰寫【美國市場】：1-2句，必須點出美股漲跌主因，例如科技股、AI、銀行股、能源股、財報或特定新聞。\n"
+        "4. 撰寫【債券市場】：1-2句，必須說明美債殖利率變動背後的原因，並補一句固定收益商品的觀察重點。\n\n"
+        "要求：\n"
+        "- 一定要具體，不要寫成空泛模板。\n"
+        "- 優先使用最近24小時內最重要的財經新聞脈絡。\n"
+        "- 不要亂編新聞，如果沒有明確事件，就誠實寫市場主要關注焦點。\n"
+        "- 語氣專業但口語化，像分行晨會摘要。\n"
+        "- 每段不要過長。\n"
+        "- 總長度控制精簡。\n\n"
         "輸出格式必須完全如下：\n\n"
         "【前言】\n"
         "(2句內容)\n\n"
@@ -148,11 +154,19 @@ def generate_commentary_with_claude(snapshot_text: str) -> str:
         "(內容)\n"
     )
 
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1200,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    try:
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1400,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[{"role": "user", "content": prompt}]
+        )
+    except Exception:
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1400,
+            messages=[{"role": "user", "content": prompt}]
+        )
 
     full_text = ""
     for block in message.content:
@@ -177,7 +191,11 @@ def build_final_report(data: dict) -> str:
     us_market = extract_section(commentary, "美國市場")
     bonds = extract_section(commentary, "債券市場")
 
-    final_text = snapshot.replace("__INTRO__", intro if intro else "昨晚美股整體表現分化，市場持續關注利率與通膨動態。")
+    final_text = snapshot.replace(
+        "__INTRO__",
+        intro if intro else "昨晚美股整體表現分化，市場持續關注利率、通膨與政策訊號。"
+    )
+
     final_text += "\n\n三、總經總覽\n"
     final_text += macro if macro else "全球市場持續關注通膨、利率與政策訊號，風險偏好維持審慎。"
 
