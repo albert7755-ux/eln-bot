@@ -2476,7 +2476,7 @@ def write_job_log(job_name: str, status: str, message: str = ""):
         print(f"[LOG] 寫入失敗: {e}")
 
 def job_auto_tracking():
-    """每天早上 06:02 台北時間 — ELN 自動追蹤"""
+    """每天早上 06:30 台北時間 — ELN 自動追蹤"""
     now = datetime.now(TZ_TAIPEI_PYTZ)
     if now.weekday() >= 5:
         print("[Scheduler] 週末跳過 ELN 追蹤")
@@ -2507,7 +2507,7 @@ def start_scheduler():
     # ELN 自動追蹤：每天 06:00 台北時間（週一到週五）
     scheduler.add_job(
         job_auto_tracking,
-        CronTrigger(day_of_week="mon-fri", hour=6, minute=2, timezone=TZ_TAIPEI_PYTZ),
+        CronTrigger(day_of_week="mon-fri", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ),
         id="auto_tracking",
         name="ELN自動追蹤"
     )
@@ -2531,7 +2531,7 @@ def start_scheduler():
     scheduler.start()
     print("[Scheduler] 排程啟動完成 ✅")
     print("[Scheduler] 財經日報: 每天 06:00（週一至週五）")
-    print("[Scheduler] ELN追蹤: 每天 06:02（週一至週五）")
+    print("[Scheduler] ELN追蹤: 每天 06:30（週一至週五）")
     print("[Scheduler] 價格警示: 每 15 分鐘")
     print("[Scheduler] 郵件監控: 每 15 分鐘")
     return scheduler
