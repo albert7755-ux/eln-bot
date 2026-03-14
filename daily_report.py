@@ -11,6 +11,34 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
+def _safe_close_pair(symbol: str):
+    ticker = yf.Ticker(symbol)
+    hist = ticker.history(period="5d", auto_adjust=False)
+
+    if hist is None or hist.empty:
+        return None
+
+    close = hist["Close"].dropna()
+    if len(close) < 2:
+        return None
+
+    prev_close = float(close.iloc[-2])
+    last_close = float(close.iloc[-1])
+
+    if symbol == "^TNX":
+        prev_close = prev_close / 10.0
+        last_close = last_close / 10.0
+
+    change = last_close - prev_close
+    pct = (change / prev_close) * 100 if prev_close else 0.0
+
+    return {
+        "price": round(last_close, 2),
+        "change": round(change, 2),
+        "pct": round(pct, 2),
+    }
+
+
 def get_market_data():
     tickers = {
         "Dow Jones": "^DJI",
@@ -18,135 +46,111 @@ def get_market_data():
         "NASDAQ": "^IXIC",
         "SOX": "^SOX",
         "US10Y": "^TNX",
+        "DXY": "DX-Y.NYB",
         "Gold": "GC=F",
-        "Silver": "SI=F",
         "WTI": "CL=F",
     }
 
     results = {}
-
     for name, symbol in tickers.items():
         try:
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(period="5d", auto_adjust=False)
-
-            if hist is None or hist.empty:
-                results[name] = None
-                continue
-
-            close = hist["Close"].dropna()
-
-            if len(close) < 2:
-                results[name] = None
-                continue
-
-            prev_close = float(close.iloc[-2])
-            last_close = float(close.iloc[-1])
-
-            if symbol == "^TNX":
-                prev_close = prev_close / 10.0
-                last_close = last_close / 10.0
-
-            change = last_close - prev_close
-            pct = (change / prev_close) * 100 if prev_close else 0.0
-
-            results[name] = {
-                "price": round(last_close, 2),
-                "change": round(change, 2),
-                "pct": round(pct, 2),
-            }
+            results[name] = _safe_close_pair(symbol)
         except Exception as e:
             results[name] = None
-            print(f"Error fetching {name}: {e}")
-
+            print(f"Error fetching {name} ({symbol}): {e}")
     return results
 
 
-def format_market_data(data):
+def _line_for_index(label: str, d: dict, suffix: str = "點") -> str:
+    if not d:
+        return f"{label}：數據抓取失敗"
+    arrow = "▲" if d["change"] >= 0 else "▼"
+    return f"{label}：{d['price']:,.2f} {suffix} {arrow}{abs(d['change']):,.2f} ({d['pct']:+.2f}%)"
+
+
+def build_market_snapshot(data):
     tw_tz = pytz.timezone("Asia/Taipei")
     today = datetime.now(tw_tz)
-    yesterday = today - timedelta(days=1)
     weekday_map = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
 
     lines = []
     lines.append(f"【{today.strftime('%Y年%m月%d日')}（{weekday_map[today.weekday()]}）財經日報】")
-    lines.append(f"反映 {yesterday.strftime('%m/%d')}（{weekday_map[yesterday.weekday()]}）美股收盤\n")
+    lines.append("")
+    lines.append("__INTRO__")
+    lines.append("")
+    lines.append("一、全球市場概覽")
+    lines.append(_line_for_index("道瓊工業指數", data.get("Dow Jones")))
+    lines.append(_line_for_index("標普500指數", data.get("S&P 500")))
+    lines.append(_line_for_index("那斯達克指數", data.get("NASDAQ")))
+    lines.append(_line_for_index("費城半導體指數", data.get("SOX")))
+    lines.append("")
+    lines.append("二、利率與大宗商品")
 
-    lines.append("一、美股四大指數")
-    mapping = [
-        ("Dow Jones", "道瓊 (DJI)"),
-        ("S&P 500", "標普500 (S&P)"),
-        ("NASDAQ", "那斯達克 (IXIC)"),
-        ("SOX", "費半 (SOX)"),
-    ]
-    for key, label in mapping:
-        d = data.get(key)
-        if d:
-            arrow = "▲" if d["change"] >= 0 else "▼"
-            lines.append(f"- {label}: {d['price']:,.2f} 點  {arrow}{abs(d['change']):,.2f} ({d['pct']:+.2f}%)")
-        else:
-            lines.append(f"- {label}: 數據抓取失敗")
-
-    lines.append("\n二、美國10年期公債殖利率")
-    d = data.get("US10Y")
-    if d:
-        arrow = "▲" if d["change"] >= 0 else "▼"
-        lines.append(f"- 10年期: {d['price']:.2f}%  {arrow}{abs(d['change']):.2f}%")
+    d_us10y = data.get("US10Y")
+    if d_us10y:
+        arrow = "▲" if d_us10y["change"] >= 0 else "▼"
+        lines.append(f"美國10年期公債：{d_us10y['price']:.2f}% {arrow}{abs(d_us10y['change']):.2f}")
     else:
-        lines.append("- 10年期: 數據抓取失敗")
+        lines.append("美國10年期公債：數據抓取失敗")
 
-    lines.append("\n三、原物料")
-    commodities = [
-        ("Gold", "黃金", "盎司"),
-        ("Silver", "白銀", "盎司"),
-        ("WTI", "原油(WTI)", "桶"),
-    ]
-    for key, label, unit in commodities:
-        d = data.get(key)
-        if d:
-            arrow = "▲" if d["change"] >= 0 else "▼"
-            lines.append(f"- {label}: ${d['price']:,.2f}/{unit}  {arrow}{abs(d['change']):,.2f} ({d['pct']:+.2f}%)")
-        else:
-            lines.append(f"- {label}: 數據抓取失敗")
+    d_dxy = data.get("DXY")
+    if d_dxy:
+        arrow = "▲" if d_dxy["change"] >= 0 else "▼"
+        lines.append(f"美元指數 (DXY)：{d_dxy['price']:.2f} {arrow}{abs(d_dxy['change']):.2f}")
+    else:
+        lines.append("美元指數 (DXY)：數據抓取失敗")
+
+    d_wti = data.get("WTI")
+    if d_wti:
+        arrow = "▲" if d_wti["change"] >= 0 else "▼"
+        lines.append(f"WTI 原油：{d_wti['price']:.2f} {arrow}{abs(d_wti['change']):.2f}")
+    else:
+        lines.append("WTI 原油：數據抓取失敗")
+
+    d_gold = data.get("Gold")
+    if d_gold:
+        arrow = "▲" if d_gold["change"] >= 0 else "▼"
+        lines.append(f"黃金：{d_gold['price']:.2f} {arrow}{abs(d_gold['change']):.2f}")
+    else:
+        lines.append("黃金：數據抓取失敗")
 
     return "\n".join(lines)
 
 
-def generate_report_with_claude(market_text):
+def generate_commentary_with_claude(snapshot_text: str) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     prompt = (
         "你是一位專業的財經日報撰寫助理，服務對象是銀行分行的理財專員。\n\n"
-        "以下是今日的市場原始數據:\n\n"
-        + market_text +
-        "\n\n請完成以下任務，內容需簡潔、專業、口語易讀，方便理財專員晨會閱讀與對客戶說明：\n"
-        "1. 撰寫【總經總覽】：2-3句，涵蓋全球總體經濟關鍵動態（例如利率、通膨、政策或地緣政治）。\n"
-        "2. 撰寫【美國市場】：1-2句，重點說明美股走勢與主要驅動因素（例如科技股、利率、經濟數據）。\n"
-        "3. 撰寫【債券市場】：1-2句，說明美國利率走向與固定收益商品觀察重點。\n"
-        "4. 撰寫【投資建議】：條列2-3點，涵蓋固定收益、匯率、市場觀察重點，內容需實用、可作為理專與客戶溝通的方向。\n\n"
+        "以下是今日固定版型的市場數據：\n\n"
+        f"{snapshot_text}\n\n"
+        "請根據這些數據與最新市場情況，撰寫以下內容，內容需簡潔、專業、口語易讀，方便理財專員晨會閱讀與對客戶說明。\n\n"
+        "請完成：\n"
+        "1. 開頭前言：2句，直接放在標題下方，不要加任何小標題。\n"
+        "2. 撰寫【總經總覽】：2-3句，涵蓋全球總體經濟關鍵動態（例如利率、通膨、政策或地緣政治）。\n"
+        "3. 撰寫【美國市場】：1-2句，重點說明美股走勢與主要驅動因素（例如科技股、利率、經濟數據）。\n"
+        "4. 撰寫【債券市場】：1-2句，說明美國利率走向與固定收益商品觀察重點。\n\n"
         "風格要求：\n"
         "- 整體語氣：專業但口語化，像分行晨會摘要\n"
         "- 讓理財專員可以快速看懂重點\n"
         "- 避免過度學術化或過度冗長\n"
         "- 避免過度誇張或恐慌字眼\n"
-        "- 每段不要過長，投資建議要具體可用\n"
-        "- 整體字數控制在 180~220 字左右\n\n"
-        "輸出格式：\n\n"
+        "- 每段不要過長\n"
+        "- 總長度控制精簡\n\n"
+        "輸出格式必須完全如下：\n\n"
+        "【前言】\n"
+        "(2句內容)\n\n"
         "【總經總覽】\n"
         "(內容)\n\n"
         "【美國市場】\n"
         "(內容)\n\n"
         "【債券市場】\n"
-        "(內容)\n\n"
-        "【投資建議】\n"
-        "- (建議1)\n"
-        "- (建議2)\n"
-        "- (建議3 可選)"
+        "(內容)\n"
     )
 
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=1800,
+        max_tokens=1200,
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -155,6 +159,35 @@ def generate_report_with_claude(market_text):
         if hasattr(block, "text"):
             full_text += block.text
     return full_text.strip()
+
+
+def extract_section(text: str, title: str) -> str:
+    import re
+    pattern = rf"【{re.escape(title)}】\s*(.*?)(?=\n【|$)"
+    m = re.search(pattern, text, re.S)
+    return m.group(1).strip() if m else ""
+
+
+def build_final_report(data: dict) -> str:
+    snapshot = build_market_snapshot(data)
+    commentary = generate_commentary_with_claude(snapshot)
+
+    intro = extract_section(commentary, "前言")
+    macro = extract_section(commentary, "總經總覽")
+    us_market = extract_section(commentary, "美國市場")
+    bonds = extract_section(commentary, "債券市場")
+
+    final_text = snapshot.replace("__INTRO__", intro if intro else "昨晚美股整體表現分化，市場持續關注利率與通膨動態。")
+    final_text += "\n\n三、總經總覽\n"
+    final_text += macro if macro else "全球市場持續關注通膨、利率與政策訊號，風險偏好維持審慎。"
+
+    final_text += "\n\n四、美國市場\n"
+    final_text += us_market if us_market else "美股走勢仍由大型科技股與利率預期主導，市場情緒偏中性。"
+
+    final_text += "\n\n五、債券市場\n"
+    final_text += bonds if bonds else "美債殖利率變化仍是固定收益商品的重要觀察指標，建議留意利率路徑。"
+
+    return final_text.strip()
 
 
 def save_report_to_db(report_text):
@@ -206,10 +239,8 @@ def send_line_message(text):
 def generate_report() -> str:
     print("Fetching market data...")
     market_data = get_market_data()
-    print("Formatting data...")
-    market_text = format_market_data(market_data)
-    print("Generating report with Claude...")
-    report = generate_report_with_claude(market_text)
+    print("Building final report...")
+    report = build_final_report(market_data)
     return report
 
 
