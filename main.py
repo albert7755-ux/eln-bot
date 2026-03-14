@@ -19,7 +19,6 @@ import pytz
 import urllib.request
 import urllib.error
 from openai import OpenAI
-
 # --- Alert ticker aliases ---
 ALERT_TICKER_ALIAS = {
     "dxy": "DX-Y.NYB",
@@ -34,8 +33,6 @@ ALERT_TICKER_ALIAS = {
     "silver": "SI=F",
     "oil": "CL=F",
 }
-
-
 # ==============================
 # ENV
 # ==============================
@@ -45,35 +42,28 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
     raise RuntimeError("Missing LINE env vars: LINE_CHANNEL_SECRET / LINE_CHANNEL_ACCESS_TOKEN")
 if not DATABASE_URL:
     raise RuntimeError("Missing env var: DATABASE_URL")
 if not ANTHROPIC_API_KEY:
     raise RuntimeError("Missing env var: ANTHROPIC_API_KEY")
-
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
 elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
-
 # 龍蝦主Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 app = FastAPI()
-
 VERSION = "eln-autotracking-db-v3-2026-03-05"
 TZ_TAIPEI = timezone(timedelta(hours=8))
-
 # ==============================
 # DB
 # ==============================
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-
 def init_db():
     with engine.begin() as conn:
         conn.execute(text("""
@@ -129,7 +119,6 @@ def init_db():
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         """))
-        # 舊表補欄位（已存在的 table 不會重建）
         for col, typedef in [
             ("invest_mode", "TEXT NOT NULL DEFAULT ''"),
             ("invest_image", "BYTEA"),
@@ -138,9 +127,7 @@ def init_db():
                 conn.execute(text(f"ALTER TABLE eln_session ADD COLUMN IF NOT EXISTS {col} {typedef}"))
             except Exception:
                 pass
-
 init_db()
-
 def db_set_await(chat_key: str, await_file: bool):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -149,7 +136,6 @@ def db_set_await(chat_key: str, await_file: bool):
         ON CONFLICT (chat_key) DO UPDATE
         SET await_file=:a, updated_at=NOW()
         """), {"k": chat_key, "a": bool(await_file)})
-
 def db_is_await(chat_key: str) -> bool:
     with engine.begin() as conn:
         row = conn.execute(
@@ -157,10 +143,7 @@ def db_is_await(chat_key: str) -> bool:
             {"k": chat_key}
         ).fetchone()
     return bool(row and row[0])
-
-# ── /invest 三步驟狀態管理 ──
 def db_invest_set(chat_key: str, mode: str, image: bytes = None):
-    """mode: '' / 'await_image' / 'await_reason'"""
     with engine.begin() as conn:
         conn.execute(text("""
         INSERT INTO eln_session(chat_key, await_file, invest_mode, invest_image, updated_at)
@@ -168,9 +151,7 @@ def db_invest_set(chat_key: str, mode: str, image: bytes = None):
         ON CONFLICT (chat_key) DO UPDATE
         SET invest_mode=:m, invest_image=COALESCE(:img, eln_session.invest_image), updated_at=NOW()
         """), {"k": chat_key, "m": mode, "img": image})
-
 def db_invest_get(chat_key: str):
-    """回傳 (mode, image_bytes)"""
     with engine.begin() as conn:
         row = conn.execute(
             text("SELECT invest_mode, invest_image FROM eln_session WHERE chat_key=:k"),
@@ -179,7 +160,6 @@ def db_invest_get(chat_key: str):
     if row:
         return row[0] or "", bytes(row[1]) if row[1] else None
     return "", None
-
 def db_set_transcript_cache(chat_key: str, transcript: str, summary: str):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -188,25 +168,21 @@ def db_set_transcript_cache(chat_key: str, transcript: str, summary: str):
         ON CONFLICT (chat_key) DO UPDATE
         SET transcript=:t, summary=:s, updated_at=NOW()
         """), {"k": chat_key, "t": transcript[:200000], "s": summary[:50000]})
-
 def db_get_transcript_cache(chat_key: str):
     with engine.begin() as conn:
         row = conn.execute(text("SELECT transcript, summary FROM transcript_cache WHERE chat_key=:k"), {"k": chat_key}).fetchone()
     if row:
         return {"transcript": row[0] or "", "summary": row[1] or ""}
     return None
-
 def db_clear_transcript_cache(chat_key: str):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM transcript_cache WHERE chat_key=:k"), {"k": chat_key})
-
 def db_save_meeting_transcript(chat_key: str, file_name: str, transcript: str, summary: str):
     with engine.begin() as conn:
         conn.execute(text("""
         INSERT INTO meeting_transcripts(chat_key, file_name, transcript, summary, created_at)
         VALUES (:k, :f, :t, :s, NOW())
         """), {"k": chat_key, "f": file_name, "t": transcript[:500000], "s": summary[:100000]})
-
 def db_get_latest_meeting_transcript(chat_key: str):
     with engine.begin() as conn:
         row = conn.execute(text("""
@@ -219,7 +195,6 @@ def db_get_latest_meeting_transcript(chat_key: str):
     if not row:
         return None
     return {"transcript": row[0] or "", "summary": row[1] or "", "file_name": row[2] or "", "created_at": row[3]}
-
 def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_map: dict[str, str], agent_name_map: dict[str, str] = {}):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -241,7 +216,6 @@ def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_ma
             INSERT INTO eln_detail(chat_key, bond_id, detail, agent_name, updated_at)
             VALUES (:k, :b, :d, :a, NOW())
             """), {"k": chat_key, "b": bond_id, "d": detail, "a": agent})
-
 def db_get_report(chat_key: str) -> str | None:
     with engine.begin() as conn:
         row = conn.execute(
@@ -249,7 +223,6 @@ def db_get_report(chat_key: str) -> str | None:
             {"k": chat_key}
         ).fetchone()
     return row[0] if row else None
-
 def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str]]:
     with engine.begin() as conn:
         rows = conn.execute(text("""
@@ -260,16 +233,12 @@ def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str]]:
         LIMIT :lim
         """), {"k": chat_key, "lim": int(limit)}).fetchall()
     return [(r[0], r[1]) for r in rows] if rows else []
-
 def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
-    """長文字自動分段 push_message，兼容無換行長文"""
     if not text:
         return
-
     text = str(text)
     chunks = []
     current = ""
-
     for line in text.split("\n"):
         while len(line) > max_len:
             if current:
@@ -277,7 +246,6 @@ def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
                 current = ""
             chunks.append(line[:max_len])
             line = line[max_len:]
-
         candidate = line if not current else current + "\n" + line
         if len(candidate) <= max_len:
             current = candidate
@@ -285,10 +253,8 @@ def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
             if current:
                 chunks.append(current)
             current = line
-
     if current:
         chunks.append(current)
-
     safe_chunks = []
     for chunk in chunks:
         while len(chunk) > max_len:
@@ -296,10 +262,8 @@ def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
             chunk = chunk[max_len:]
         if chunk:
             safe_chunks.append(chunk)
-
     for chunk in safe_chunks:
         bot_api.push_message(target_id, TextSendMessage(text=chunk))
-
 def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, list[str]]:
     q_norm = query.strip().upper()
     if not q_norm:
@@ -330,13 +294,11 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
     if len(hits) > 1:
         return None, None, hits[:20]
     return None, None, keys[:20]
-
 # ==============================
 # Optional: store default push target
 # ==============================
 BASE_DIR = Path("/tmp")
 TARGET_FILE = BASE_DIR / "targets.json"
-
 def _read_json(path: Path, default):
     if path.exists():
         try:
@@ -344,27 +306,21 @@ def _read_json(path: Path, default):
         except Exception:
             return default
     return default
-
 def _write_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
 def load_targets():
     return _read_json(TARGET_FILE, {})
-
 def save_targets(data: dict):
     _write_json(TARGET_FILE, data)
-
 # ==============================
 # Health check
 # ==============================
 @app.get("/")
 def root():
     return {"status": "ok", "service": "eln-bot", "webhook": "/callback"}
-
 @app.get("/whoami")
 def whoami():
     return {"service": "eln-bot", "version": VERSION}
-
 # ==============================
 # Chat key
 # ==============================
@@ -374,7 +330,6 @@ def chat_key_of(event) -> str:
     if event.source.type == "room":
         return f"room:{event.source.room_id}"
     return f"user:{event.source.user_id}"
-
 # ==============================
 # Adapter: core -> (summary, top5, detail_map)
 # ==============================
@@ -428,13 +383,11 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
     if top5_lines:
         summary += "\n\n【前5筆摘要】\n" + "\n".join(top5_lines)
     return summary, top5_lines, detail_map, agent_name_map
-
 # ==============================
 # AI fallback (Claude)
 # ==============================
 SYSTEM_PROMPT = (
     "你是「龍蝦」，一位專屬於 Albert 的智慧型 LINE 助理。\n\n"
-
     "【關於 Albert 的工作背景】\n"
     "• 職位：銀行財富管理部門 投資輔銷人員（Investment Sales）\n"
     "• 客群：主要負責高資產客戶（HNW）的投資規劃與資產配置\n"
@@ -444,7 +397,6 @@ SYSTEM_PROMPT = (
     "  → 信託業務：資產信託規劃、境外資金匯回配置\n"
     "  → 教育訓練：經常幫行內專員上課，教導基金、債券、結構型產品、ELN等商品知識\n"
     "• 常見需求：市場分析、商品說明、客戶推播文案、專員教育訓練教材、投資建議\n\n"
-
     "【你的角色定位】\n"
     "你是 Albert 最得力的資深助理，不只回答問題，而是像一位懂市場又懂銷售的同事：\n"
     "• 用投資輔銷的角度思考，理解他面對的是高資產客戶與行內專員\n"
@@ -454,7 +406,6 @@ SYSTEM_PROMPT = (
     "• 遇到教學需求 → 以簡單易懂的方式說明，適合用來對專員解說\n"
     "• 遇到文案需求 → 直接產出可複製貼上的推播內容\n"
     "• 遇到 ELN 相關問題 → 提示使用 /calc 或 /detail 指令\n\n"
-
     "【回答原則】\n"
     "1. 有深度：提供背景、現況、影響、展望，不能太簡短\n"
     "2. 結構清晰：重點分段，讓人一眼看懂\n"
@@ -463,7 +414,6 @@ SYSTEM_PROMPT = (
     "5. 市場問題格式：📌 定義 → 📊 現況 → ⚖️ 機會與風險 → 🔭 展望 → 💬 話術\n"
     "6. 商品教學格式：📌 商品定義 → 🔧 運作方式 → 👤 適合客群 → ⚠️ 風險提示 → 💬 話術\n"
     "7. 質借業務格式：📌 業務說明 → 💡 適用情境 → 📊 利率/條件 → ❓ 常見客戶問題\n\n"
-
     "【格式規定】\n"
     "• 絕對禁止 Markdown：不可出現 ##、**、--- 等符號\n"
     "• 段落標題用 emoji，例如 📌 📊 ⚖️ 🔭 💡 💬 🔧 👤 ⚠️\n"
@@ -471,7 +421,6 @@ SYSTEM_PROMPT = (
     "• 數字、百分比、金額要具體，不要模糊帶過\n"
     "• 回答長度要足夠，高資產客戶的問題不能給太簡短的答案\n"
 )
-
 def get_chat_history(chat_key: str, limit: int = 10) -> list[dict]:
     try:
         with engine.begin() as conn:
@@ -485,7 +434,6 @@ def get_chat_history(chat_key: str, limit: int = 10) -> list[dict]:
     except Exception as e:
         print(f"get_chat_history error: {e}")
         return []
-
 def save_chat_history(chat_key: str, role: str, content: str):
     try:
         with engine.begin() as conn:
@@ -506,31 +454,25 @@ def save_chat_history(chat_key: str, role: str, content: str):
             """), {"k": chat_key})
     except Exception as e:
         print(f"save_chat_history error: {e}")
-
 AUTO_FINANCE_KEYWORDS = [
     "財經", "市場", "美股", "台股", "債券", "殖利率", "基金", "匯率", "美元",
     "聯準會", "fed", "fomc", "通膨", "cpi", "pce", "非農", "失業率",
     "投資", "分析", "總經", "景氣", "eln", "結構型", "信用利差", "公司債"
 ]
-
 AUTO_FILE_KEYWORDS = [
     "pdf", "ppt", "pptx", "簡報", "圖片", "圖表", "文件", "檔案", "word", "excel"
 ]
-
 PDF_NL_KEYWORDS = [
     "pdf", "做成pdf", "生成pdf", "轉成pdf", "輸出pdf", "匯出pdf",
     "做成 pdf", "生成 pdf", "轉成 pdf", "輸出 pdf", "匯出 pdf",
     "做成報告", "生成報告", "轉成報告"
 ]
-
 PPT_NL_KEYWORDS = [
     "ppt", "做成ppt", "生成ppt", "轉成ppt",
     "做成 ppt", "生成 ppt", "轉成 ppt",
     "簡報", "投影片", "簡報檔"
 ]
-
 PPT_ACTION_KEYWORDS = ["做", "生成", "產生", "整理", "輸出", "轉成", "轉為"]
-
 def _normalize_history_for_chat(chat_key: str) -> list[dict]:
     history = get_chat_history(chat_key) if chat_key else []
     cleaned = []
@@ -549,7 +491,6 @@ def _normalize_history_for_chat(chat_key: str) -> list[dict]:
             content = content[len("[gemini] "):]
         cleaned.append({"role": role, "content": content})
     return cleaned
-
 def ai_claude(user_text: str, chat_key: str = "") -> str:
     history = _normalize_history_for_chat(chat_key)
     messages = history + [{"role": "user", "content": user_text}]
@@ -564,8 +505,6 @@ def ai_claude(user_text: str, chat_key: str = "") -> str:
         save_chat_history(chat_key, "user", user_text)
         save_chat_history(chat_key, "assistant", f"[claude] {reply}")
     return reply
-
-
 def ai_claude_long(user_text: str, chat_key: str = "") -> str:
     history = _normalize_history_for_chat(chat_key)
     messages = history + [{"role": "user", "content": user_text}]
@@ -580,7 +519,6 @@ def ai_claude_long(user_text: str, chat_key: str = "") -> str:
         save_chat_history(chat_key, "user", user_text)
         save_chat_history(chat_key, "assistant", f"[claude-long] {reply}")
     return reply
-
 def ai_chatgpt(user_text: str, chat_key: str = "") -> str:
     if not openai_client:
         return ai_claude(user_text, chat_key)
@@ -597,7 +535,6 @@ def ai_chatgpt(user_text: str, chat_key: str = "") -> str:
         save_chat_history(chat_key, "user", user_text)
         save_chat_history(chat_key, "assistant", f"[gpt] {reply}")
     return reply
-
 def ai_gemini(user_text: str, chat_key: str = "") -> str:
     if not GEMINI_API_KEY:
         return ai_claude(user_text, chat_key)
@@ -646,7 +583,6 @@ def ai_gemini(user_text: str, chat_key: str = "") -> str:
     except Exception as e:
         print(f"[Gemini Error] {e}")
         return ai_claude(user_text, chat_key)
-
 def ai_router(user_text: str, chat_key: str = "", forced_model: str = "") -> str:
     text_l = (user_text or "").lower().strip()
     if forced_model == "claude":
@@ -660,8 +596,6 @@ def ai_router(user_text: str, chat_key: str = "", forced_model: str = "") -> str
     if any(k in text_l for k in AUTO_FILE_KEYWORDS):
         return ai_gemini(user_text, chat_key)
     return ai_chatgpt(user_text, chat_key)
-
-
 def classify_report_topic(user_text: str) -> str:
     text_l = (user_text or "").lower()
     macro_keywords = [
@@ -685,16 +619,12 @@ def classify_report_topic(user_text: str) -> str:
     if any(k in text_l for k in product_keywords):
         return "product"
     return "general"
-
-
 def build_macro_prompt(user_text: str) -> str:
     return f"""
 你是一位頂級總經與跨資產策略研究員，服務對象為高資產客戶、機構投資人與銀行投顧團隊。
 請根據以下主題，撰寫一份可直接輸出成 PDF 的繁體中文深度研究報告。
-
 研究主題：
 {user_text}
-
 請依序撰寫以下章節，且每一節都要有足夠內容，不可過短：
 【封面摘要】
 【一、事件與市場背景】
@@ -705,7 +635,6 @@ def build_macro_prompt(user_text: str) -> str:
 【六、投資機會與策略建議】
 【七、主要風險與反證】
 【八、結論】
-
 寫作要求：
 • 採正式 sell-side / 投資銀行研究報告語氣
 • 內容要有脈絡、有推演、有跨資產傳導
@@ -715,15 +644,11 @@ def build_macro_prompt(user_text: str) -> str:
 • 禁止 Markdown 符號，例如 #、*、-、---
 • 直接輸出完整報告正文
 """
-
-
 def build_equity_prompt(user_text: str) -> str:
     return f"""
 你是一位資深產業與股票研究員，請根據以下主題撰寫一份可直接輸出成 PDF 的繁體中文深度研究報告。
-
 研究主題：
 {user_text}
-
 請依序撰寫以下章節：
 【封面摘要】
 【一、產業與公司背景】
@@ -734,7 +659,6 @@ def build_equity_prompt(user_text: str) -> str:
 【六、投資機會與布局方式】
 【七、主要風險與反證】
 【八、結論】
-
 寫作要求：
 • 語氣像大型券商或資產管理公司的產業研究報告
 • 不能只講故事，必須講商業模式、獲利邏輯、估值與市場預期
@@ -744,15 +668,11 @@ def build_equity_prompt(user_text: str) -> str:
 • 禁止 Markdown 符號
 • 直接輸出完整報告正文
 """
-
-
 def build_product_prompt(user_text: str) -> str:
     return f"""
 你是一位銀行財富管理研究員，請根據以下主題撰寫一份可直接輸出成 PDF 的繁體中文深度研究報告。
-
 研究主題：
 {user_text}
-
 請依序撰寫以下章節：
 【封面摘要】
 【一、商品定位與市場背景】
@@ -763,7 +683,6 @@ def build_product_prompt(user_text: str) -> str:
 【六、投資建議與配置思維】
 【七、主要風險與注意事項】
 【八、結論】
-
 寫作要求：
 • 語氣像銀行投顧或產品研究報告
 • 要兼具專業性與可銷售性，讓內容可以拿去和高資產客戶討論
@@ -773,15 +692,11 @@ def build_product_prompt(user_text: str) -> str:
 • 禁止 Markdown 符號
 • 直接輸出完整報告正文
 """
-
-
 def build_general_prompt(user_text: str) -> str:
     return f"""
 你是一位資深投資研究員，請根據以下主題撰寫一份可直接輸出成 PDF 的繁體中文深度研究報告。
-
 研究主題：
 {user_text}
-
 請依序撰寫以下章節：
 【封面摘要】
 【一、主題背景】
@@ -790,7 +705,6 @@ def build_general_prompt(user_text: str) -> str:
 【四、投資機會】
 【五、主要風險】
 【六、結論與建議】
-
 寫作要求：
 • 採正式研究報告語氣
 • 要有完整段落與分析，不可像聊天摘要
@@ -799,8 +713,6 @@ def build_general_prompt(user_text: str) -> str:
 • 禁止 Markdown 符號
 • 直接輸出完整報告正文
 """
-
-
 def build_pdf_report_content(user_text: str, chat_key: str = "") -> str:
     topic_type = classify_report_topic(user_text)
     if topic_type == "macro":
@@ -812,11 +724,9 @@ def build_pdf_report_content(user_text: str, chat_key: str = "") -> str:
     else:
         prompt = build_general_prompt(user_text)
     return ai_claude_long(prompt, chat_key)
-
 def build_transcript_summary(transcript: str, chat_key: str = "") -> str:
     prompt = f"""
 你是一位專業會議紀錄助理。請將以下逐字稿整理為繁體中文重點摘要。
-
 要求：
 1. 先寫【會議摘要】
 2. 再寫【重點整理】
@@ -824,16 +734,13 @@ def build_transcript_summary(transcript: str, chat_key: str = "") -> str:
 4. 條列清楚、內容具體
 5. 禁止 Markdown 符號
 6. 內容務必根據逐字稿，不要憑空補充
-
 逐字稿：
 {transcript}
 """
     return ai_claude(prompt, chat_key)
-
 def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = "") -> str:
     prompt = f"""
 你是一位專業研究助理，請把以下會議逐字稿與摘要整理成可直接輸出為 PDF 的繁體中文正式會議報告。
-
 請使用這個結構：
 【封面摘要】
 【一、會議背景】
@@ -841,40 +748,31 @@ def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = 
 【三、逐字稿重點整理】
 【四、結論】
 【五、待辦事項】
-
 要求：
 • 語氣正式、清楚、可直接給主管或客戶閱讀
 • 不要使用 Markdown 符號
 • 內容比摘要更完整，但不要逐字照抄全部逐字稿
 • 以摘要為主、逐字稿為輔，整理成正式文件
-
 會議摘要：
 {summary}
-
 逐字稿：
 {transcript[:120000]}
 """
     return ai_claude_long(prompt, chat_key)
-
 def build_transcript_ppt_topic(transcript: str, summary: str, chat_key: str = "") -> str:
     prompt = f"""
 請根據以下會議摘要與逐字稿，提煉出最適合做成簡報的一行繁體中文主題。
 只回傳主題，不要加任何前言或符號。
-
 會議摘要：
 {summary}
-
 逐字稿：
 {transcript[:50000]}
 """
     out = ai_claude(prompt, chat_key).strip().splitlines()
     return (out[0].strip() if out else "會議重點簡報")[:80]
-
 # ==============================
 # Webhook endpoint
 # ==============================
-# 用 threading.local 記錄當前是哪個 Bot 在處理
-# event -> bot_api 對應表
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature")
@@ -885,9 +783,6 @@ async def callback(request: Request):
         return "OK"
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
-
-
-
 # ==============================
 # Text message handler
 # ==============================
@@ -900,7 +795,6 @@ def handle_text_message(event):
         ck = chat_key_of(event)
         is_group = event.source.type in ("group", "room")
         print("[TEXT]", ck, repr(text_raw))
-
         if tl.startswith("/"):
             cmd = tl[1:].split()[0] if tl[1:].split() else ""
             raw_cmd = text_raw[1:]
@@ -908,12 +802,8 @@ def handle_text_message(event):
             cmd = tl.split()[0] if tl.split() else tl
             raw_cmd = text_raw
         parts = text_raw.split(" ", 1)
-
-        # 群組模式：非指令訊息直接靜音
         if is_group and not tl.startswith("/"):
             return
-
-        # 群組模式 HELP：只顯示查詢相關指令
         if cmd in ("help", "?", "指令", "幫助"):
             help_arg = parts[1].strip().lower() if len(parts) > 1 else ""
             if is_group:
@@ -962,7 +852,6 @@ def handle_text_message(event):
                         "─────────────────\n"
                         "/report <主題>\n"
                         "/report ppt <主題>\n"
-                        "/pdf daily\n"
                         "/pdf market <內容>\n"
                         "/pdf make <內容>\n"
                         "自然語言也可直接說：\n"
@@ -997,14 +886,12 @@ def handle_text_message(event):
                     )
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
             return
-
         transcript_cache = db_get_transcript_cache(ck)
         if transcript_cache:
             if any(x in tl for x in ["不用", "不用了", "先不用", "取消", "不用做"]):
                 db_clear_transcript_cache(ck)
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="👌 好的，已保留逐字稿與摘要回覆，不另外生成 PDF 或 PPT。"))
                 return
-
             if any(x in tl for x in ["做成pdf", "生成pdf", "轉成pdf", "做成 pdf", "生成 pdf", "轉成 pdf", "輸出pdf", "輸出 pdf"]):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在根據逐字稿重點生成 PDF，請稍候..."))
                 try:
@@ -1020,7 +907,6 @@ def handle_text_message(event):
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ PDF 生成失敗：{str(e)[:250]}"))
                 return
-
             if any(x in tl for x in ["做成ppt", "生成ppt", "轉成ppt", "做成 ppt", "生成 ppt", "轉成 ppt", "做成簡報", "生成簡報", "轉成簡報"]):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 正在根據逐字稿重點生成簡報，請稍候約60至90秒..."))
                 try:
@@ -1036,8 +922,6 @@ def handle_text_message(event):
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 簡報生成失敗：{str(e)[:250]}"))
                 return
-
-        # SEND / SKIP — ELN 理專通知確認
         if cmd in ("send", "skip"):
             arg = parts[1].strip().lower() if len(parts) > 1 else ""
             if not arg:
@@ -1045,21 +929,14 @@ def handle_text_message(event):
                     text="請指定編號或 all\n範例：/send 1　/skip 2　/send all"
                 ))
                 return
-
-            # 從 DB 撈 pending 清單
             with engine.begin() as conn:
                 rows = conn.execute(text(
                     "SELECT id, target_id, agent_name, bond_id, status, msg "
                     "FROM eln_pending_notifications WHERE chat_key=:k ORDER BY id"
                 ), {"k": ck}).fetchall()
-
             if not rows:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="目前沒有待確認的通知。"
-                ))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有待確認的通知。"))
                 return
-
-            # 決定要處理哪幾筆
             if arg == "all":
                 targets = list(rows)
             else:
@@ -1073,52 +950,35 @@ def handle_text_message(event):
                         text=f"編號不正確，請輸入 1～{len(rows)} 或 all"
                     ))
                     return
-
             if cmd == "send":
                 sent, failed = 0, 0
                 for row in targets:
                     try:
-                        line_bot_api.push_message(
-                            row.target_id,
-                            TextSendMessage(text=row.msg[:4900])
-                        )
+                        line_bot_api.push_message(row.target_id, TextSendMessage(text=row.msg[:4900]))
                         sent += 1
-                        print(f"[SEND] {row.agent_name} | {row.bond_id} | {row.status}")
                     except Exception as e:
                         failed += 1
                         print(f"[SEND ERROR] {row.target_id}: {e}")
-                    # 發完就從 pending 刪掉
                     with engine.begin() as conn:
-                        conn.execute(text(
-                            "DELETE FROM eln_pending_notifications WHERE id=:i"
-                        ), {"i": row.id})
-
+                        conn.execute(text("DELETE FROM eln_pending_notifications WHERE id=:i"), {"i": row.id})
                 result_text = f"✅ 已發送 {sent} 筆"
                 if failed:
                     result_text += f"，失敗 {failed} 筆"
-            else:  # skip
+            else:
                 for row in targets:
                     with engine.begin() as conn:
-                        conn.execute(text(
-                            "DELETE FROM eln_pending_notifications WHERE id=:i"
-                        ), {"i": row.id})
+                        conn.execute(text("DELETE FROM eln_pending_notifications WHERE id=:i"), {"i": row.id})
                 result_text = f"⏭️ 已略過 {len(targets)} 筆"
-
-            # 看看還有沒有剩的
             with engine.begin() as conn:
                 remaining = conn.execute(text(
                     "SELECT COUNT(*) FROM eln_pending_notifications WHERE chat_key=:k"
                 ), {"k": ck}).scalar()
-
             if remaining > 0:
                 result_text += f"\n\n還有 {remaining} 筆待處理，打 /send list 查看"
             else:
                 result_text += "\n\n✅ 所有通知已處理完畢"
-
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=result_text))
             return
-
-        # SEND LIST — 查看待確認清單
         if cmd == "send" and len(parts) > 1 and parts[1].strip().lower() == "list":
             with engine.begin() as conn:
                 rows = conn.execute(text(
@@ -1126,32 +986,23 @@ def handle_text_message(event):
                     "FROM eln_pending_notifications WHERE chat_key=:k ORDER BY id"
                 ), {"k": ck}).fetchall()
             if not rows:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="目前沒有待確認的通知。"
-                ))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有待確認的通知。"))
             else:
                 lines = [f"📋 待確認通知（{len(rows)}筆）\n"]
                 for i, row in enumerate(rows, start=1):
                     lines.append(f"{i}️⃣ {row.agent_name} | {row.bond_id} | {row.status}\n  /send {i}　/skip {i}")
                 lines.append("\n/send all 全部發送　/skip all 全部略過")
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="\n\n".join(lines)
-                ))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n\n".join(lines)))
             return
-
-        # INVEST 投資推播
         if cmd == "invest":
             db_invest_set(ck, "await_image")
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text="📰 請上傳新聞截圖\n\n收到圖片後，我會請你補上投資理由和標的。"
             ))
             return
-
-        # INVEST 第三步：收到理由和標的
         invest_mode, invest_image = db_invest_get(ck)
         if invest_mode == "await_reason" and invest_image:
             raw = text_raw.strip()
-            # 解析理由和標的（允許各種格式）
             reason = ""
             targets = ""
             for line in raw.replace("，", ",").splitlines():
@@ -1160,36 +1011,24 @@ def handle_text_message(event):
                     reason = l.split("：", 1)[-1].split(":", 1)[-1].strip()
                 elif l.startswith("標的"):
                     targets = l.split("：", 1)[-1].split(":", 1)[-1].strip()
-            # 若沒有明確標記，把整段當理由
             if not reason and not targets:
                 reason = raw
-
-            db_invest_set(ck, "")  # 清除狀態
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="✍️ 整理中，請稍候..."
-            ))
+            db_invest_set(ck, "")
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="✍️ 整理中，請稍候..."))
             try:
                 posts = generate_invest_post(invest_image, reason, targets)
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=posts[:4900]))
             except Exception as e:
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                    text=f"生成失敗：{str(e)[:200]}"
-                ))
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"生成失敗：{str(e)[:200]}"))
             return
-
-        # DAILY REPORT
+        # ── DAILY REPORT ──────────────────────────────────────────
         if cmd.startswith("daily"):
             parts = text_raw.split(" ", 1)
             use_cache = len(parts) > 1 and parts[1].strip().lower() == "cache"
-
             if use_cache:
                 try:
                     from sqlalchemy import create_engine, text as sa_text
                     db_url = DATABASE_URL
-                    if db_url.startswith("postgres://"):
-                        db_url = db_url.replace("postgres://", "postgresql+psycopg://", 1)
-                    elif db_url.startswith("postgresql://"):
-                        db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
                     eng = create_engine(db_url, pool_pre_ping=True)
                     with eng.begin() as conn:
                         row = conn.execute(sa_text("""
@@ -1203,18 +1042,18 @@ def handle_text_message(event):
                 except Exception as e:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"讀取快取失敗: {e}"))
                 return
-
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="產生中，請稍候約30秒..."))
             try:
                 from daily_report import generate_report, save_report_to_db
-                report = generate_report()
+                report, image_url = generate_report()
                 save_report_to_db(report)
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=report[:4900]))
+                if image_url:
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📊 今日市場摘要圖\n{image_url}"))
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"日報產生失敗: {e}"))
             return
-
-        # SETTARGET
+        # ──────────────────────────────────────────────────────────
         if cmd == "settarget":
             targets = load_targets()
             if event.source.type == "group":
@@ -1233,23 +1072,15 @@ def handle_text_message(event):
                 save_targets(targets)
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="已設定您為預設推播對象"))
             return
-
-        # ELN v3 指令
         if cmd == "eln":
             sub_parts = text_raw.split()
             sub = sub_parts[1].lower() if len(sub_parts) > 1 else ""
             if sub == "upload":
                 db_set_await(ck, True)
-                _bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text="📥 請直接上傳 ELN Excel 檔案，我會計算並同步保存到 Supabase。")
-                )
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📥 請直接上傳 ELN Excel 檔案，我會計算並同步保存到 Supabase。"))
                 return
             if sub == "run":
-                _bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text="🔄 正在重新計算最新 ELN，請稍候...")
-                )
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="🔄 正在重新計算最新 ELN，請稍候..."))
                 try:
                     try:
                         from eln_storage import download_latest_eln
@@ -1279,16 +1110,11 @@ def handle_text_message(event):
                     return
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
                 return
-
-        # LIST
         if cmd == "list":
             bonds = db_list_bonds(ck, limit=100)
             if not bonds:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="目前尚無已保存結果。請先 /calc 上傳 Excel。"
-                ))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無已保存結果。請先 /calc 上傳 Excel。"))
                 return
-
             from collections import defaultdict
             grouped = defaultdict(list)
             for bond_id, agent_raw in bonds:
@@ -1297,15 +1123,12 @@ def handle_text_message(event):
                     agents = ["未指定"]
                 for agent in agents:
                     grouped[agent].append(bond_id)
-
             lines = [f"📋 全部商品（共 {len(bonds)} 筆，按理專排列）：\n"]
             for agent, bond_ids in sorted(grouped.items()):
                 unique_bonds = list(dict.fromkeys(bond_ids))
                 lines.append(f"👤 {agent}（{len(unique_bonds)} 筆）")
                 for b in unique_bonds:
                     lines.append(f"   • {b}")
-
-            # 分段發送，每段不超過 4800 字元
             full_text = "\n".join(lines)
             chunks = []
             current = ""
@@ -1317,13 +1140,10 @@ def handle_text_message(event):
                     current = current + "\n" + line if current else line
             if current:
                 chunks.append(current)
-
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=chunks[0]))
             for chunk in chunks[1:]:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=chunk))
             return
-
-        # CALC
         if cmd.startswith("calc") or cmd.startswith("clac"):
             parts = raw_cmd.split(" ", 1)
             if len(parts) > 1 and parts[1].strip():
@@ -1339,13 +1159,8 @@ def handle_text_message(event):
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text="算式錯誤"))
                     return
             db_set_await(ck, True)
-            _bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="收到！請直接把 Excel 檔案傳給我（用 LINE 的『檔案』上傳），我會計算並保存結果。")
-            )
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="收到！請直接把 Excel 檔案傳給我（用 LINE 的『檔案』上傳），我會計算並保存結果。"))
             return
-
-        # REPORT
         if cmd == "report" and len(raw_cmd.strip().split()) == 1:
             summary = db_get_report(ck)
             if not summary:
@@ -1353,45 +1168,27 @@ def handle_text_message(event):
                 return
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
             return
-
-        # MARKET CONTENT
         if cmd.startswith("market"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
-                _bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(
-                        text="請輸入新聞內容和推薦標的\n\n格式範例:\n/market 美股反彈，高盛喊買。\n\n推薦標的: PIMCO收益增長、駿利平衡基金"
-                    )
-                )
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="請輸入新聞內容和推薦標的\n\n格式範例:\n/market 美股反彈，高盛喊買。\n\n推薦標的: PIMCO收益增長、駿利平衡基金"
+                ))
                 return
             news_text = parts[1].strip()
             content = generate_market_content(news_text)
-            _bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=content[:4900])
-            )
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=content[:4900]))
             return
-
-        # 自然語言 PDF 生成（保留原 /pdf 指令）
         if (not tl.startswith("/pdf")) and any(k in tl for k in PDF_NL_KEYWORDS):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在整理內容並生成研究報告 PDF，請稍候..."))
             try:
                 from pdf_generator import create_and_upload_pdf
                 report_text = build_pdf_report_content(text_raw, chat_key=ck)
                 link = create_and_upload_pdf("analysis", report_text, "AI自動生成研究報告")
-                _bot_api.push_message(
-                    ck.split(":", 1)[1],
-                    TextSendMessage(text=f"✅ 研究報告 PDF 已生成完成！\n\n{link}")
-                )
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 研究報告 PDF 已生成完成！\n\n{link}"))
             except Exception as e:
-                _bot_api.push_message(
-                    ck.split(":", 1)[1],
-                    TextSendMessage(text=f"❌ PDF 生成失敗：{str(e)[:250]}")
-                )
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ PDF 生成失敗：{str(e)[:250]}"))
             return
-
-        # 自然語言 PPT / 簡報生成
         if (
             any(k in tl for k in PPT_NL_KEYWORDS)
             and any(k in text_raw for k in PPT_ACTION_KEYWORDS)
@@ -1400,7 +1197,6 @@ def handle_text_message(event):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 正在整理內容並生成簡報，請稍候約60至90秒..."))
             try:
                 from ppt_generator import generate_ppt
-
                 topic_prompt = (
                     "請從以下使用者需求中，抽出最適合做成簡報的主題，"
                     "只回傳一行繁體中文主題，不要加任何前言或符號。\n\n"
@@ -1409,36 +1205,15 @@ def handle_text_message(event):
                 topic = ai_claude(topic_prompt, chat_key=ck).strip().splitlines()[0][:80]
                 if not topic:
                     topic = text_raw[:40]
-
                 link = generate_ppt(topic, n_slides=12)
-                _bot_api.push_message(
-                    ck.split(":", 1)[1],
-                    TextSendMessage(text=f"✅ 簡報已生成完成！\n\n📌 主題：{topic}\n\n{link}")
-                )
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 簡報已生成完成！\n\n📌 主題：{topic}\n\n{link}"))
             except Exception as e:
-                _bot_api.push_message(
-                    ck.split(":", 1)[1],
-                    TextSendMessage(text=f"❌ 簡報生成失敗：{str(e)[:250]}")
-                )
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 簡報生成失敗：{str(e)[:250]}"))
             return
-
-        # PDF 生成
         if cmd.startswith("pdf"):
             from pdf_generator import create_and_upload_pdf
             parts = text_raw.split(" ", 2)
             sub = parts[1].strip().lower() if len(parts) > 1 else ""
-
-            if sub == "daily":
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="產生財經日報 PDF 中，請稍候約30秒..."))
-                try:
-                    from daily_report import generate_report
-                    report = generate_report()
-                    link = create_and_upload_pdf("daily", report)
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📄 財經日報 PDF 已產生！\n\n{link}"))
-                except Exception as e:
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"PDF 產生失敗: {e}"))
-                return
-
             if sub == "market":
                 if len(parts) < 3 or not parts[2].strip():
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入內容\n範例：/pdf market 美股反彈，推薦PIMCO"))
@@ -1451,7 +1226,6 @@ def handle_text_message(event):
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"PDF 產生失敗: {e}"))
                 return
-
             if sub == "make":
                 content_text = parts[2].strip() if len(parts) > 2 else ""
                 if not content_text:
@@ -1463,43 +1237,29 @@ def handle_text_message(event):
                 try:
                     report_text = build_pdf_report_content(content_text, chat_key=ck)
                     link = create_and_upload_pdf("analysis", report_text, "自訂研究報告")
-                    _bot_api.push_message(
-                        ck.split(":", 1)[1],
-                        TextSendMessage(text=f"📄 研究報告 PDF 已產生！\n\n{link}")
-                    )
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📄 研究報告 PDF 已產生！\n\n{link}"))
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"PDF 產生失敗: {e}"))
                 return
-
             _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="PDF 指令用法：\n/pdf daily → 財經日報 PDF\n/pdf market <內容> → 市場觀點 PDF\n/pdf make <內容> → 研究報告 PDF"
+                text="PDF 指令用法：\n/pdf market <內容> → 市場觀點 PDF\n/pdf make <內容> → 研究報告 PDF"
             ))
             return
-
-        # REPORT 研究報告（多種風格）
         if cmd.startswith("report"):
             parts = text_raw.split(" ")
             style_codes = {"ib", "brief", "client", "academic", "hybrid", "custom"}
             style_names = {"ib":"投資銀行", "brief":"簡報摘要", "client":"客戶推播", "academic":"學術研究", "hybrid":"混合風格", "custom":"自訂風格"}
             style = "ib"
             custom_prompt = ""
-
-            # ── PPT 子指令：/report ppt <主題> [選項]
-            # 固定配色：navy / green / dark
-            # 自訂視覺：主題:深海星空
-            # 指定圖案：圖案:stars（8種內建）或 圖案:自由（Claude即時繪製）
             if len(parts) > 1 and parts[1].lower() == "ppt":
                 ppt_color_codes = {"navy", "green", "dark"}
                 ppt_color_names = {"navy":"深藍金","green":"深綠金","dark":"純黑銀"}
                 VALID_PATTERNS  = {"circuit","wave","stars","hexagon","mountain","ripple","grid","diagonal","none"}
-
                 raw          = " ".join(parts[2:]).strip()
                 visual_theme = ""
                 color_theme  = "navy"
                 force_pattern = ""
                 custom_bg    = False
-
-                # 解析 圖案:XXX（先解析，避免干擾後面邏輯）
                 if "圖案:" in raw:
                     pi = raw.index("圖案:")
                     pat_val = raw[pi+3:].split()[0].strip()
@@ -1508,8 +1268,6 @@ def handle_text_message(event):
                         custom_bg = True
                     elif pat_val in VALID_PATTERNS:
                         force_pattern = pat_val
-
-                # 解析 主題:XXXX
                 if "主題:" in raw:
                     idx = raw.index("主題:")
                     visual_theme = raw[idx+3:].strip()
@@ -1526,44 +1284,30 @@ def handle_text_message(event):
                     color_label = ppt_color_names[color_theme]
                 else:
                     color_label = "深藍金"
-
                 topic = raw
                 if not topic:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(
                         text="請輸入簡報主題！\n\n─ 固定配色 ─\n/report ppt 債券投資入門\n/report ppt 債券投資入門 green\n/report ppt 信託規劃 dark\n\n─ 自訂視覺主題 ─\n/report ppt ELN介紹 主題:深海星空\n/report ppt Lombard Lending 主題:科技電路板\n\n─ 指定圖案 ─\n/report ppt 債券投資 主題:宇宙紫金 圖案:stars\n/report ppt 信託規劃 主題:日式禪風 圖案:ripple\n\n─ Claude自由繪製背景（最自由！）─\n/report ppt ELN介紹 主題:珊瑚礁海底 圖案:自由\n/report ppt 債券配置 主題:富士山日出 圖案:自由"
                     ))
                     return
-
-                # 等待提示
                 wait_steps = []
                 if custom_bg:    wait_steps.append("🎨 Claude自由繪製背景")
                 elif visual_theme: wait_steps.append("🎨 推導視覺風格")
                 wait_steps += ["📐 規劃架構", "🖼️ 生成投影片", "☁️ 上傳雲端"]
                 wait_text = " → ".join(wait_steps)
-
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
                     text=f"🎨 正在製作「{topic}」簡報\n\n配色：{color_label}\n風格：Icon + 大字 + 繁體中文\n頁數：12張\n\n{wait_text}\n\n請稍候約{'120' if custom_bg else '90'}秒..."
                 ))
                 try:
                     from ppt_generator import generate_ppt
-                    link = generate_ppt(
-                        topic, n_slides=12,
-                        color_theme=color_theme,
-                        visual_theme=visual_theme,
-                        force_pattern=force_pattern,
-                        custom_bg=custom_bg
-                    )
+                    link = generate_ppt(topic, n_slides=12, color_theme=color_theme, visual_theme=visual_theme, force_pattern=force_pattern, custom_bg=custom_bg)
                     bg_note = "\n⚠️ 背景為 Claude 自由創作，風格可能每次略有不同" if custom_bg else ""
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
                         text=f"✅ 簡報製作完成！\n\n📌 主題：{topic}\n🎨 配色：{color_label}\n📄 頁數：12張{bg_note}\n\n{link}\n\n💡 下載後可在 PowerPoint 自由修改內容"
                     ))
                 except Exception as e:
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                        text=f"❌ 簡報生成失敗：{str(e)[:200]}"
-                    ))
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 簡報生成失敗：{str(e)[:200]}"))
                 return
-
-            # 偵測 custom：/report <主題> custom <自訂說明>
             if "custom" in [p.lower() for p in parts[2:]]:
                 custom_idx = next(i for i,p in enumerate(parts) if p.lower() == "custom")
                 topic = " ".join(parts[1:custom_idx]).strip()
@@ -1579,7 +1323,6 @@ def handle_text_message(event):
                 topic = " ".join(parts[1:-1]).strip()
             else:
                 topic = " ".join(parts[1:]).strip()
-
             if not topic:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
                     text="請輸入報告主題\n\n風格選擇（加在主題後面）：\n預設 → 投資銀行\nbrief → 簡報摘要\nclient → 客戶推播\nacademic → 學術研究\nhybrid → 投銀+研究混合\ncustom <說明> → 自訂風格\n\n範例：\n/report 聯準會降息對債市影響\n/report 聯準會降息對債市影響 client\n/report 台積電展望 custom 請用輕鬆幽默的風格，適合分享給非專業投資人"
@@ -1595,20 +1338,19 @@ def handle_text_message(event):
                     text=f"📑 研究報告已完成！\n\n主題：{topic}\n風格：{style_names.get(style,'投資銀行')}\n\n{link}"
                 ))
             except Exception as e:
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                    text=f"報告生成失敗：{e}"
-                ))
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"報告生成失敗：{e}"))
             return
-
-        # ALERT 價格警示
         if cmd.startswith("alert"):
             parts = text_raw.split(" ")
             sub = parts[1].strip().lower() if len(parts) > 1 else ""
-
-            # /alert list
             if sub == "list":
                 with engine.begin() as conn:
-                    rows = conn.execute(text("""\n                    SELECT id, symbol, alert_type, condition, target_value, ma_period\n                    FROM price_alerts\n                    WHERE chat_key=:k AND deleted=FALSE\n                    ORDER BY id ASC\n                    """), {"k": ck}).fetchall()
+                    rows = conn.execute(text("""
+                    SELECT id, symbol, alert_type, condition, target_value, ma_period
+                    FROM price_alerts
+                    WHERE chat_key=:k AND deleted=FALSE
+                    ORDER BY id ASC
+                    """), {"k": ck}).fetchall()
                 if not rows:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有任何警示設定。\n\n新增範例：\n/alert add AAPL 200 above\n/alert add AAPL ma20 below"))
                     return
@@ -1623,11 +1365,8 @@ def handle_text_message(event):
                         msg += f"#{rid} {sym} {cross_str} MA{maper}\n"
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg.strip()))
                 return
-
-            # /alert del <id> 或 /alert del（顯示清單讓用戶選）
             if sub == "del":
                 if len(parts) < 3:
-                    # 沒給編號 → 先顯示清單
                     with engine.begin() as conn:
                         rows = conn.execute(text("""
                         SELECT id, symbol, alert_type, condition, target_value, ma_period, trigger_count
@@ -1659,29 +1398,18 @@ def handle_text_message(event):
                 except Exception as e:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"刪除失敗：{e}"))
                 return
-
-            # /alert add <symbol> <target/maXX> <above/below>
             if sub == "add":
-                # 支援：
-                # /alert add NVDA 190 above
-                # /alert add NVDA above 190
-                # /alert add NVDA ma20 above
-                # /alert add NVDA ma5 cross ma20
-                # /alert add dxy below 100
                 if len(parts) < 5:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(
                         text="格式說明：\n\n價格警示：\n/alert add NVDA 190 above\n/alert add NVDA above 190\n/alert add dxy below 100\n/alert add ust10y above 45\n\n價格 vs 均線：\n/alert add NVDA ma20 above\n/alert add 2330.TW ma60 below\n\n均線交叉：\n/alert add NVDA ma5 cross ma20\n/alert add NVDA ma5 under ma20"
                     ))
                     return
-
                 raw_symbol = parts[2]
                 symbol = ALERT_TICKER_ALIAS.get(raw_symbol.lower(), raw_symbol).upper()
                 p3 = parts[3].lower()
                 p4 = parts[4].lower()
                 p5 = parts[5].lower() if len(parts) > 5 else ""
-
                 try:
-                    # 均線交叉：ma5 cross ma20 / ma5 under ma20
                     if p3.startswith("ma") and p4 in ("cross", "under") and p5.startswith("ma"):
                         ma_short = int(p3[2:])
                         ma_long = int(p5[2:])
@@ -1695,8 +1423,6 @@ def handle_text_message(event):
                             text=f"✅ 均線交叉警示已設定！\n標的：{symbol}\n條件：MA{ma_short} {label} MA{ma_long}\n\n當條件成立時龍蝦會通知你 🔔"
                         ))
                         return
-
-                    # 價格 vs 均線：ma20 above/below
                     if p3.startswith("ma") and p4 in ("above", "below"):
                         ma_period = int(p3[2:])
                         with engine.begin() as conn:
@@ -1709,8 +1435,6 @@ def handle_text_message(event):
                             text=f"✅ 均線警示已設定！\n標的：{symbol}\n條件：{cross} MA{ma_period}\n\n當條件成立時龍蝦會通知你 🔔"
                         ))
                         return
-
-                    # 價格：支援 value direction 或 direction value
                     if p3 in ("above", "below"):
                         direction = p3
                         value_str = p4
@@ -1722,7 +1446,6 @@ def handle_text_message(event):
                             text="方向請輸入 above 或 below，或使用 ma / 均線交叉格式\n\n例：\n/alert add NVDA above 190\n/alert add NVDA ma20 above\n/alert add NVDA ma5 cross ma20"
                         ))
                         return
-
                     target = float(value_str)
                     with engine.begin() as conn:
                         conn.execute(text("""
@@ -1736,14 +1459,10 @@ def handle_text_message(event):
                 except Exception as e:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"設定失敗：{e}"))
                 return
-
-            # /alert 說明# /alert 說明
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text="價格警示指令：\n/alert add <標的> <價格> <above/below>\n/alert add <標的> <above/below> <價格>\n/alert add <標的> ma20 <above/below>\n/alert add <標的> ma5 cross ma20\n/alert add <標的> ma5 under ma20\n/alert list → 查看清單\n/alert del <編號> → 刪除\n\n別名：dxy / spx / ndx / sox / vix / ust10y / gold / silver / oil\n\n範例：\n/alert add dxy below 100\n/alert add ust10y above 45\n/alert add NVDA ma20 above\n/alert add NVDA ma5 cross ma20"
             ))
             return
-
-        # NEWS PDF
         if cmd == "news pdf" or cmd == "news":
             from news_fetcher import generate_news_report
             from pdf_generator import create_and_upload_pdf
@@ -1755,8 +1474,6 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"新聞抓取失敗: {e}"))
             return
-
-        # DETAIL
         if cmd.startswith("detail"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
@@ -1769,18 +1486,10 @@ def handle_text_message(event):
                 return
             if candidates and matched_id is None:
                 sample = "\n".join([f"• {c}" for c in candidates[:20]])
-                _bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text=f"請再精準一點，候選代號如下：\n{sample}"[:4900])
-                )
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"請再精準一點，候選代號如下：\n{sample}"[:4900]))
                 return
-            _bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="查不到該代號或目前沒有已保存結果。請先 /calc 上傳 Excel。")
-            )
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="查不到該代號或目前沒有已保存結果。請先 /calc 上傳 Excel。"))
             return
-
-        # MAIL 郵件摘要
         if cmd.startswith("mail"):
             parts = text_raw.split(" ", 1)
             sub = parts[1].strip().lower() if len(parts) > 1 else ""
@@ -1802,135 +1511,78 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=f"郵件讀取失敗：{e}"))
             return
-
-        # ANALYSIS 完整三面向分析
         if cmd.startswith("analysis"):
             parts = text_raw.split(" ", 1)
             arg = parts[1].strip() if len(parts) > 1 else ""
-
             if not arg:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="📊 完整三面向分析指令：\n\n"
-                         "/analysis NVDA — 技術+基本面+消息面\n"
-                         "/analysis 2330 — 台積電完整分析\n"
-                         "/analysis AAPL 3 — 指定月數（預設6個月）\n\n"
-                         "包含：K線/RSI/成交量/EPS趨勢/營收成長/最新新聞情緒分析"
+                    text="📊 完整三面向分析指令：\n\n/analysis NVDA — 技術+基本面+消息面\n/analysis 2330 — 台積電完整分析\n/analysis AAPL 3 — 指定月數（預設6個月）\n\n包含：K線/RSI/成交量/EPS趨勢/營收成長/最新新聞情緒分析"
                 ))
                 return
-
             arg_parts = arg.split()
             symbol = arg_parts[0]
             months = 6
             if len(arg_parts) > 1 and arg_parts[1].isdigit():
                 months = min(max(int(arg_parts[1]), 1), 12)
-
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text=f"📊 正在進行 {symbol.upper()} 完整三面向分析，請稍候約20秒..."
-            ))
-
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📊 正在進行 {symbol.upper()} 完整三面向分析，請稍候約20秒..."))
             try:
                 from stock_analyzer import full_analysis
                 from pdf_generator import upload_to_drive
-                import tempfile
-
                 img_bytes, summary = full_analysis(symbol, months=months)
-
                 tmp_path = f"/tmp/analysis_{symbol}_{months}.png"
                 with open(tmp_path, "wb") as f:
                     f.write(img_bytes)
-
                 link = upload_to_drive(tmp_path, f"{symbol.upper()} Full Analysis {months}M.png")
                 os.remove(tmp_path)
-
                 msg = f"📊 {symbol.upper()} 完整分析 (近{months}個月)\n\n{summary}\n\n🔗 圖表：{link}"
                 _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=msg[:4900]))
-
             except Exception as e:
-                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(
-                    text=f"分析失敗：{str(e)[:200]}"
-                ))
+                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=f"分析失敗：{str(e)[:200]}"))
             return
-
-        # TECH 技術分析
         if cmd.startswith("tech"):
             parts = text_raw.split(" ", 1)
             arg = parts[1].strip() if len(parts) > 1 else ""
-
             if not arg:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="📊 技術分析指令：\n\n"
-                         "/tech mag7 — Magnificent Seven 比較分析\n"
-                         "/tech AAPL — 單一股票分析 (美股)\n"
-                         "/tech 2330 — 單一股票分析 (台股)\n"
-                         "/tech AAPL 3 — 指定月數（預設6個月）\n\n"
-                         "範例：\n/tech mag7\n/tech NVDA\n/tech 2330 3"
+                    text="📊 技術分析指令：\n\n/tech mag7 — Magnificent Seven 比較分析\n/tech AAPL — 單一股票分析 (美股)\n/tech 2330 — 單一股票分析 (台股)\n/tech AAPL 3 — 指定月數（預設6個月）\n\n範例：\n/tech mag7\n/tech NVDA\n/tech 2330 3"
                 ))
                 return
-
-            # 解析月數
             arg_parts = arg.split()
             symbol = arg_parts[0]
             months = 6
             if len(arg_parts) > 1 and arg_parts[1].isdigit():
                 months = min(max(int(arg_parts[1]), 1), 12)
-
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text=f"📊 正在分析 {symbol.upper()}，請稍候約15秒..."
-            ))
-
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📊 正在分析 {symbol.upper()}，請稍候約15秒..."))
             try:
                 from tech_analyzer import analyze_single, analyze_mag7
-                import base64
-                from linebot.models import ImageSendMessage
-
+                from pdf_generator import upload_to_drive
                 if symbol.lower() == "mag7":
                     img_bytes, summary = analyze_mag7(months=months)
                     title = f"Magnificent Seven 技術分析 (近{months}個月)"
                 else:
                     img_bytes, summary = analyze_single(symbol, months=months)
                     title = f"{symbol.upper()} 技術分析 (近{months}個月)"
-
-                # 上傳圖片到 imgbb 或用 LINE image message
-                # 這裡先存到 /tmp 再用 LINE upload
-                import tempfile
                 tmp_path = f"/tmp/tech_{symbol}_{months}.png"
                 with open(tmp_path, "wb") as f:
                     f.write(img_bytes)
-
-                # 上傳到 Google Drive 取得公開連結
-                from pdf_generator import upload_to_drive
                 link = upload_to_drive(tmp_path, f"{title}.png")
                 os.remove(tmp_path)
-
                 msg = f"📊 {title}\n\n{summary}\n\n🔗 圖表連結：{link}"
                 _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=msg[:4900]))
-
             except Exception as e:
-                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(
-                    text=f"技術分析失敗：{str(e)[:200]}"
-                ))
+                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=f"技術分析失敗：{str(e)[:200]}"))
             return
-
-        # RUNNOW — 手動立即觸發 ELN 追蹤
         if cmd == "runnow":
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="🔄 手動觸發 ELN 追蹤中，請稍候約30秒..."
-            ))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="🔄 手動觸發 ELN 追蹤中，請稍候約30秒..."))
             try:
                 from auto_tracking_cron import main as tracking_main
                 tracking_main()
                 write_job_log("ELN追蹤(手動)", "success", "手動觸發完成")
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                    text="✅ ELN 追蹤執行完成！\n\n打 /tracklog 查看記錄"
-                ))
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text="✅ ELN 追蹤執行完成！\n\n打 /tracklog 查看記錄"))
             except Exception as e:
                 write_job_log("ELN追蹤(手動)", "error", str(e))
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                    text=f"❌ 執行失敗：{str(e)[:300]}"
-                ))
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 執行失敗：{str(e)[:300]}"))
             return
-
-        # TRACKLOG — 查看排程執行記錄
         if cmd == "tracklog":
             with engine.begin() as conn:
                 rows = conn.execute(text("""
@@ -1940,9 +1592,7 @@ def handle_text_message(event):
                     LIMIT 20
                 """)).fetchall()
             if not rows:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="目前沒有執行記錄。"
-                ))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有執行記錄。"))
                 return
             lines = ["📋 最近排程記錄（最新20筆）：\n"]
             status_icon = {"success": "✅", "error": "❌", "started": "🔄", "skipped": "⏭️"}
@@ -1951,33 +1601,17 @@ def handle_text_message(event):
                 tw_time = r[3].astimezone(TZ_TAIPEI_PYTZ).strftime("%m/%d %H:%M")
                 msg = f"  {r[2]}" if r[2] else ""
                 lines.append(f"{icon} {tw_time} {r[0]}{msg}")
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="\n".join(lines)[:4900]
-            ))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900]))
             return
-
-        # 手動指定模型：/claude /gpt /gemini
         if cmd in ("claude", "gpt", "gemini"):
             forced_prompt = text_raw.split(" ", 1)[1].strip() if " " in text_raw else ""
             if not forced_prompt:
-                _bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text=f"請在 /{cmd} 後面加上問題\n\n例如：/{cmd} 今天美股怎麼看？")
-                )
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"請在 /{cmd} 後面加上問題\n\n例如：/{cmd} 今天美股怎麼看？"))
                 return
-            model_map = {
-                "claude": "Claude",
-                "gpt": "ChatGPT",
-                "gemini": "Gemini"
-            }
+            model_map = {"claude": "Claude", "gpt": "ChatGPT", "gemini": "Gemini"}
             reply = ai_router(forced_prompt, chat_key=ck, forced_model=cmd)
-            _bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=f"🦞 龍蝦（{model_map[cmd]}）\n\n{reply[:4700]}")
-            )
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🦞 龍蝦（{model_map[cmd]}）\n\n{reply[:4700]}"))
             return
-
-        # FORGET 清除記憶
         if cmd == "forget":
             try:
                 with engine.begin() as conn:
@@ -1986,32 +1620,23 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"清除失敗：{e}"))
             return
-
-        # AI fallback（自動選模型）
         reply = ai_router(text_raw, chat_key=ck)
         _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🦞 龍蝦\n\n{reply[:4700]}"))
-
     except Exception as e:
         print("[ERROR] handle_text_message:", e)
         print(_traceback.format_exc())
         try:
-            _bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="我收到訊息但處理時出錯了。你可以先輸入 /help。")
-            )
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="我收到訊息但處理時出錯了。你可以先輸入 /help。"))
         except Exception:
             pass
-
 # ==============================
 # File message handler
 # ==============================
 UPLOAD_DIR = Path("/tmp/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
 def extract_text_from_file(file_path: str, filename: str) -> str:
     ext = Path(filename).suffix.lower()
     text = ""
-
     try:
         if ext == ".pdf":
             import pdfplumber
@@ -2020,14 +1645,12 @@ def extract_text_from_file(file_path: str, filename: str) -> str:
                     page_text = page.extract_text()
                     if page_text:
                         text += page_text + "\n"
-
         elif ext == ".docx":
             from docx import Document
             doc = Document(file_path)
             for para in doc.paragraphs:
                 if para.text.strip():
                     text += para.text + "\n"
-
         elif ext == ".pptx":
             from pptx import Presentation
             prs = Presentation(file_path)
@@ -2036,7 +1659,6 @@ def extract_text_from_file(file_path: str, filename: str) -> str:
                 for shape in slide.shapes:
                     if hasattr(shape, "text") and shape.text.strip():
                         text += shape.text + "\n"
-
         elif ext in (".xlsx", ".xls"):
             import pandas as pd
             xl = pd.ExcelFile(file_path)
@@ -2044,24 +1666,14 @@ def extract_text_from_file(file_path: str, filename: str) -> str:
                 df = xl.parse(sheet)
                 text += f"\n--- 工作表: {sheet} ---\n"
                 text += df.to_string(index=False) + "\n"
-
     except Exception as e:
         print(f"Extract error: {e}")
         text = ""
-
     return text.strip()
-
 def analyze_file_with_claude(text: str, filename: str) -> str:
     ext = Path(filename).suffix.lower()
-    type_map = {
-        ".pdf": "PDF文件",
-        ".docx": "Word文件",
-        ".pptx": "PowerPoint簡報",
-        ".xlsx": "Excel試算表",
-        ".xls": "Excel試算表",
-    }
+    type_map = {".pdf": "PDF文件", ".docx": "Word文件", ".pptx": "PowerPoint簡報", ".xlsx": "Excel試算表", ".xls": "Excel試算表"}
     file_type = type_map.get(ext, "文件")
-
     prompt = (
         f"我收到一份{file_type}，內容如下:\n\n"
         f"{text[:6000]}\n\n"
@@ -2072,111 +1684,65 @@ def analyze_file_with_claude(text: str, filename: str) -> str:
         "4. 最後一句話說明這份文件的主要價值或建議行動\n\n"
         "格式規定: 不使用 Markdown 符號（禁止 ## ** --- 等），標題用 emoji，條列用 •"
     )
-
     resp = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1500,
         messages=[{"role": "user", "content": prompt}]
     )
     return (resp.content[0].text or "").strip()
-
 def analyze_image_with_claude(image_data: bytes, media_type: str) -> str:
     import base64
     image_b64 = base64.b64encode(image_data).decode("utf-8")
-
     resp = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1500,
         messages=[{
             "role": "user",
             "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": image_b64
-                    }
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        "請分析這張圖片，幫我:\n"
-                        "1. 說明圖片的主要內容\n"
-                        "2. 如果有文字或數據，擷取重要資訊\n"
-                        "3. 條列出重點\n"
-                        "格式規定: 不使用 Markdown 符號，標題用 emoji，條列用 •"
-                    )
-                }
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+                {"type": "text", "text": "請分析這張圖片，幫我:\n1. 說明圖片的主要內容\n2. 如果有文字或數據，擷取重要資訊\n3. 條列出重點\n格式規定: 不使用 Markdown 符號，標題用 emoji，條列用 •"}
             ]
         }]
     )
     return (resp.content[0].text or "").strip()
-
-
 def generate_invest_post(image_data: bytes, reason: str, targets: str) -> str:
-    """
-    根據新聞截圖 + 用戶理由 + 標的，生成專業版和輕鬆版投資推播文。
-    """
     import base64
     image_b64 = base64.b64encode(image_data).decode("utf-8")
-
     user_input = ""
     if reason:
         user_input += f"投資理由：{reason}\n"
     if targets:
         user_input += f"建議標的：{targets}\n"
-
     prompt = f"""你是一位台灣私人銀行的投資輔銷人員，正在為高資產客戶撰寫 LINE 群組推播文。
-
 根據上方的新聞截圖，結合以下我提供的投資觀點，生成兩個版本的推播文：
-
 {user_input}
-
 【規格要求】
 - 每個版本 100-250 字
 - 繁體中文
 - 不使用 Markdown（不用 ** # 等符號）
 - 用 emoji 當標題和分段符號
 - 結尾附上建議標的
-
 【版本一：專業版】
 適合傳給高資產客戶，語氣專業簡練，強調市場邏輯和風險意識。
-
 【版本二：輕鬆版】
 適合一般投資群組，語氣親切，用比喻讓人容易理解，帶點觀點但不失專業。
-
 格式：
 ===專業版===
 （內容）
-
 ===輕鬆版===
 （內容）"""
-
     resp = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1500,
         messages=[{
             "role": "user",
             "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": image_b64
-                    }
-                },
-                {
-                    "type": "text",
-                    "text": prompt
-                }
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
+                {"type": "text", "text": prompt}
             ]
         }]
     )
     return (resp.content[0].text or "").strip()
-
-
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file_message(event):
     _bot_api = line_bot_api
@@ -2185,96 +1751,56 @@ def handle_file_message(event):
         filename = getattr(event.message, "file_name", "") or ""
         ext = Path(filename).suffix.lower()
         print("[FILE]", ck, filename)
-
         message_id = event.message.id
         content = _bot_api.get_message_content(message_id)
         tmp_path = UPLOAD_DIR / f"upload_{int(datetime.now(TZ_TAIPEI).timestamp())}{ext}"
         with open(tmp_path, "wb") as f:
             for chunk in content.iter_content():
                 f.write(chunk)
-
-        # 音檔轉文字（mp3/m4a/wav/ogg/mp4）
         if ext in (".mp3", ".m4a", ".wav", ".ogg", ".mp4", ".webm"):
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text=f"🎙️ 收到音檔 {filename}，正在轉逐字稿..."
-            ))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🎙️ 收到音檔 {filename}，正在轉逐字稿..."))
             with open(tmp_path, "rb") as f:
                 audio_data = f.read()
             text_result = transcribe_audio(audio_data, filename=filename)
             if not text_result:
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                    text="❌ 無法辨識語音內容，請確認音檔有聲音。"
-                ))
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text="❌ 無法辨識語音內容，請確認音檔有聲音。"))
                 return
-
             summary = build_transcript_summary(text_result, chat_key=ck)
             db_set_transcript_cache(ck, text_result, summary)
             db_save_meeting_transcript(ck, filename, text_result, summary)
-
             preview = text_result[:2000]
             push_long_message(_bot_api, ck.split(":", 1)[1], f"📝 逐字稿（前段）：\n\n{preview}")
             push_long_message(_bot_api, ck.split(":", 1)[1], f"📌 會議摘要：\n\n{summary}")
-            _bot_api.push_message(
-                ck.split(":", 1)[1],
-                TextSendMessage(text="要不要把這份會議重點做成 PDF 或 PPT？\n\n可直接回：做成 PDF / 做成 PPT / 不用")
-            )
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text="要不要把這份會議重點做成 PDF 或 PPT？\n\n可直接回：做成 PDF / 做成 PPT / 不用"))
             return
-
-        # ELN 模式：有先打 /calc 或 /eln upload 且是 Excel
         if ext in (".xlsx", ".xls") and db_is_await(ck):
             db_set_await(ck, False)
             summary, top5_lines, detail_map, agent_name_map = run_autotracking(str(tmp_path))
             db_save_result(ck, summary, top5_lines, detail_map, agent_name_map)
-
             try:
                 from eln_storage import upload_eln_excel
                 storage_info = upload_eln_excel(str(tmp_path))
                 print("[ELN Storage] uploaded:", storage_info)
             except Exception as e:
                 print("[ELN Storage] upload failed:", e)
-
-            _bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900])
-            )
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900]))
             return
-
-        # 通用分析模式
         if ext in (".xlsx", ".xls", ".pdf", ".docx", ".pptx"):
-            _bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=f"收到！正在分析 {filename}，請稍候...")
-            )
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"收到！正在分析 {filename}，請稍候..."))
             text = extract_text_from_file(str(tmp_path), filename)
             if not text:
-                _bot_api.push_message(
-                    ck.split(":", 1)[1],
-                    TextSendMessage(text="檔案解析失敗，可能是掃描版 PDF 或格式不支援。")
-                )
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text="檔案解析失敗，可能是掃描版 PDF 或格式不支援。"))
                 return
             analysis = analyze_file_with_claude(text, filename)
-            _bot_api.push_message(
-                ck.split(":", 1)[1],
-                TextSendMessage(text=analysis[:4900])
-            )
-            # 自動產生PDF
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=analysis[:4900]))
             try:
                 from pdf_generator import create_and_upload_pdf
                 link = create_and_upload_pdf("analysis", analysis, filename)
-                _bot_api.push_message(
-                    ck.split(":", 1)[1],
-                    TextSendMessage(text=f"📄 分析報告 PDF：\n{link}")
-                )
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📄 分析報告 PDF：\n{link}"))
             except Exception as e:
                 print(f"PDF upload error: {e}")
             return
-
-        # 不支援的格式
-        _bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=f"目前支援的檔案格式: PDF、Word、PowerPoint、Excel\n收到的格式 {ext} 暫不支援。")
-        )
-
+        _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"目前支援的檔案格式: PDF、Word、PowerPoint、Excel\n收到的格式 {ext} 暫不支援。"))
     except Exception as e:
         print("[ERROR] handle_file_message:", e)
         print(_traceback.format_exc())
@@ -2283,31 +1809,20 @@ def handle_file_message(event):
         except Exception:
             pass
         try:
-            _bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="檔案處理時出錯了，請稍後再試。")
-            )
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="檔案處理時出錯了，請稍後再試。"))
         except Exception:
             pass
-
-# ==============================
-# Image message handler
-# ==============================
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
     _bot_api = line_bot_api
     try:
         ck = chat_key_of(event)
         print("[IMAGE]", ck)
-
         message_id = event.message.id
         content = _bot_api.get_message_content(message_id)
-
         image_data = b""
         for chunk in content.iter_content():
             image_data += chunk
-
-        # ── /invest 模式：等待圖片
         invest_mode, _ = db_invest_get(ck)
         if invest_mode == "await_image":
             db_invest_set(ck, "await_reason", image=image_data)
@@ -2315,53 +1830,31 @@ def handle_image_message(event):
                 text="✅ 收到截圖！\n\n請輸入你的投資理由和標的：\n\n理由：（你認為能投資的原因）\n標的：（股票/ETF代號）"
             ))
             return
-
-        # ── 一般圖片分析
-        _bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="收到圖片！正在分析，請稍候...")
-        )
+        _bot_api.reply_message(event.reply_token, TextSendMessage(text="收到圖片！正在分析，請稍候..."))
         analysis = analyze_image_with_claude(image_data, "image/jpeg")
-        _bot_api.push_message(
-            ck.split(":", 1)[1],
-            TextSendMessage(text=analysis[:4900])
-        )
-
+        _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=analysis[:4900]))
     except Exception as e:
         print("[ERROR] handle_image_message:", e)
         print(_traceback.format_exc())
         try:
-            _bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="圖片處理時出錯了，請稍後再試。")
-            )
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片處理時出錯了，請稍後再試。"))
         except Exception:
             pass
-
 def transcribe_audio(audio_data: bytes, filename: str = "audio.m4a") -> str:
-    """
-    將音檔壓縮後送 Whisper API 轉文字。
-    超過 24MB 先用 pydub 壓縮成低位元率 mp3。
-    """
     import tempfile
     if not openai_client:
         raise RuntimeError("缺少 OPENAI_API_KEY，無法使用語音轉文字")
-
-    MAX_BYTES = 24 * 1024 * 1024  # 24MB 安全緩衝
-
+    MAX_BYTES = 24 * 1024 * 1024
     with tempfile.TemporaryDirectory() as tmp:
         ext = os.path.splitext(filename)[1].lower() or ".m4a"
         src_path = os.path.join(tmp, f"audio_input{ext}")
         with open(src_path, "wb") as f:
             f.write(audio_data)
-
-        # 判斷是否需要壓縮
         if len(audio_data) > MAX_BYTES:
             try:
                 from pydub import AudioSegment
                 out_path = os.path.join(tmp, "audio_compressed.mp3")
                 audio = AudioSegment.from_file(src_path)
-                # 壓縮：單聲道、16kHz、32kbps — 足夠語音辨識
                 audio = audio.set_channels(1).set_frame_rate(16000)
                 audio.export(out_path, format="mp3", bitrate="32k")
                 send_path = out_path
@@ -2370,7 +1863,6 @@ def transcribe_audio(audio_data: bytes, filename: str = "audio.m4a") -> str:
                 send_path = src_path
         else:
             send_path = src_path
-
         with open(send_path, "rb") as f:
             resp = openai_client.audio.transcriptions.create(
                 model="whisper-1",
@@ -2378,59 +1870,36 @@ def transcribe_audio(audio_data: bytes, filename: str = "audio.m4a") -> str:
                 language="zh"
             )
         return resp.text.strip()
-
-
 @handler.add(MessageEvent, message=AudioMessage)
 def handle_audio_message(event, _override_bot_api=None):
     _bot_api = _override_bot_api or line_bot_api
     ck = chat_key_of(event)
     print(f"[AUDIO] {ck}")
-
     try:
-        _bot_api.reply_message(event.reply_token, TextSendMessage(
-            text="🎙️ 收到語音，轉文字中，請稍候..."
-        ))
-
-        # 下載音檔
+        _bot_api.reply_message(event.reply_token, TextSendMessage(text="🎙️ 收到語音，轉文字中，請稍候..."))
         message_id = event.message.id
         content = _bot_api.get_message_content(message_id)
         audio_data = b""
         for chunk in content.iter_content():
             audio_data += chunk
-
-        # 轉文字
         text_result = transcribe_audio(audio_data)
-
         if not text_result:
-            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                text="❌ 無法辨識語音內容，請確認音檔有聲音。"
-            ))
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text="❌ 無法辨識語音內容，請確認音檔有聲音。"))
             return
-
-        # 推播轉文字結果
         push_long_message(_bot_api, ck.split(":", 1)[1], f"📝 語音轉文字：\n\n{text_result}")
-
-        # 把轉出來的文字當對話繼續處理
         reply = ai_router(text_result, chat_key=ck)
         push_long_message(_bot_api, ck.split(":", 1)[1], reply)
-
     except Exception as e:
         print(f"[ERROR] handle_audio_message: {e}")
         try:
-            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                text=f"❌ 語音處理失敗：{str(e)[:200]}"
-            ))
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 語音處理失敗：{str(e)[:200]}"))
         except Exception:
             pass
-
 # ==============================
-# 內建排程（取代獨立 Cron Jobs）
+# 內建排程
 # ==============================
-
 TZ_TAIPEI_PYTZ = pytz.timezone("Asia/Taipei")
-
 def job_daily_report():
-    """每天早上 06:00 台北時間 — 財經日報"""
     now = datetime.now(TZ_TAIPEI_PYTZ)
     if now.weekday() >= 5:
         print("[Scheduler] 週末跳過財經日報")
@@ -2446,25 +1915,20 @@ def job_daily_report():
     except Exception as e:
         print(f"[Scheduler] 財經日報失敗: {e}")
         write_job_log("財經日報", "error", str(e))
-
 def job_alert_monitor():
-    """每 15 分鐘 — 價格警示監控"""
     print(f"[Scheduler] 執行價格警示監控 {datetime.now(TZ_TAIPEI_PYTZ).strftime('%H:%M')}")
     try:
         from alert_monitor import main as alert_main
         alert_main()
     except Exception as e:
         print(f"[Scheduler] 價格警示失敗: {e}")
-
 def job_mail_monitor():
-    """每 15 分鐘 — 郵件監控"""
     print(f"[Scheduler] 執行郵件監控 {datetime.now(TZ_TAIPEI_PYTZ).strftime('%H:%M')}")
     try:
         from mail_monitor import main as mail_main
         mail_main()
     except Exception as e:
         print(f"[Scheduler] 郵件監控失敗: {e}")
-
 def write_job_log(job_name: str, status: str, message: str = ""):
     try:
         with engine.begin() as conn:
@@ -2474,9 +1938,7 @@ def write_job_log(job_name: str, status: str, message: str = ""):
             """), {"j": job_name, "s": status, "m": message[:1000]})
     except Exception as e:
         print(f"[LOG] 寫入失敗: {e}")
-
 def job_auto_tracking():
-    """每天早上 06:30 台北時間 — ELN 自動追蹤"""
     now = datetime.now(TZ_TAIPEI_PYTZ)
     if now.weekday() >= 5:
         print("[Scheduler] 週末跳過 ELN 追蹤")
@@ -2492,49 +1954,29 @@ def job_auto_tracking():
     except Exception as e:
         print(f"[Scheduler] ELN 追蹤失敗: {e}")
         write_job_log("ELN追蹤", "error", str(e))
-
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
-
-    # 財經日報：每天 06:00 台北時間（週一到週五）
     scheduler.add_job(
         job_daily_report,
         CronTrigger(day_of_week="mon-fri", hour=6, minute=0, timezone=TZ_TAIPEI_PYTZ),
-        id="daily_report",
-        name="財經日報"
+        id="daily_report", name="財經日報"
     )
-
-    # ELN 自動追蹤：每天 06:00 台北時間（週一到週五）
     scheduler.add_job(
         job_auto_tracking,
         CronTrigger(day_of_week="mon-fri", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ),
-        id="auto_tracking",
-        name="ELN自動追蹤"
+        id="auto_tracking", name="ELN自動追蹤"
     )
-
-    # 價格警示：每 15 分鐘
     scheduler.add_job(
         job_alert_monitor,
         IntervalTrigger(minutes=15),
-        id="alert_monitor",
-        name="價格警示"
+        id="alert_monitor", name="價格警示"
     )
-
-    # 郵件監控：每 15 分鐘（比警示延遲 5 分鐘，避免同時執行）
     scheduler.add_job(
         job_mail_monitor,
         IntervalTrigger(minutes=15, start_date=datetime.now(TZ_TAIPEI_PYTZ).replace(second=0, microsecond=0) + timedelta(minutes=5)),
-        id="mail_monitor",
-        name="郵件監控"
+        id="mail_monitor", name="郵件監控"
     )
-
     scheduler.start()
     print("[Scheduler] 排程啟動完成 ✅")
-    print("[Scheduler] 財經日報: 每天 06:00（週一至週五）")
-    print("[Scheduler] ELN追蹤: 每天 06:30（週一至週五）")
-    print("[Scheduler] 價格警示: 每 15 分鐘")
-    print("[Scheduler] 郵件監控: 每 15 分鐘")
     return scheduler
-
-# 啟動排程
 _scheduler = start_scheduler()
