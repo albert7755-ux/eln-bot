@@ -286,8 +286,8 @@ def generate_news_image(report_text: str, market_data: dict) -> bytes:
                     fontsize=8.5, color=GREY, va="center",
                     transform=ax_tbl.transAxes, **kw)
 
-    ax_tbl.axhline(y=1.0 - row_h, color=BORDER, linewidth=0.6,
-                   transform=ax_tbl.transAxes)
+    ax_tbl.plot([0.01, 0.99], [1.0 - row_h, 1.0 - row_h],
+                color=BORDER, linewidth=0.6, transform=ax_tbl.transAxes)
 
     for i, (name, price, chg, color) in enumerate(rows):
         y = 1.0 - row_h * (i + 1.5)
@@ -298,8 +298,9 @@ def generate_news_image(report_text: str, market_data: dict) -> bytes:
         ax_tbl.text(col_x[2], y, chg,   fontsize=9.5, color=color,
                     va="center", transform=ax_tbl.transAxes)
         if i < len(rows) - 1:
-            ax_tbl.axhline(y=y - row_h * 0.45, color=BORDER,
-                           linewidth=0.4, transform=ax_tbl.transAxes)
+            sep_y = y - row_h * 0.45
+            ax_tbl.plot([0.01, 0.99], [sep_y, sep_y],
+                        color=BORDER, linewidth=0.4, transform=ax_tbl.transAxes)
 
     # ── 新聞摘要三欄卡片 ──
     sections = [
