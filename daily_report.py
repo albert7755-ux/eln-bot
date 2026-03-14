@@ -1,4 +1,6 @@
 import os
+import io
+import base64
 import requests
 import yfinance as yf
 from datetime import datetime
@@ -9,6 +11,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+IMGUR_CLIENT_ID = os.environ.get("IMGUR_CLIENT_ID")
 
 
 def _safe_close_pair(symbol: str):
@@ -62,7 +65,7 @@ def get_market_data():
 
 
 def updown_mark(value: float):
-    return "🔺" if value >= 0 else "▼"
+    return "🔺" if value >= 0 else "🔻"
 
 
 def _line_for_index(label: str, d: dict, suffix: str = "點") -> str:
@@ -131,8 +134,8 @@ def generate_commentary_with_claude(snapshot_text: str) -> str:
         "請上網搜尋最新、最相關的國際財經消息，再根據這些數據與新聞事件，撰寫以下內容。\n"
         "重點是要有新聞感與事件感，不要只寫空泛結論。\n\n"
         "請完成：\n"
-        "1. 開頭市場重點：用一段話描述昨日整體行情走勢，語氣像晨會口頭摘要，必須點出最重要的交易主線，不要條列、不要分點，用流暢連貫的中文寫成一段。\n"
-        "2. 撰寫【總經總覽】：1-2句，必須提到具體事件或消息，例如聯準會官員談話、重要經濟數據、政策、關稅、地緣政治、油價變化等。\n"
+        "1. 開頭市場重點：用一段話（不超過2句）描述昨日整體行情走勢，語氣像晨會口頭摘要，必須點出最重要的交易主線，不要條列、不要分點，用流暢連貫的中文寫成一段。\n"
+        "2. 撰寫【總經總覽】：2-3句，必須提到具體事件或消息，例如聯準會官員談話、重要經濟數據、政策、關稅、地緣政治、油價變化等。\n"
         "3. 撰寫【美國市場】：1-2句，必須點出美股漲跌主因，例如科技股、AI、銀行股、能源股、財報或特定新聞。\n"
         "4. 撰寫【債券市場】：1-2句，必須說明美債殖利率變動背後的原因，並區分中短天期與長天期債券表現不一定一致；若只有10年期殖利率資訊，不可直接泛化成整體公債價格全面上揚或下跌。最後補一句固定收益商品的觀察重點。\n\n"
         "要求：\n"
@@ -182,14 +185,206 @@ def extract_section(text: str, title: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def build_final_report(data: dict) -> str:
+def generate_news_image(report_text: str, market_data: dict) -> bytes:
+    """
+    根據財經日報內容，生成一張深色風格的市場重點摘要圖片。
+    回傳 PNG bytes。
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from matplotlib import font_manager
+    import textwrap
+
+    # ── 嘗試載入中文字體 ──
+    font_candidates = [
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/opt/render/project/src/fonts/NotoSansTC-Regular.ttf",
+        "/home/user/fonts/NotoSansTC-Regular.ttf",
+    ]
+    cjk_font = None
+    for fp in font_candidates:
+        if os.path.exists(fp):
+            cjk_font = font_manager.FontProperties(fname=fp)
+            break
+
+    tw_tz = pytz.timezone("Asia/Taipei")
+    today = datetime.now(tw_tz)
+    weekday_map = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+    date_str = today.strftime("%Y.%m.%d")
+    weekday_str = weekday_map[today.weekday()]
+
+    # ── 擷取各段摘要 ──
+    macro   = extract_section(report_text, "總經總覽")[:80]
+    us_mkt  = extract_section(report_text, "美國市場")[:80]
+    bonds   = extract_section(report_text, "債券市場")[:80]
+
+    # ── 市場數據格式化 ──
+    def fmt_row(name, d, suffix=""):
+        if not d:
+            return name, "N/A", "—", "#888888"
+        chg = d["change"]
+        color = "#FF5C5C" if chg >= 0 else "#4AE8A0"
+        arrow = "▲" if chg >= 0 else "▼"
+        return (
+            name,
+            f"{d['price']:,.2f}{suffix}",
+            f"{arrow} {abs(chg):,.2f} ({d['pct']:+.2f}%)",
+            color,
+        )
+
+    rows = [
+        fmt_row("Dow Jones", market_data.get("Dow Jones")),
+        fmt_row("S&P 500",   market_data.get("S&P 500")),
+        fmt_row("NASDAQ",    market_data.get("NASDAQ")),
+        fmt_row("SOX",       market_data.get("SOX")),
+        fmt_row("US10Y",     market_data.get("US10Y"), "%"),
+        fmt_row("DXY",       market_data.get("DXY")),
+        fmt_row("Gold",      market_data.get("Gold")),
+        fmt_row("WTI",       market_data.get("WTI")),
+    ]
+
+    # ── 色彩配置 ──
+    BG    = "#0D1117"
+    CARD  = "#161B22"
+    BORDER = "#30363D"
+    GOLD  = "#D4A843"
+    WHITE = "#E6EDF3"
+    GREY  = "#8B949E"
+
+    kw = {"fontproperties": cjk_font} if cjk_font else {}
+
+    fig = plt.figure(figsize=(10, 13), facecolor=BG)
+    fig.patch.set_facecolor(BG)
+
+    # ── 標題區 ──
+    ax_title = fig.add_axes([0.0, 0.91, 1.0, 0.09])
+    ax_title.set_facecolor(BG)
+    ax_title.axis("off")
+    ax_title.text(0.04, 0.75, "財經日報", fontsize=22, color=GOLD,
+                  fontweight="bold", va="center", **kw)
+    ax_title.text(0.04, 0.25,
+                  f"Market Morning Brief  |  {date_str}  {weekday_str}",
+                  fontsize=10, color=GREY, va="center")
+    ax_title.axhline(y=0.02, xmin=0.03, xmax=0.97, color=BORDER, linewidth=0.8)
+
+    # ── 市場數據表格 ──
+    ax_tbl = fig.add_axes([0.03, 0.56, 0.94, 0.34])
+    ax_tbl.set_facecolor(BG)
+    ax_tbl.axis("off")
+    ax_tbl.text(0, 1.02, "市場數據", fontsize=12, color=GOLD,
+                fontweight="bold", transform=ax_tbl.transAxes, **kw)
+
+    col_x = [0.01, 0.30, 0.62]
+    row_h = 1.0 / (len(rows) + 1)
+
+    for xi, header in zip(col_x, ["指數 / 資產", "最新價格", "漲跌"]):
+        ax_tbl.text(xi, 1.0 - row_h * 0.5, header,
+                    fontsize=8.5, color=GREY, va="center",
+                    transform=ax_tbl.transAxes, **kw)
+
+    ax_tbl.axhline(y=1.0 - row_h, color=BORDER, linewidth=0.6,
+                   transform=ax_tbl.transAxes)
+
+    for i, (name, price, chg, color) in enumerate(rows):
+        y = 1.0 - row_h * (i + 1.5)
+        ax_tbl.text(col_x[0], y, name,  fontsize=9.5, color=WHITE,
+                    va="center", transform=ax_tbl.transAxes)
+        ax_tbl.text(col_x[1], y, price, fontsize=9.5, color=WHITE,
+                    va="center", transform=ax_tbl.transAxes)
+        ax_tbl.text(col_x[2], y, chg,   fontsize=9.5, color=color,
+                    va="center", transform=ax_tbl.transAxes)
+        if i < len(rows) - 1:
+            ax_tbl.axhline(y=y - row_h * 0.45, color=BORDER,
+                           linewidth=0.4, transform=ax_tbl.transAxes)
+
+    # ── 新聞摘要三欄卡片 ──
+    sections = [
+        ("📊 總經總覽", macro),
+        ("🇺🇸 美國市場", us_mkt),
+        ("📈 債券市場", bonds),
+    ]
+
+    card_top = 0.52
+    card_h   = 0.18
+    card_gap = 0.03
+    card_w   = (1.0 - 0.06 - card_gap * 2) / 3
+
+    for i, (sec_title, sec_text) in enumerate(sections):
+        left = 0.03 + i * (card_w + card_gap)
+
+        rect = mpatches.FancyBboxPatch(
+            (left, card_top - card_h), card_w, card_h,
+            boxstyle="round,pad=0.01",
+            linewidth=0.8, edgecolor=BORDER,
+            facecolor=CARD, transform=fig.transFigure,
+            figure=fig, clip_on=False
+        )
+        fig.add_artist(rect)
+
+        ax_c = fig.add_axes([left + 0.01, card_top - card_h + 0.01,
+                             card_w - 0.02, card_h - 0.02])
+        ax_c.set_facecolor(CARD)
+        ax_c.axis("off")
+        ax_c.text(0, 0.92, sec_title, fontsize=9, color=GOLD,
+                  fontweight="bold", va="top",
+                  transform=ax_c.transAxes, **kw)
+        wrapped = textwrap.fill(sec_text, width=28)
+        ax_c.text(0, 0.72, wrapped, fontsize=7.8, color=WHITE,
+                  va="top", linespacing=1.5,
+                  transform=ax_c.transAxes, **kw)
+
+    # ── 底部版權 ──
+    ax_foot = fig.add_axes([0.0, 0.0, 1.0, 0.03])
+    ax_foot.set_facecolor(BG)
+    ax_foot.axis("off")
+    ax_foot.text(0.5, 0.5,
+                 "本圖表僅供參考，不構成投資建議  |  Albert Claw Bot",
+                 fontsize=7.5, color=GREY, ha="center", va="center")
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                facecolor=BG, edgecolor="none")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
+def upload_to_imgur(image_bytes: bytes) -> str:
+    """上傳圖片到 Imgur，回傳圖片直連 URL。"""
+    if not IMGUR_CLIENT_ID:
+        print("Missing IMGUR_CLIENT_ID, skipping image upload")
+        return ""
+    try:
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        resp = requests.post(
+            "https://api.imgur.com/3/image",
+            headers={"Authorization": f"Client-ID {IMGUR_CLIENT_ID}"},
+            data={"image": b64, "type": "base64"},
+            timeout=30,
+        )
+        data = resp.json()
+        if resp.status_code == 200 and data.get("success"):
+            return data["data"]["link"]
+        else:
+            print(f"Imgur upload failed: {data}")
+            return ""
+    except Exception as e:
+        print(f"Imgur upload error: {e}")
+        return ""
+
+
+def build_final_report(data: dict) -> tuple:
     snapshot = build_market_snapshot(data)
     commentary = generate_commentary_with_claude(snapshot)
 
-    intro = extract_section(commentary, "前言")
-    macro = extract_section(commentary, "總經總覽")
+    intro     = extract_section(commentary, "前言")
+    macro     = extract_section(commentary, "總經總覽")
     us_market = extract_section(commentary, "美國市場")
-    bonds = extract_section(commentary, "債券市場")
+    bonds     = extract_section(commentary, "債券市場")
 
     final_text = snapshot.replace(
         "__INTRO__",
@@ -205,7 +400,26 @@ def build_final_report(data: dict) -> str:
     final_text += "\n\n五、債券市場\n"
     final_text += bonds if bonds else "美債殖利率變化仍是固定收益商品的重要觀察指標，建議留意利率路徑。"
 
-    return final_text.strip()
+    return final_text.strip(), data
+
+
+def generate_report() -> tuple:
+    """
+    給 /daily 指令呼叫。
+    回傳 (report_text, image_url)
+    image_url 若生成失敗則為空字串。
+    """
+    market_data = get_market_data()
+    report_text, mdata = build_final_report(market_data)
+
+    image_url = ""
+    try:
+        img_bytes = generate_news_image(report_text, mdata)
+        image_url = upload_to_imgur(img_bytes)
+    except Exception as e:
+        print(f"Image generation error: {e}")
+
+    return report_text, image_url
 
 
 def save_report_to_db(report_text):
@@ -254,34 +468,19 @@ def send_line_message(text):
         print(f"LINE push failed: {response.status_code} {response.text}")
 
 
-def generate_report() -> str:
-    market_data = get_market_data()
-    return build_final_report(market_data)
-
-
 def main():
-    report = generate_report()
+    """排程自動執行用。"""
+    report, image_url = generate_report()
     save_report_to_db(report)
+
     print("Sending daily report to LINE...")
     send_line_message(report)
+
+    if image_url:
+        send_line_message(f"📊 今日市場摘要圖\n{image_url}")
+        print(f"Market image sent: {image_url}")
+
     print("Daily report done!")
-
-    try:
-        print("Fetching news and generating PDF...")
-        from news_fetcher import generate_news_report
-        from pdf_generator import create_and_upload_pdf
-        from linebot import LineBotApi
-        from linebot.models import TextSendMessage
-
-        news_report = generate_news_report()
-        link = create_and_upload_pdf("news", news_report)
-
-        _api = LineBotApi(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", ""))
-        _user_id = os.environ.get("LINE_USER_ID", "")
-        _api.push_message(_user_id, TextSendMessage(text=f"📰 今日財經新聞摘要 PDF\n\n{link}"))
-        print("News PDF sent!")
-    except Exception as e:
-        print(f"News PDF error: {e}")
 
 
 def send_email_summary():
