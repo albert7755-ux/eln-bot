@@ -1,9 +1,11 @@
 import os
+import io
 import requests
 import yfinance as yf
 from datetime import datetime
 import anthropic
 import pytz
+import matplotlib.pyplot as plt
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
@@ -25,6 +27,7 @@ def _safe_close_pair(symbol: str):
     prev_close = float(close.iloc[-2])
     last_close = float(close.iloc[-1])
 
+    # Yahoo Finance 的 ^TNX 為殖利率 * 10
     if symbol == "^TNX":
         prev_close = prev_close / 10.0
         last_close = last_close / 10.0
@@ -62,7 +65,6 @@ def get_market_data():
 
 
 def updown_mark(value: float):
-    # LINE 純文字不能局部變色，改用 emoji 模擬紅漲綠跌
     return "🔺" if value >= 0 else "▼"
 
 
@@ -135,7 +137,7 @@ def generate_commentary_with_claude(snapshot_text: str) -> str:
         "1. 開頭前言：2句，直接放在標題下方，不要加任何小標題。前言要點出當晚最重要的市場交易主線。\n"
         "2. 撰寫【總經總覽】：2-3句，必須提到具體事件或消息，例如聯準會官員談話、重要經濟數據、政策、關稅、地緣政治、油價變化等。\n"
         "3. 撰寫【美國市場】：1-2句，必須點出美股漲跌主因，例如科技股、AI、銀行股、能源股、財報或特定新聞。\n"
-        "4. 撰寫【債券市場】：1-2句，必須說明美債殖利率變動背後的原因，並補一句固定收益商品的觀察重點。\n\n"
+        "4. 撰寫【債券市場】：1-2句，必須說明美債殖利率變動背後的原因，並區分中短天期與長天期債券表現不一定一致；若只有10年期殖利率資訊，不可直接泛化成整體公債價格全面上揚或下跌。最後補一句固定收益商品的觀察重點。\n\n"
         "要求：\n"
         "- 一定要具體，不要寫成空泛模板。\n"
         "- 優先使用最近24小時內最重要的財經新聞脈絡。\n"
@@ -254,6 +256,50 @@ def send_line_message(text):
         print(f"LINE push failed: {response.status_code} {response.text}")
 
 
+def create_market_card(data: dict, output_path: str = "/tmp/daily_market_card.png") -> str:
+    tw_tz = pytz.timezone("Asia/Taipei")
+    today = datetime.now(tw_tz).strftime("%Y/%m/%d")
+
+    rows = [
+        ("道瓊", data.get("Dow Jones")),
+        ("標普500", data.get("S&P 500")),
+        ("那斯達克", data.get("NASDAQ")),
+        ("費半", data.get("SOX")),
+        ("美國10年期公債", data.get("US10Y")),
+        ("美元指數", data.get("DXY")),
+        ("WTI 原油", data.get("WTI")),
+        ("黃金", data.get("Gold")),
+    ]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.axis("off")
+
+    title = f"財經日報市場概覽\\n{today}"
+    ax.text(0.5, 0.96, title, ha="center", va="top", fontsize=18, fontweight="bold")
+
+    y = 0.86
+    for label, d in rows:
+        if d:
+            arrow = "▲" if d["change"] >= 0 else "▼"
+            text_line = f"{label:<10} {d['price']:>10,.2f}   {arrow}{abs(d['change']):.2f}   ({d['pct']:+.2f}%)"
+        else:
+            text_line = f"{label:<10} 數據抓取失敗"
+        ax.text(0.08, y, text_line, fontsize=12, va="center")
+        y -= 0.085
+
+    ax.text(0.08, 0.08, "備註：LINE 純文字無法顯示紅綠字體，圖卡僅作晨報輔助。", fontsize=9)
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def send_line_image(image_path: str):
+    # 需自行提供可外部讀取網址時才可真正用 LINE image message。
+    # 若你的環境目前沒有 public hosting，先保留圖卡檔案生成功能。
+    print(f"Image generated at: {image_path}")
+
+
 def generate_report() -> str:
     print("Fetching market data...")
     market_data = get_market_data()
@@ -263,11 +309,19 @@ def generate_report() -> str:
 
 
 def main():
-    report = generate_report()
+    market_data = get_market_data()
+    report = build_final_report(market_data)
+
     save_report_to_db(report)
     print("Sending daily report to LINE...")
     send_line_message(report)
     print("Daily report done!")
+
+    try:
+        card_path = create_market_card(market_data)
+        print(f"Daily market card created: {card_path}")
+    except Exception as e:
+        print(f"Market card error: {e}")
 
     try:
         print("Fetching news and generating PDF...")
