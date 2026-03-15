@@ -783,6 +783,7 @@ def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = 
 {transcript[:120000]}
 """
     return ai_claude_long(prompt, chat_key)
+@handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     _bot_api = line_bot_api
     try:
