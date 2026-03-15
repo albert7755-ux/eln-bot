@@ -240,16 +240,29 @@ def db_get_report(chat_key: str) -> str | None:
             {"k": chat_key}
         ).fetchone()
     return row[0] if row else None
-def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str]]:
+def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str, str]]:
+    """回傳 (bond_id, agent_name, detail) 三個欄位"""
     with engine.begin() as conn:
         rows = conn.execute(text("""
-        SELECT bond_id, COALESCE(agent_name, '-')
+        SELECT bond_id, COALESCE(agent_name, '-'), COALESCE(detail, '')
         FROM eln_detail
         WHERE chat_key=:k
         ORDER BY agent_name ASC, bond_id ASC
         LIMIT :lim
         """), {"k": chat_key, "lim": int(limit)}).fetchall()
-    return [(r[0], r[1]) for r in rows] if rows else []
+    return [(r[0], r[1], r[2]) for r in rows] if rows else []
+
+def bond_status_tag(detail: str) -> str:
+    """根據 detail 文字判斷狀態，回傳標記"""
+    if "到期獲利" in detail or "到期" in detail:
+        return " 🏁到期"
+    # 狀態行有 KO（不是個股行的 KO價/KO@）
+    lines = detail.split("\n")
+    for line in lines:
+        line = line.strip()
+        if line.startswith("KO @") or line.startswith(" KO @"):
+            return " ✅提前KO"
+    return ""
 def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
     if not text:
         return
@@ -1095,24 +1108,48 @@ def handle_text_message(event):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
                 return
         if cmd == "list":
-            bonds = db_list_bonds(ck, limit=100)
+            from collections import defaultdict
+            list_parts = text_raw.split(" ", 1)
+            name_filter = list_parts[1].strip() if len(list_parts) > 1 else ""
+            bonds = db_list_bonds(ck, limit=200)
             if not bonds:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無已保存結果。請先 /calc 上傳 Excel。"))
                 return
-            from collections import defaultdict
-            grouped = defaultdict(list)
-            for bond_id, agent_raw in bonds:
-                agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()]
-                if not agents:
-                    agents = ["未指定"]
-                for agent in agents:
-                    grouped[agent].append(bond_id)
-            lines = [f"📋 全部商品（共 {len(bonds)} 筆，按理專排列）：\n"]
-            for agent, bond_ids in sorted(grouped.items()):
-                unique_bonds = list(dict.fromkeys(bond_ids))
-                lines.append(f"👤 {agent}（{len(unique_bonds)} 筆）")
-                for b in unique_bonds:
-                    lines.append(f"   • {b}")
+            # 建立 bond_id -> (detail, status_tag) 對照
+            detail_map = {}
+            for bond_id, agent_raw, detail in bonds:
+                detail_map[bond_id] = bond_status_tag(detail)
+            if name_filter:
+                # 按姓名查詢模式
+                matched = []
+                seen = set()
+                for bond_id, agent_raw, detail in bonds:
+                    agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()]
+                    if any(name_filter in a for a in agents) and bond_id not in seen:
+                        matched.append((bond_id, detail_map.get(bond_id, "")))
+                        seen.add(bond_id)
+                if not matched:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到「{name_filter}」的持倉。"))
+                    return
+                lines = [f"👤 {name_filter} 的持倉（共 {len(matched)} 筆）：\n"]
+                for b, tag in matched:
+                    lines.append(f"   • {b}{tag}")
+                full_text = "\n".join(lines)
+            else:
+                # 全部模式，按理專分組
+                grouped = defaultdict(list)
+                for bond_id, agent_raw, detail in bonds:
+                    agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()]
+                    if not agents:
+                        agents = ["未指定"]
+                    for agent in agents:
+                        if bond_id not in [b for b, _ in grouped[agent]]:
+                            grouped[agent].append((bond_id, detail_map.get(bond_id, "")))
+                lines = [f"📋 全部商品（共 {len(set(b for b,_,_ in bonds))} 筆，按理專排列）：\n"]
+                for agent, bond_list in sorted(grouped.items()):
+                    lines.append(f"👤 {agent}（{len(bond_list)} 筆）")
+                    for b, tag in bond_list:
+                        lines.append(f"   • {b}{tag}")
             full_text = "\n".join(lines)
             chunks = []
             current = ""
