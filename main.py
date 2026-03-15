@@ -253,15 +253,27 @@ def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str, str]]
     return [(r[0], r[1], r[2]) for r in rows] if rows else []
 
 def bond_status_tag(detail: str) -> str:
-    """根據 detail 文字判斷狀態，回傳標記"""
-    if "到期獲利" in detail or "到期" in detail:
+    """
+    根據 detail 文字判斷整張商品狀態，回傳標記。
+    狀態文字在兩條 ---------------- 之間。
+    """
+    # 擷取狀態區段（兩條分隔線之間）
+    import re as _re
+    status_block = ""
+    m = _re.search(r"-{4,}\n(.*?)\n-{4,}", detail, _re.S)
+    if m:
+        status_block = m.group(1).strip()
+    # 判斷順序：提前KO > 到期 > 其他
+    if "提前出場" in status_block or "🎉" in status_block:
+        return " ✅提前KO"
+    if "到期獲利" in status_block:
+        return " 🏁到期獲利"
+    if "到期接股" in status_block:
+        return " 😭到期接股"
+    if "到期保本" in status_block:
+        return " 🛡️到期保本"
+    if "到期" in status_block:
         return " 🏁到期"
-    # 狀態行有 KO（不是個股行的 KO價/KO@）
-    lines = detail.split("\n")
-    for line in lines:
-        line = line.strip()
-        if line.startswith("KO @") or line.startswith(" KO @"):
-            return " ✅提前KO"
     return ""
 def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
     if not text:
