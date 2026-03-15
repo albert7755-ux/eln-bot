@@ -1045,8 +1045,10 @@ def handle_text_message(event):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="產生中，請稍候約30秒..."))
             try:
                 from daily_report import generate_report, save_report_to_db
-                report, image_url = generate_report()
+                report, image_url, weekly_calendar = generate_report()
                 save_report_to_db(report)
+                if weekly_calendar:
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=weekly_calendar[:4900]))
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=report[:4900]))
                 if image_url:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📊 今日市場摘要圖\n{image_url}"))
