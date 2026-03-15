@@ -29,8 +29,8 @@ def _safe_close_pair(symbol: str):
     last_close = float(close.iloc[-1])
 
     if symbol == "^TNX":
-        prev_close = prev_close / 1
-        last_close = last_close / 1
+        prev_close = prev_close / 10.0
+        last_close = last_close / 10.0
 
     change = last_close - prev_close
     pct = (change / prev_close) * 100 if prev_close else 0.0
@@ -134,7 +134,7 @@ def generate_commentary_with_claude(snapshot_text: str) -> str:
         "請上網搜尋最新、最相關的國際財經消息，再根據這些數據與新聞事件，撰寫以下內容。\n"
         "重點是要有新聞感與事件感，不要只寫空泛結論。\n\n"
         "請完成：\n"
-        "1. 開頭市場重點：用一句話（不超過2句）描述昨日整體行情走勢，語氣像晨會口頭摘要，不要有昨日漲跌幅數字。\n"
+        "1. 開頭市場重點：用一段話（不超過2句）描述昨日整體行情走勢，語氣像晨會口頭摘要，必須點出最重要的交易主線，不要條列、不要分點，用流暢連貫的中文寫成一段。\n"
         "2. 撰寫【總經總覽】：2-3句，必須提到具體事件或消息，例如聯準會官員談話、重要經濟數據、政策、關稅、地緣政治、油價變化等。\n"
         "3. 撰寫【美國市場】：1-2句，必須點出美股漲跌主因，例如科技股、AI、銀行股、能源股、財報或特定新聞。\n"
         "4. 撰寫【債券市場】：1-2句，必須說明美債殖利率變動背後的原因，並區分中短天期與長天期債券表現不一定一致；若只有10年期殖利率資訊，不可直接泛化成整體公債價格全面上揚或下跌。最後補一句固定收益商品的觀察重點。\n\n"
@@ -404,12 +404,94 @@ def build_final_report(data: dict) -> tuple:
     return final_text.strip(), data
 
 
+def generate_weekly_economic_calendar() -> str:
+    """
+    用 Claude web search 查詢本週重要經濟數據（含預期值、優劣方向、央行利率預期）。
+    回傳格式化週曆文字。僅在週一（台北時間）呼叫。
+    """
+    from datetime import timedelta
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    tw_tz = pytz.timezone("Asia/Taipei")
+    today = datetime.now(tw_tz)
+    weekday_map_zh = ["週一", "週二", "週三", "週四", "週五"]
+
+    mon = today - timedelta(days=today.weekday())
+    week_dates = []
+    for i in range(5):
+        d = mon + timedelta(days=i)
+        week_dates.append(f"{weekday_map_zh[i]}（{d.strftime('%m/%d')}）")
+
+    fri = mon + timedelta(days=4)
+    header_range = f"{mon.strftime('%m/%d')}－{fri.strftime('%m/%d')}"
+
+    prompt = (
+        f"今天是台北時間 {today.strftime('%Y年%m月%d日')}（週一）。\n\n"
+        "請用 web search 查詢本週（週一到週五）全球重要經濟數據與央行會議時程。\n\n"
+        "【篩選原則】\n"
+        "只列出市場真正在意的重要數據與事件，例如：\n"
+        "• 美國：CPI、PPI、PCE、非農就業、初領失業金、零售銷售、ISM PMI、FOMC利率決策\n"
+        "• 歐元區：CPI、ECB利率決策、PMI\n"
+        "• 中國：CPI、PPI、PMI、工業生產\n"
+        "• 日本：BOJ利率決策、CPI\n"
+        "• 英國：CPI、BOE利率決策\n"
+        "不重要的數據請勿列出。若某天真的沒有重要數據，寫「• 無重要數據」。\n\n"
+        "【每筆數據請附上以下資訊】\n"
+        "一般經濟數據格式：\n"
+        "• 🇺🇸 數據名稱（月份）｜預期：X% ／ 前值：X%\n"
+        "  → 若高於預期：[對市場的含義，例如「通膨偏強，不利降息」]\n"
+        "  → 若低於預期：[對市場的含義]\n\n"
+        "央行利率決策格式：\n"
+        "• 🇺🇸 FOMC 利率決策｜目前利率：X.XX%\n"
+        "  市場預期：[維持不變／升息／降息]（市場隱含機率約X%）\n"
+        "  → 若意外[升息/降息]：[對債市/股市/匯率的影響]\n\n"
+        f"本週日期：{' / '.join(week_dates)}\n\n"
+        "【輸出格式】必須完全如下，不得省略任何區塊：\n\n"
+        f"📅 本週重要經濟數據｜{header_range}\n\n"
+        f"{week_dates[0]}\n"
+        "• [數據或「無重要數據」]\n\n"
+        f"{week_dates[1]}\n"
+        "• [數據]\n\n"
+        f"{week_dates[2]}\n"
+        "• [數據]\n\n"
+        f"{week_dates[3]}\n"
+        "• [數據]\n\n"
+        f"{week_dates[4]}\n"
+        "• [數據]\n\n"
+        "💡 本週市場關注重點：[一句話總結本週最重磅事件與潛在市場影響]"
+    )
+
+    try:
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1800,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[{"role": "user", "content": prompt}]
+        )
+    except Exception:
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1800,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+    full_text = ""
+    for block in message.content:
+        if hasattr(block, "text"):
+            full_text += block.text
+    return full_text.strip()
+
+
 def generate_report() -> tuple:
     """
     給 /daily 指令呼叫。
-    回傳 (report_text, image_url)
+    回傳 (report_text, image_url, weekly_calendar)
+    weekly_calendar 只有週一才有內容，其他天為空字串。
     image_url 若生成失敗則為空字串。
     """
+    tw_tz = pytz.timezone("Asia/Taipei")
+    is_monday = datetime.now(tw_tz).weekday() == 0
+
     market_data = get_market_data()
     report_text, mdata = build_final_report(market_data)
 
@@ -420,7 +502,16 @@ def generate_report() -> tuple:
     except Exception as e:
         print(f"Image generation error: {e}")
 
-    return report_text, image_url
+    weekly_calendar = ""
+    if is_monday:
+        try:
+            print("Generating weekly economic calendar...")
+            weekly_calendar = generate_weekly_economic_calendar()
+            print("Weekly calendar done.")
+        except Exception as e:
+            print(f"Weekly calendar error: {e}")
+
+    return report_text, image_url, weekly_calendar
 
 
 def save_report_to_db(report_text):
@@ -471,8 +562,13 @@ def send_line_message(text):
 
 def main():
     """排程自動執行用。"""
-    report, image_url = generate_report()
+    report, image_url, weekly_calendar = generate_report()
     save_report_to_db(report)
+
+    # 週一：先發本週經濟數據，再發日報
+    if weekly_calendar:
+        print("Sending weekly economic calendar...")
+        send_line_message(weekly_calendar)
 
     print("Sending daily report to LINE...")
     send_line_message(report)
