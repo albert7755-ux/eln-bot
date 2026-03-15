@@ -134,9 +134,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     tenure_idx, _ = find_col_index(cols, ["天期", "term", "tenure"])
     name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
     line_id_idx, _ = find_col_index(cols, ["line_id", "lineid", "lineuserid", "uid", "lind"])
-
     print(f"[DEBUG] 欄位對應: id={id_idx}, type={type_idx}, ko={ko_idx}, ki={ki_idx}, t1={t1_idx}, issue={issue_date_idx}")
-
     if t1_idx is None:
         raise ValueError("❌ 無法辨識「標的1」欄位，請檢查 Excel 表頭。")
     clean_df = pd.DataFrame()
@@ -227,6 +225,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             ko_step_val = row["KO_Step"]
             ki_thresh = ki_thresh_val / 100.0
             strike_thresh = strike_thresh_val / 100.0
+            has_ki = pd.notna(row["KI_Pct"]) and row["KI_Pct"] > 0
             nc_months = parse_nc_months(row["KO_Type"])
             try:
                 nc_end_date = row["IssueDate"] + relativedelta(months=nc_months)
@@ -387,7 +386,14 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 initial_display = round(asset["initial"], 2)
                 ko_trigger_val = asset["initial"] * current_ko_thresh
                 cell_text = f"【{asset['code']}】\n原: {initial_display}\n現: {price_display}\n({p_pct}%) {status_icon}"
-                cell_text += f"\n👉 KO價: {round(ko_trigger_val, 2)}"
+                cell_text += f"\n KO價: {round(ko_trigger_val, 2)}"
+                # ── 新增：顯示 KI 價格或 Strike 價格 ──
+                if has_ki:
+                    ki_price = round(asset["initial"] * ki_thresh, 2)
+                    cell_text += f"\n KI價: {ki_price} ({ki_thresh_val:.0f}%)"
+                else:
+                    strike_price_display = round(asset["initial"] * strike_thresh, 2)
+                    cell_text += f"\n Strike: {strike_price_display} ({strike_thresh_val:.0f}%)"
                 if asset["locked_ko"]:
                     cell_text += f"\nKO {asset['ko_record']}"
                 if asset["hit_ki"]:
