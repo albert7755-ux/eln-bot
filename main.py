@@ -496,7 +496,7 @@ def ai_claude(user_text: str, chat_key: str = "") -> str:
     messages = history + [{"role": "user", "content": user_text}]
     resp = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=1800,
+        max_tokens=1200,
         system=SYSTEM_PROMPT,
         messages=messages
     )
@@ -510,7 +510,7 @@ def ai_claude_long(user_text: str, chat_key: str = "") -> str:
     messages = history + [{"role": "user", "content": user_text}]
     resp = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=3500,
+        max_tokens=2500,
         system=SYSTEM_PROMPT,
         messages=messages
     )
