@@ -460,19 +460,13 @@ AUTO_FINANCE_KEYWORDS = [
     "投資", "分析", "總經", "景氣", "eln", "結構型", "信用利差", "公司債"
 ]
 AUTO_FILE_KEYWORDS = [
-    "pdf", "ppt", "pptx", "簡報", "圖片", "圖表", "文件", "檔案", "word", "excel"
+    "pdf", "簡報", "圖片", "圖表", "文件", "檔案", "word", "excel"
 ]
 PDF_NL_KEYWORDS = [
     "pdf", "做成pdf", "生成pdf", "轉成pdf", "輸出pdf", "匯出pdf",
     "做成 pdf", "生成 pdf", "轉成 pdf", "輸出 pdf", "匯出 pdf",
     "做成報告", "生成報告", "轉成報告"
 ]
-PPT_NL_KEYWORDS = [
-    "ppt", "做成ppt", "生成ppt", "轉成ppt",
-    "做成 ppt", "生成 ppt", "轉成 ppt",
-    "簡報", "投影片", "簡報檔"
-]
-PPT_ACTION_KEYWORDS = ["做", "生成", "產生", "整理", "輸出", "轉成", "轉為"]
 def _normalize_history_for_chat(chat_key: str) -> list[dict]:
     history = get_chat_history(chat_key) if chat_key else []
     cleaned = []
@@ -759,34 +753,6 @@ def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = 
 {transcript[:120000]}
 """
     return ai_claude_long(prompt, chat_key)
-def build_transcript_ppt_topic(transcript: str, summary: str, chat_key: str = "") -> str:
-    prompt = f"""
-請根據以下會議摘要與逐字稿，提煉出最適合做成簡報的一行繁體中文主題。
-只回傳主題，不要加任何前言或符號。
-會議摘要：
-{summary}
-逐字稿：
-{transcript[:50000]}
-"""
-    out = ai_claude(prompt, chat_key).strip().splitlines()
-    return (out[0].strip() if out else "會議重點簡報")[:80]
-# ==============================
-# Webhook endpoint
-# ==============================
-@app.post("/callback")
-async def callback(request: Request):
-    signature = request.headers.get("X-Line-Signature")
-    body = await request.body()
-    body_text = body.decode("utf-8")
-    try:
-        handler.handle(body_text, signature)
-        return "OK"
-    except InvalidSignatureError:
-        raise HTTPException(status_code=400, detail="Invalid signature")
-# ==============================
-# Text message handler
-# ==============================
-@handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     _bot_api = line_bot_api
     try:
@@ -846,17 +812,17 @@ def handle_text_message(event):
                         "/runnow — 手動執行追蹤\n"
                         "/tracklog — 查看最近排程紀錄"
                     )
-                elif help_arg in ("report", "pdf", "ppt", "報告", "簡報"):
+                elif help_arg in ("report", "pdf", "報告", "簡報"):
                     msg = (
-                        "📑 報告 / 簡報 指令說明\n"
+                        "📑 報告 / PDF 指令說明\n"
                         "─────────────────\n"
                         "/report <主題>\n"
-                        "/report ppt <主題>\n"
+                        "/report <主題> brief/client/academic/hybrid\n"
+                        "/report <主題> custom <說明>\n"
                         "/pdf market <內容>\n"
                         "/pdf make <內容>\n"
                         "自然語言也可直接說：\n"
-                        "請幫我做一份 XX 的 pdf\n"
-                        "請幫我做一份 XX 的簡報"
+                        "請幫我做一份 XX 的 pdf"
                     )
                 else:
                     msg = (
@@ -871,7 +837,7 @@ def handle_text_message(event):
                         "/daily  /daily cache  /market\n"
                         "─────────────────\n"
                         "📑 報告\n"
-                        "/report  /report ppt  /pdf\n"
+                        "/report  /pdf\n"
                         "─────────────────\n"
                         "🔔 警示\n"
                         "/alert add  /alert list  /alert del\n"
@@ -890,7 +856,7 @@ def handle_text_message(event):
         if transcript_cache:
             if any(x in tl for x in ["不用", "不用了", "先不用", "取消", "不用做"]):
                 db_clear_transcript_cache(ck)
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="👌 好的，已保留逐字稿與摘要回覆，不另外生成 PDF 或 PPT。"))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="👌 好的，已保留逐字稿與摘要回覆，不另外生成 PDF。"))
                 return
             if any(x in tl for x in ["做成pdf", "生成pdf", "轉成pdf", "做成 pdf", "生成 pdf", "轉成 pdf", "輸出pdf", "輸出 pdf"]):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在根據逐字稿重點生成 PDF，請稍候..."))
@@ -906,21 +872,6 @@ def handle_text_message(event):
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 會議重點 PDF 已生成完成！\n\n{link}"))
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ PDF 生成失敗：{str(e)[:250]}"))
-                return
-            if any(x in tl for x in ["做成ppt", "生成ppt", "轉成ppt", "做成 ppt", "生成 ppt", "轉成 ppt", "做成簡報", "生成簡報", "轉成簡報"]):
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 正在根據逐字稿重點生成簡報，請稍候約60至90秒..."))
-                try:
-                    from ppt_generator import generate_ppt
-                    topic = build_transcript_ppt_topic(
-                        transcript_cache["transcript"],
-                        transcript_cache["summary"],
-                        chat_key=ck
-                    )
-                    link = generate_ppt(topic, n_slides=12)
-                    db_clear_transcript_cache(ck)
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 會議重點簡報已生成完成！\n\n📌 主題：{topic}\n\n{link}"))
-                except Exception as e:
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 簡報生成失敗：{str(e)[:250]}"))
                 return
         if cmd in ("send", "skip"):
             arg = parts[1].strip().lower() if len(parts) > 1 else ""
@@ -1191,27 +1142,6 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ PDF 生成失敗：{str(e)[:250]}"))
             return
-        if (
-            any(k in tl for k in PPT_NL_KEYWORDS)
-            and any(k in text_raw for k in PPT_ACTION_KEYWORDS)
-            and not tl.startswith("/report")
-        ):
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 正在整理內容並生成簡報，請稍候約60至90秒..."))
-            try:
-                from ppt_generator import generate_ppt
-                topic_prompt = (
-                    "請從以下使用者需求中，抽出最適合做成簡報的主題，"
-                    "只回傳一行繁體中文主題，不要加任何前言或符號。\n\n"
-                    f"使用者需求：{text_raw}"
-                )
-                topic = ai_claude(topic_prompt, chat_key=ck).strip().splitlines()[0][:80]
-                if not topic:
-                    topic = text_raw[:40]
-                link = generate_ppt(topic, n_slides=12)
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 簡報已生成完成！\n\n📌 主題：{topic}\n\n{link}"))
-            except Exception as e:
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 簡報生成失敗：{str(e)[:250]}"))
-            return
         if cmd.startswith("pdf"):
             from pdf_generator import create_and_upload_pdf
             parts = text_raw.split(" ", 2)
@@ -1253,63 +1183,6 @@ def handle_text_message(event):
             style_names = {"ib":"投資銀行", "brief":"簡報摘要", "client":"客戶推播", "academic":"學術研究", "hybrid":"混合風格", "custom":"自訂風格"}
             style = "ib"
             custom_prompt = ""
-            if len(parts) > 1 and parts[1].lower() == "ppt":
-                ppt_color_codes = {"navy", "green", "dark"}
-                ppt_color_names = {"navy":"深藍金","green":"深綠金","dark":"純黑銀"}
-                VALID_PATTERNS  = {"circuit","wave","stars","hexagon","mountain","ripple","grid","diagonal","none"}
-                raw          = " ".join(parts[2:]).strip()
-                visual_theme = ""
-                color_theme  = "navy"
-                force_pattern = ""
-                custom_bg    = False
-                if "圖案:" in raw:
-                    pi = raw.index("圖案:")
-                    pat_val = raw[pi+3:].split()[0].strip()
-                    raw = (raw[:pi] + raw[pi+3+len(pat_val):]).strip()
-                    if pat_val == "自由":
-                        custom_bg = True
-                    elif pat_val in VALID_PATTERNS:
-                        force_pattern = pat_val
-                if "主題:" in raw:
-                    idx = raw.index("主題:")
-                    visual_theme = raw[idx+3:].strip()
-                    raw = raw[:idx].strip()
-                    if custom_bg:
-                        color_label = f"自由繪製（{visual_theme}）"
-                    elif force_pattern:
-                        color_label = f"自訂（{visual_theme}，{force_pattern}圖案）"
-                    else:
-                        color_label = f"自訂（{visual_theme}）"
-                elif raw and raw.split()[-1].lower() in ppt_color_codes:
-                    color_theme = raw.split()[-1].lower()
-                    raw = " ".join(raw.split()[:-1]).strip()
-                    color_label = ppt_color_names[color_theme]
-                else:
-                    color_label = "深藍金"
-                topic = raw
-                if not topic:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text="請輸入簡報主題！\n\n─ 固定配色 ─\n/report ppt 債券投資入門\n/report ppt 債券投資入門 green\n/report ppt 信託規劃 dark\n\n─ 自訂視覺主題 ─\n/report ppt ELN介紹 主題:深海星空\n/report ppt Lombard Lending 主題:科技電路板\n\n─ 指定圖案 ─\n/report ppt 債券投資 主題:宇宙紫金 圖案:stars\n/report ppt 信託規劃 主題:日式禪風 圖案:ripple\n\n─ Claude自由繪製背景（最自由！）─\n/report ppt ELN介紹 主題:珊瑚礁海底 圖案:自由\n/report ppt 債券配置 主題:富士山日出 圖案:自由"
-                    ))
-                    return
-                wait_steps = []
-                if custom_bg:    wait_steps.append("🎨 Claude自由繪製背景")
-                elif visual_theme: wait_steps.append("🎨 推導視覺風格")
-                wait_steps += ["📐 規劃架構", "🖼️ 生成投影片", "☁️ 上傳雲端"]
-                wait_text = " → ".join(wait_steps)
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text=f"🎨 正在製作「{topic}」簡報\n\n配色：{color_label}\n風格：Icon + 大字 + 繁體中文\n頁數：12張\n\n{wait_text}\n\n請稍候約{'120' if custom_bg else '90'}秒..."
-                ))
-                try:
-                    from ppt_generator import generate_ppt
-                    link = generate_ppt(topic, n_slides=12, color_theme=color_theme, visual_theme=visual_theme, force_pattern=force_pattern, custom_bg=custom_bg)
-                    bg_note = "\n⚠️ 背景為 Claude 自由創作，風格可能每次略有不同" if custom_bg else ""
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                        text=f"✅ 簡報製作完成！\n\n📌 主題：{topic}\n🎨 配色：{color_label}\n📄 頁數：12張{bg_note}\n\n{link}\n\n💡 下載後可在 PowerPoint 自由修改內容"
-                    ))
-                except Exception as e:
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 簡報生成失敗：{str(e)[:200]}"))
-                return
             if "custom" in [p.lower() for p in parts[2:]]:
                 custom_idx = next(i for i,p in enumerate(parts) if p.lower() == "custom")
                 topic = " ".join(parts[1:custom_idx]).strip()
@@ -1773,7 +1646,7 @@ def handle_file_message(event):
             preview = text_result[:2000]
             push_long_message(_bot_api, ck.split(":", 1)[1], f"📝 逐字稿（前段）：\n\n{preview}")
             push_long_message(_bot_api, ck.split(":", 1)[1], f"📌 會議摘要：\n\n{summary}")
-            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text="要不要把這份會議重點做成 PDF 或 PPT？\n\n可直接回：做成 PDF / 做成 PPT / 不用"))
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text="要不要把這份會議重點做成 PDF？\n\n可直接回：做成 PDF / 不用"))
             return
         if ext in (".xlsx", ".xls") and db_is_await(ck):
             db_set_await(ck, False)
