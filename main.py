@@ -21,6 +21,7 @@ import urllib.error
 from openai import OpenAI
 # --- Alert ticker aliases ---
 ALERT_TICKER_ALIAS = {
+    # 指數
     "dxy": "DX-Y.NYB",
     "spx": "^GSPC",
     "sp500": "^GSPC",
@@ -29,9 +30,25 @@ ALERT_TICKER_ALIAS = {
     "sox": "^SOX",
     "vix": "^VIX",
     "ust10y": "^TNX",
+    # 大宗商品
     "gold": "GC=F",
     "silver": "SI=F",
     "oil": "CL=F",
+    "wti": "CL=F",
+    "copper": "HG=F",
+    # 外匯（yfinance 格式）
+    "usdjpy": "JPY=X",
+    "jpy": "JPY=X",
+    "eurusd": "EURUSD=X",
+    "eur": "EURUSD=X",
+    "gbpusd": "GBPUSD=X",
+    "gbp": "GBPUSD=X",
+    "usdtwd": "TWD=X",
+    "twd": "TWD=X",
+    "usdcnh": "CNH=X",
+    "cnh": "CNH=X",
+    "usdkrw": "KRW=X",
+    "krw": "KRW=X",
 }
 # ==============================
 # ENV
@@ -321,6 +338,19 @@ def root():
 @app.get("/whoami")
 def whoami():
     return {"service": "eln-bot", "version": VERSION}
+# ==============================
+# Webhook endpoint
+# ==============================
+@app.post("/callback")
+async def callback(request: Request):
+    signature = request.headers.get("X-Line-Signature")
+    body = await request.body()
+    body_text = body.decode("utf-8")
+    try:
+        handler.handle(body_text, signature)
+        return "OK"
+    except InvalidSignatureError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
 # ==============================
 # Chat key
 # ==============================
