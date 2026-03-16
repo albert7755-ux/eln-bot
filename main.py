@@ -75,6 +75,8 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # ── ELN Auto-Tracking 群組 Bot（第二個 handler）──
 ELN_GROUP_CHANNEL_SECRET = "ae4bfba020610eb0e59f719110aa0b85"
+ELN_GROUP_ACCESS_TOKEN = "nv15/ftnhcP3EYo6pMGbvH+BxzMFHzF/b4NjRwG7v0nMm61aCmHVVJxCQOGZIF9+nO4dPzUHOSgTalXCFek09P0ft3LV1R6lSuJCszVPmbaZrJlxMPKilKAdWP4lzN9rwbqxuJcUQ9ouEZ1AkfOJKQdB04t89/1O/w1cDnyilFU="
+eln_group_bot_api = LineBotApi(ELN_GROUP_ACCESS_TOKEN)
 eln_group_handler = WebhookHandler(ELN_GROUP_CHANNEL_SECRET)
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -381,6 +383,10 @@ async def callback(request: Request):
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
+# 用 threading.local 記錄當前使用哪個 bot_api
+import threading
+_current_bot_api = threading.local()
+
 @app.post("/callback2")
 async def callback2(request: Request):
     """ELN Auto-Tracking 群組 Bot 的 Webhook"""
@@ -388,10 +394,13 @@ async def callback2(request: Request):
     body = await request.body()
     body_text = body.decode("utf-8")
     try:
+        _current_bot_api.api = eln_group_bot_api
         eln_group_handler.handle(body_text, signature)
         return "OK"
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
+    finally:
+        _current_bot_api.api = None
 # ==============================
 # Chat key
 # ==============================
@@ -827,7 +836,7 @@ def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = 
 @handler.add(MessageEvent, message=TextMessage)
 @eln_group_handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
-    _bot_api = line_bot_api
+    _bot_api = getattr(_current_bot_api, "api", None) or line_bot_api
     try:
         text_raw = (event.message.text or "").strip()
         tl = text_raw.lower().strip()
@@ -1718,7 +1727,7 @@ def generate_invest_post(image_data: bytes, reason: str, targets: str) -> str:
 @handler.add(MessageEvent, message=FileMessage)
 @eln_group_handler.add(MessageEvent, message=FileMessage)
 def handle_file_message(event):
-    _bot_api = line_bot_api
+    _bot_api = getattr(_current_bot_api, "api", None) or line_bot_api
     try:
         ck = chat_key_of(event)
         filename = getattr(event.message, "file_name", "") or ""
@@ -1788,7 +1797,7 @@ def handle_file_message(event):
 @handler.add(MessageEvent, message=ImageMessage)
 @eln_group_handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
-    _bot_api = line_bot_api
+    _bot_api = getattr(_current_bot_api, "api", None) or line_bot_api
     try:
         ck = chat_key_of(event)
         print("[IMAGE]", ck)
