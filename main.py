@@ -834,7 +834,6 @@ def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = 
 """
     return ai_claude_long(prompt, chat_key)
 @handler.add(MessageEvent, message=TextMessage)
-@eln_group_handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     _bot_api = getattr(_current_bot_api, "api", None) or line_bot_api
     try:
@@ -1725,7 +1724,6 @@ def generate_invest_post(image_data: bytes, reason: str, targets: str) -> str:
     )
     return (resp.content[0].text or "").strip()
 @handler.add(MessageEvent, message=FileMessage)
-@eln_group_handler.add(MessageEvent, message=FileMessage)
 def handle_file_message(event):
     _bot_api = getattr(_current_bot_api, "api", None) or line_bot_api
     try:
@@ -1795,7 +1793,6 @@ def handle_file_message(event):
         except Exception:
             pass
 @handler.add(MessageEvent, message=ImageMessage)
-@eln_group_handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
     _bot_api = getattr(_current_bot_api, "api", None) or line_bot_api
     try:
@@ -1854,7 +1851,6 @@ def transcribe_audio(audio_data: bytes, filename: str = "audio.m4a") -> str:
             )
         return resp.text.strip()
 @handler.add(MessageEvent, message=AudioMessage)
-@eln_group_handler.add(MessageEvent, message=AudioMessage)
 def handle_audio_message(event, _override_bot_api=None):
     _bot_api = _override_bot_api or line_bot_api
     ck = chat_key_of(event)
@@ -1879,6 +1875,100 @@ def handle_audio_message(event, _override_bot_api=None):
             _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 語音處理失敗：{str(e)[:200]}"))
         except Exception:
             pass
+# ==============================
+# ELN Auto-Tracking 群組專用 handler
+# 只處理 /list 和 /detail，資料來自龍蝦的 personal chat_key
+# ==============================
+ELN_PERSONAL_CHAT_KEY = f"user:{os.getenv('LINE_USER_ID', '')}"
+
+@eln_group_handler.add(MessageEvent, message=TextMessage)
+def handle_eln_group_message(event):
+    try:
+        text_raw = (event.message.text or "").strip()
+        tl = text_raw.lower().strip()
+        print(f"[ELN-GROUP] {repr(text_raw)}")
+
+        # 只處理 /list 和 /detail，其他靜音
+        if not (tl.startswith("/list") or tl.startswith("/detail")):
+            return
+
+        ck = ELN_PERSONAL_CHAT_KEY  # 固定用龍蝦的資料
+
+        if tl.startswith("/list"):
+            from collections import defaultdict
+            list_parts = text_raw.split(" ", 1)
+            name_filter = list_parts[1].strip() if len(list_parts) > 1 else ""
+            bonds = db_list_bonds(ck, limit=200)
+            if not bonds:
+                eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無資料。"))
+                return
+            detail_map_status = {}
+            for bond_id, agent_raw, detail in bonds:
+                detail_map_status[bond_id] = bond_status_tag(detail)
+            if name_filter:
+                matched = []
+                seen = set()
+                for bond_id, agent_raw, detail in bonds:
+                    agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()]
+                    if any(name_filter in a for a in agents) and bond_id not in seen:
+                        matched.append((bond_id, detail_map_status.get(bond_id, "")))
+                        seen.add(bond_id)
+                if not matched:
+                    eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到「{name_filter}」的持倉。"))
+                    return
+                lines = [f"👤 {name_filter} 的持倉（共 {len(matched)} 筆）：\n"]
+                for b, tag in matched:
+                    lines.append(f"   • {b}{tag}")
+                full_text = "\n".join(lines)
+            else:
+                grouped = defaultdict(list)
+                for bond_id, agent_raw, detail in bonds:
+                    agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()]
+                    if not agents:
+                        agents = ["未指定"]
+                    for agent in agents:
+                        if bond_id not in [b for b, _ in grouped[agent]]:
+                            grouped[agent].append((bond_id, detail_map_status.get(bond_id, "")))
+                lines = [f"📋 全部商品（共 {len(set(b for b,_,_ in bonds))} 筆，按理專排列）：\n"]
+                for agent, bond_list in sorted(grouped.items()):
+                    lines.append(f"👤 {agent}（{len(bond_list)} 筆）")
+                    for b, tag in bond_list:
+                        lines.append(f"   • {b}{tag}")
+                full_text = "\n".join(lines)
+            chunks = []
+            current = ""
+            for line in full_text.split("\n"):
+                if len(current) + len(line) + 1 > 4800:
+                    chunks.append(current)
+                    current = line
+                else:
+                    current = current + "\n" + line if current else line
+            if current:
+                chunks.append(current)
+            eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text=chunks[0]))
+            for chunk in chunks[1:]:
+                eln_group_bot_api.push_message(event.source.user_id, TextSendMessage(text=chunk))
+            return
+
+        if tl.startswith("/detail"):
+            parts = text_raw.split(" ", 1)
+            if len(parts) < 2 or not parts[1].strip():
+                eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入：/detail 商品代號"))
+                return
+            query = parts[1].strip()
+            matched_id, detail, candidates = db_find_detail(ck, query)
+            if detail:
+                eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text=detail[:4900]))
+                return
+            if candidates and matched_id is None:
+                sample = "\n".join([f"• {c}" for c in candidates[:20]])
+                eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"請再精準一點，候選代號：\n{sample}"[:4900]))
+                return
+            eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="查不到該代號。"))
+            return
+    except Exception as e:
+        print(f"[ELN-GROUP ERROR] {e}")
+
 # ==============================
 # 內建排程
 # ==============================
