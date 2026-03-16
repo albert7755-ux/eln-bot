@@ -72,6 +72,10 @@ elif DATABASE_URL.startswith("postgresql://"):
 # 龍蝦主Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# ── ELN Auto-Tracking 群組 Bot（第二個 handler）──
+ELN_GROUP_CHANNEL_SECRET = "ae4bfba020610eb0e59f719110aa0b85"
+eln_group_handler = WebhookHandler(ELN_GROUP_CHANNEL_SECRET)
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 app = FastAPI()
@@ -373,6 +377,18 @@ async def callback(request: Request):
     body_text = body.decode("utf-8")
     try:
         handler.handle(body_text, signature)
+        return "OK"
+    except InvalidSignatureError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+@app.post("/callback2")
+async def callback2(request: Request):
+    """ELN Auto-Tracking 群組 Bot 的 Webhook"""
+    signature = request.headers.get("X-Line-Signature")
+    body = await request.body()
+    body_text = body.decode("utf-8")
+    try:
+        eln_group_handler.handle(body_text, signature)
         return "OK"
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
@@ -809,6 +825,7 @@ def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = 
 """
     return ai_claude_long(prompt, chat_key)
 @handler.add(MessageEvent, message=TextMessage)
+@eln_group_handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     _bot_api = line_bot_api
     try:
@@ -1699,6 +1716,7 @@ def generate_invest_post(image_data: bytes, reason: str, targets: str) -> str:
     )
     return (resp.content[0].text or "").strip()
 @handler.add(MessageEvent, message=FileMessage)
+@eln_group_handler.add(MessageEvent, message=FileMessage)
 def handle_file_message(event):
     _bot_api = line_bot_api
     try:
@@ -1768,6 +1786,7 @@ def handle_file_message(event):
         except Exception:
             pass
 @handler.add(MessageEvent, message=ImageMessage)
+@eln_group_handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
     _bot_api = line_bot_api
     try:
@@ -1826,6 +1845,7 @@ def transcribe_audio(audio_data: bytes, filename: str = "audio.m4a") -> str:
             )
         return resp.text.strip()
 @handler.add(MessageEvent, message=AudioMessage)
+@eln_group_handler.add(MessageEvent, message=AudioMessage)
 def handle_audio_message(event, _override_bot_api=None):
     _bot_api = _override_bot_api or line_bot_api
     ck = chat_key_of(event)
