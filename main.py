@@ -986,7 +986,7 @@ def handle_text_message(event):
                 sent, failed = 0, 0
                 for row in targets:
                     try:
-                        line_bot_api.push_message(row.target_id, TextSendMessage(text=row.msg[:4900]))
+                        eln_group_bot_api.push_message(row.target_id, TextSendMessage(text=row.msg[:4900]))
                         sent += 1
                     except Exception as e:
                         failed += 1
