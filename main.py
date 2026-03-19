@@ -74,8 +74,8 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # ── ELN Auto-Tracking 群組 Bot（第二個 handler）──
-ELN_GROUP_CHANNEL_SECRET = os.getenv("AGENT_LINE_CHANNEL_SECRET")
-ELN_GROUP_ACCESS_TOKEN = os.getenv("AGENT_LINE_CHANNEL_ACCESS_TOKEN")
+ELN_GROUP_CHANNEL_SECRET = "ae4bfba020610eb0e59f719110aa0b85"
+ELN_GROUP_ACCESS_TOKEN = "nv15/ftnhcP3EYo6pMGbvH+BxzMFHzF/b4NjRwG7v0nMm61aCmHVVJxCQOGZIF9+nO4dPzUHOSgTalXCFek09P0ft3LV1R6lSuJCszVPmbaZrJlxMPKilKAdWP4lzN9rwbqxuJcUQ9ouEZ1AkfOJKQdB04t89/1O/w1cDnyilFU="
 eln_group_bot_api = LineBotApi(ELN_GROUP_ACCESS_TOKEN)
 eln_group_handler = WebhookHandler(ELN_GROUP_CHANNEL_SECRET)
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -1877,6 +1877,7 @@ def handle_audio_message(event, _override_bot_api=None):
             pass
 # ==============================
 # ELN Auto-Tracking 群組專用 handler
+# 只處理 /list 和 /detail，資料來自龍蝦的 personal chat_key
 # ==============================
 ELN_PERSONAL_CHAT_KEY = f"user:{os.getenv('LINE_USER_ID', '')}"
 
@@ -1886,9 +1887,13 @@ def handle_eln_group_message(event):
         text_raw = (event.message.text or "").strip()
         tl = text_raw.lower().strip()
         print(f"[ELN-GROUP] {repr(text_raw)}")
+
+        # 只處理 /list 和 /detail，其他靜音
         if not (tl.startswith("/list") or tl.startswith("/detail")):
             return
-        ck = ELN_PERSONAL_CHAT_KEY
+
+        ck = ELN_PERSONAL_CHAT_KEY  # 固定用龍蝦的資料
+
         if tl.startswith("/list"):
             from collections import defaultdict
             list_parts = text_raw.split(" ", 1)
@@ -1944,6 +1949,7 @@ def handle_eln_group_message(event):
             for chunk in chunks[1:]:
                 eln_group_bot_api.push_message(event.source.user_id, TextSendMessage(text=chunk))
             return
+
         if tl.startswith("/detail"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
