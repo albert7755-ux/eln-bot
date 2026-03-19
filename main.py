@@ -2032,12 +2032,12 @@ def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
     scheduler.add_job(
         job_daily_report,
-        CronTrigger(day_of_week="mon-fri", hour=6, minute=0, timezone=TZ_TAIPEI_PYTZ),
+        CronTrigger(day_of_week="mon-fri", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ),
         id="daily_report", name="財經日報"
     )
     scheduler.add_job(
         job_auto_tracking,
-        CronTrigger(day_of_week="mon-fri", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ),
+        CronTrigger(day_of_week="mon-fri", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ),
         id="auto_tracking", name="ELN自動追蹤"
     )
     scheduler.add_job(
