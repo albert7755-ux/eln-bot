@@ -146,6 +146,7 @@ def build_result(output: dict):
                 f"類型: {r['Type'] if 'Type' in r.index else '-'}\n"
                 f"理專: {agent}\n"
                 f"交易日: {r['交易日'] if '交易日' in r.index else '-'}\n"
+                f"最終評價日: {r['最終評價日'] if '最終評價日' in r.index else '-'}\n"
                 f"KO設定: {r['KO設定'] if 'KO設定' in r.index else '-'}\n"
                 f"最差表現: {r['最差表現'] if '最差表現' in r.index else '-'}\n"
                 f"----------------\n"
