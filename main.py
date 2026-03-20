@@ -83,8 +83,8 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # ── ELN Auto-Tracking 群組 Bot（第二個 handler）──
 
-ELN_GROUP_CHANNEL_SECRET = os.getenv(“ELN_GROUP_CHANNEL_SECRET”, “”)
-ELN_GROUP_ACCESS_TOKEN = os.getenv(“ELN_GROUP_ACCESS_TOKEN”, “”)
+ELN_GROUP_CHANNEL_SECRET = os.getenv(“AGENT_LINE_CHANNEL_SECRET”, “”)
+ELN_GROUP_ACCESS_TOKEN = os.getenv(“AGENT_LINE_CHANNEL_ACCESS_TOKEN”, “”)
 eln_group_bot_api = LineBotApi(ELN_GROUP_ACCESS_TOKEN) if ELN_GROUP_ACCESS_TOKEN else None
 eln_group_handler = WebhookHandler(ELN_GROUP_CHANNEL_SECRET) if ELN_GROUP_CHANNEL_SECRET else None
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
