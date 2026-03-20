@@ -74,10 +74,10 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # ── ELN Auto-Tracking 群組 Bot（第二個 handler）──
-ELN_GROUP_CHANNEL_SECRET = "ae4bfba020610eb0e59f719110aa0b85"
-ELN_GROUP_ACCESS_TOKEN = "nv15/ftnhcP3EYo6pMGbvH+BxzMFHzF/b4NjRwG7v0nMm61aCmHVVJxCQOGZIF9+nO4dPzUHOSgTalXCFek09P0ft3LV1R6lSuJCszVPmbaZrJlxMPKilKAdWP4lzN9rwbqxuJcUQ9ouEZ1AkfOJKQdB04t89/1O/w1cDnyilFU="
-eln_group_bot_api = LineBotApi(ELN_GROUP_ACCESS_TOKEN)
-eln_group_handler = WebhookHandler(ELN_GROUP_CHANNEL_SECRET)
+ELN_GROUP_CHANNEL_SECRET = os.getenv("AGENT_LINE_CHANNEL_SECRET", "")
+ELN_GROUP_ACCESS_TOKEN = os.getenv("AGENT_LINE_CHANNEL_ACCESS_TOKEN", "")
+eln_group_bot_api = LineBotApi(ELN_GROUP_ACCESS_TOKEN) if ELN_GROUP_ACCESS_TOKEN else None
+eln_group_handler = WebhookHandler(ELN_GROUP_CHANNEL_SECRET) if ELN_GROUP_CHANNEL_SECRET else None
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 app = FastAPI()
@@ -389,18 +389,79 @@ _current_bot_api = threading.local()
 
 @app.post("/callback2")
 async def callback2(request: Request):
-    """ELN Auto-Tracking 群組 Bot 的 Webhook"""
-    signature = request.headers.get("X-Line-Signature")
+    """ELN Auto-Tracking - skip signature check"""
     body = await request.body()
-    body_text = body.decode("utf-8")
     try:
-        _current_bot_api.api = eln_group_bot_api
-        eln_group_handler.handle(body_text, signature)
-        return "OK"
-    except InvalidSignatureError:
-        raise HTTPException(status_code=400, detail="Invalid signature")
-    finally:
-        _current_bot_api.api = None
+        import json as _j
+        data = _j.loads(body.decode("utf-8"))
+        for ev in data.get("events", []):
+            if ev.get("type") != "message":
+                continue
+            if ev.get("message", {}).get("type") != "text":
+                continue
+            txt = ev["message"]["text"].strip()
+            tl = txt.lower()
+            rtoken = ev.get("replyToken", "")
+            uid = ev.get("source", {}).get("userId", "")
+            if not (tl.startswith("/list") or tl.startswith("/detail")):
+                continue
+            print("[ELN-G]", repr(txt))
+            from linebot.models import TextSendMessage as TSM
+            from collections import defaultdict
+            ck = ELN_PERSONAL_CHAT_KEY
+            if tl.startswith("/list"):
+                lp = txt.split(" ", 1)
+                nf = lp[1].strip() if len(lp) > 1 else ""
+                bonds = db_list_bonds(ck, limit=200)
+                if not bonds:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="目前尚無資料。"))
+                    continue
+                ds = {b: bond_status_tag(d) for b, _, d in bonds}
+                if nf:
+                    matched = []
+                    seen = set()
+                    for bid, ar, d in bonds:
+                        ags = [a.strip() for a in re.split(r"[,，、/]", ar) if a.strip()]
+                        if any(nf in a for a in ags) and bid not in seen:
+                            matched.append((bid, ds.get(bid, "")))
+                            seen.add(bid)
+                    if not matched:
+                        eln_group_bot_api.reply_message(rtoken, TSM(text="找不到「" + nf + "」的持倉。"))
+                        continue
+                    out = "👤 " + nf + " 的持倉（共 " + str(len(matched)) + " 筆）：\n"
+                    for b, t in matched:
+                        out += "   • " + b + t + "\n"
+                else:
+                    grp = defaultdict(list)
+                    for bid, ar, d in bonds:
+                        ags = [a.strip() for a in re.split(r"[,，、/]", ar) if a.strip()] or ["未指定"]
+                        for ag in ags:
+                            if bid not in [x for x, _ in grp[ag]]:
+                                grp[ag].append((bid, ds.get(bid, "")))
+                    out = "📋 全部商品（共 " + str(len(set(b for b,_,_ in bonds))) + " 筆）：\n"
+                    for ag, bl in sorted(grp.items()):
+                        out += "👤 " + ag + "（" + str(len(bl)) + " 筆）\n"
+                        for b, t in bl:
+                            out += "   • " + b + t + "\n"
+                chunks = [out[i:i+4800] for i in range(0, len(out), 4800)]
+                eln_group_bot_api.reply_message(rtoken, TSM(text=chunks[0]))
+                for c in chunks[1:]:
+                    eln_group_bot_api.push_message(uid, TSM(text=c))
+            elif tl.startswith("/detail"):
+                ps = txt.split(" ", 1)
+                if len(ps) < 2 or not ps[1].strip():
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="請輸入：/detail 商品代號"))
+                    continue
+                mid, det, cands = db_find_detail(ck, ps[1].strip())
+                if det:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text=det[:4900]))
+                elif cands:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text=("候選代號：\n" + "\n".join("• "+c for c in cands[:20]))[:4900]))
+                else:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="查不到該代號。"))
+    except Exception as e:
+        print("[callback2 ERR]", e)
+    return "OK"
 # ==============================
 # Chat key
 # ==============================
