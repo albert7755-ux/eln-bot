@@ -387,8 +387,9 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 ko_trigger_val = asset["initial"] * current_ko_thresh
                 cell_text = f"【{asset['code']}】\n原: {initial_display}\n現: {price_display}\n({p_pct}%) {status_icon}"
                 cell_text += f"\n KO價: {round(ko_trigger_val, 2)}"
-                # ── 接近 KO 預警（3%以內）──
-                if asset["price"] > 0 and not asset["locked_ko"]:
+                # ── 接近 KO 預警（3%以內，且已過閉鎖期）──
+                is_in_nc = today_ts < nc_end_date
+                if asset["price"] > 0 and not asset["locked_ko"] and not is_in_nc:
                     dist_ko = (ko_trigger_val - asset["price"]) / asset["price"] * 100
                     if 0 < dist_ko <= 3:
                         cell_text += f" ⚠️距KO {dist_ko:.1f}%"
@@ -396,7 +397,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 if has_ki:
                     ki_price = round(asset["initial"] * ki_thresh, 2)
                     cell_text += f"\n KI價: {ki_price} ({ki_thresh_val:.0f}%)"
-                    # 接近 KI 預警（3%以內，從下方接近）
+                    # 接近 KI 預警（3%以內，KI 不限閉鎖期，隨時都要注意）
                     if asset["price"] > 0 and not asset["hit_ki"]:
                         dist_ki = (asset["price"] - ki_price) / asset["price"] * 100
                         if 0 < dist_ki <= 3:
@@ -404,8 +405,8 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 else:
                     strike_price_display = round(asset["initial"] * strike_thresh, 2)
                     cell_text += f"\n Strike: {strike_price_display} ({strike_thresh_val:.0f}%)"
-                    # 接近 Strike 預警（3%以內）
-                    if asset["price"] > 0:
+                    # 接近 Strike 預警（3%以內，且已過閉鎖期）
+                    if asset["price"] > 0 and not is_in_nc:
                         dist_strike = (asset["price"] - strike_price_display) / asset["price"] * 100
                         if 0 < dist_strike <= 3:
                             cell_text += f" ⚠️距Strike {dist_strike:.1f}%"
