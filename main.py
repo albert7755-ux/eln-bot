@@ -1515,6 +1515,44 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"新聞抓取失敗: {e}"))
             return
+        if cmd.startswith("end"):
+            parts = text_raw.split(" ", 1)
+            if len(parts) < 2 or not parts[1].strip():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入：/end YYYYMM\n例：/end 202604"))
+                return
+            query_month = parts[1].strip().replace("/", "").replace("-", "")
+            if len(query_month) != 6 or not query_month.isdigit():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="格式錯誤，請輸入6位數字\n例：/end 202604"))
+                return
+            year = query_month[:4]
+            month = query_month[4:]
+            # 從 eln_detail 搜尋 detail 欄位包含該年月的商品
+            with engine.begin() as conn:
+                rows = conn.execute(text("""
+                SELECT bond_id, agent_name, detail FROM eln_detail
+                WHERE chat_key=:k
+                ORDER BY agent_name ASC, bond_id ASC
+                """), {"k": ck}).fetchall()
+            if not rows:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無資料。"))
+                return
+            matched = []
+            search_str = f"{year}-{month}"
+            for bond_id, agent_name, detail in rows:
+                # 搜尋 detail 裡的最終評價日欄位
+                if f"最終評價日: {search_str}" in detail:
+                    tag = bond_status_tag(detail)
+                    matched.append((bond_id, agent_name or "-", tag))
+            if not matched:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到 {year}/{month} 到期的商品。"))
+                return
+            lines = [f"📅 {year}/{month} 到期商品（共 {len(matched)} 筆）：\n"]
+            for bond_id, agent_name, tag in matched:
+                lines.append(f"   • {bond_id} [{agent_name}]{tag}")
+            full_text = "\n".join(lines)
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=full_text[:4900]))
+            return
+
         if cmd.startswith("detail"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
