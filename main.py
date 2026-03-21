@@ -403,7 +403,7 @@ async def callback2(request: Request):
             tl = txt.lower()
             rtoken = ev.get("replyToken", "")
             uid = ev.get("source", {}).get("userId", "")
-            if not (tl.startswith("/list") or tl.startswith("/detail")):
+            if not (tl.startswith("/list") or tl.startswith("/detail") or tl.startswith("/end")):
                 continue
             print("[ELN-G]", repr(txt))
             from linebot.models import TextSendMessage as TSM
@@ -459,6 +459,33 @@ async def callback2(request: Request):
                     eln_group_bot_api.reply_message(rtoken, TSM(text=("候選代號：\n" + "\n".join("• "+c for c in cands[:20]))[:4900]))
                 else:
                     eln_group_bot_api.reply_message(rtoken, TSM(text="查不到該代號。"))
+            elif tl.startswith("/end"):
+                ps = txt.split(" ", 1)
+                if len(ps) < 2 or not ps[1].strip():
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="請輸入：/end YYYYMM\n例：/end 202604"))
+                    continue
+                qm = ps[1].strip().replace("/", "").replace("-", "")
+                if len(qm) != 6 or not qm.isdigit():
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="格式錯誤，請輸入6位數字\n例：/end 202604"))
+                    continue
+                yr, mo = qm[:4], qm[4:]
+                search_str = yr + "-" + mo
+                with engine.begin() as conn:
+                    rows = conn.execute(text("SELECT bond_id, agent_name, detail FROM eln_detail WHERE chat_key=:k ORDER BY agent_name ASC, bond_id ASC"), {"k": ck}).fetchall()
+                if not rows:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="目前尚無資料。"))
+                    continue
+                matched = []
+                for bid, ag, det in rows:
+                    if ("最終評價日: " + search_str) in det:
+                        matched.append((bid, ag or "-", bond_status_tag(det)))
+                if not matched:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="找不到 " + yr + "/" + mo + " 到期的商品。"))
+                    continue
+                out = "📅 " + yr + "/" + mo + " 到期商品（共 " + str(len(matched)) + " 筆）：\n"
+                for bid, ag, tag in matched:
+                    out += "   • " + bid + " [" + ag + "]" + tag + "\n"
+                eln_group_bot_api.reply_message(rtoken, TSM(text=out[:4900]))
     except Exception as e:
         print("[callback2 ERR]", e)
     return "OK"
