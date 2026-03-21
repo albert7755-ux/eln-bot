@@ -952,7 +952,8 @@ def handle_text_message(event):
                         "/eln history — 查看歷史 Excel\n"
                         "/eln result — 查看最近結果\n"
                         "/runnow — 手動執行追蹤\n"
-                        "/tracklog — 查看最近排程紀錄"
+                        "/tracklog — 查看最近排程紀錄\n"
+                        "/end YYYYMM — 查詢指定月份到期商品（例：/end 202604）"
                     )
                 elif help_arg in ("report", "pdf", "報告", "簡報"):
                     msg = (
@@ -973,7 +974,7 @@ def handle_text_message(event):
                         "📊 ELN\n"
                         "/calc  /list  /detail\n"
                         "/eln upload  /eln run  /eln history  /eln result\n"
-                        "/runnow  /tracklog\n"
+                        "/runnow  /tracklog  /end\n"
                         "─────────────────\n"
                         "📰 財經\n"
                         "/daily  /daily cache  /market\n"
