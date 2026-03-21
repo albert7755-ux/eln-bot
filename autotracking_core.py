@@ -526,6 +526,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 "最終評價日": row["ValuationDate"].strftime("%Y-%m-%d") if pd.notna(row["ValuationDate"]) else "-",
                 "NC月份": f"{nc_months}M",
                 "KO設定": f"{ko_initial_val}% (-{ko_step_val}%)" if ko_step_val > 0 else f"{ko_initial_val}%",
+                "KI類型": "AKI" if is_aki else "EKI",
                 "SearchText": copy_text_body,
                 "Line_ID_Raw": row.get("Line_ID", "")
             }
