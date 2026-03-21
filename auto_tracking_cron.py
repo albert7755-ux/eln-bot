@@ -148,6 +148,7 @@ def build_result(output: dict):
                 f"交易日: {r['交易日'] if '交易日' in r.index else '-'}\n"
                 f"最終評價日: {r['最終評價日'] if '最終評價日' in r.index else '-'}\n"
                 f"KO設定: {r['KO設定'] if 'KO設定' in r.index else '-'}\n"
+                f"KI類型: {r['KI類型'] if 'KI類型' in r.index else '-'}\n"
                 f"最差表現: {r['最差表現'] if '最差表現' in r.index else '-'}\n"
                 f"----------------\n"
                 f"{r['狀態'] if '狀態' in r.index else ''}\n"
