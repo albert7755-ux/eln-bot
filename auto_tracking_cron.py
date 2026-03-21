@@ -242,6 +242,38 @@ def main():
 
         individual_messages = out.get("individual_messages", []) or []
 
+        # ── 方案B：接近觸價預警通知 ──
+        warning_lines = []
+        df = out.get("results_df")
+        if df is not None and not df.empty:
+            for _, r in df.iterrows():
+                bond_id = str(r.get("債券代號", "")).strip()
+                if not bond_id or bond_id == "nan":
+                    continue
+                # 只看進行中的商品
+                status = str(r.get("狀態", ""))
+                if any(x in status for x in ["提前出場", "到期", "未發行"]):
+                    continue
+                for c in df.columns:
+                    if not str(c).endswith("_Detail"):
+                        continue
+                    detail_val = str(r.get(c, "") or "")
+                    if "⚠️距KO" in detail_val or "⚠️距KI" in detail_val or "⚠️距Strike" in detail_val:
+                        # 擷取標的代號
+                        import re as _re
+                        m = _re.search(r"【(\w+)】", detail_val)
+                        ticker = m.group(1) if m else "?"
+                        # 擷取預警訊息
+                        warnings = _re.findall(r"⚠️[^\n]+", detail_val)
+                        for w in warnings:
+                            warning_lines.append(f"• {bond_id} {ticker} {w.strip()}")
+        if warning_lines:
+            warn_msg = "⚠️ 今日接近觸價預警\n" + "─" * 16 + "\n"
+            warn_msg += "\n".join(warning_lines)
+            warn_msg += "\n\n請注意追蹤上述標的！"
+            push_long_message(line_bot_api, user_id, warn_msg)
+            print(f"[WARNING] 發送 {len(warning_lines)} 筆接近觸價預警")
+
         print("Saving pending notifications...")
         save_pending_notifications(engine, personal_chat_key, individual_messages)
 
