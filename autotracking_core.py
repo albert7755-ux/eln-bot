@@ -126,6 +126,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     ko_type_idx, _ = find_col_index(cols, ["ko類型", "kotype"]) or find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko", "商品"])
     ki_idx, _ = find_col_index(cols, ["ki", "下檔"], exclude_keywords=["ko", "type"])
     ki_type_idx, _ = find_col_index(cols, ["ki類型", "kitype"])
+    coupon_idx, _ = find_col_index(cols, ["收益率", "coupon", "uf%", "uf"], exclude_keywords=["ko", "ki"])
     t1_idx, _ = find_col_index(cols, ["標的1", "ticker1"])
     trade_date_idx, _ = find_col_index(cols, ["交易日"])
     issue_date_idx, _ = find_col_index(cols, ["發行日"])
@@ -163,6 +164,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     clean_df["KO_Initial"], clean_df["KO_Step"] = zip(*df.iloc[:, ko_idx].apply(parse_ko_settings))
     clean_df["KI_Pct"] = df.iloc[:, ki_idx].apply(clean_percentage)
     clean_df["Strike_Pct"] = df.iloc[:, strike_idx].apply(clean_percentage) if strike_idx is not None else 100.0
+    clean_df["Coupon_Pct"] = df.iloc[:, coupon_idx].apply(clean_percentage) if coupon_idx is not None else None
     clean_df["KO_Type"] = df.iloc[:, ko_type_idx] if ko_type_idx is not None else "NC1"
     clean_df["KI_Type"] = df.iloc[:, ki_type_idx] if ki_type_idx is not None else "AKI"
     for i in range(1, 6):
@@ -232,6 +234,9 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             except:
                 nc_end_date = row["IssueDate"]
             is_dra = "DRA" in str(row["Product_Type"]).upper()
+            is_ben = "BEN" in str(row["Product_Type"]).upper()
+            coupon_pct = row["Coupon_Pct"] if pd.notna(row.get("Coupon_Pct")) else None
+            coupon_thresh = (coupon_pct / 100.0) if coupon_pct else None
             is_period_end = is_period_end_check(row["KO_Type"])
             is_aki = "AKI" in str(row["KI_Type"]).upper()
             assets = []
@@ -432,16 +437,36 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     group_status_short = "🎉 提前出場 (KO)"
                     need_notify = True
             elif pd.notna(row["ValuationDate"]) and today_ts >= row["ValuationDate"]:
-                final_hit_ki = any(a["perf"] < ki_thresh for a in assets)
-                if all_above_strike_now:
-                    status_msgs.append("💰 到期獲利")
-                    line_status_short = "💰 到期獲利"
-                elif final_hit_ki:
-                    status_msgs.append("😭 到期接股")
-                    line_status_short = "😭 到期接股"
+                if is_ben and coupon_thresh is not None:
+                    # BEN 到期邏輯
+                    # worst_perf = 最差標的表現（已計算）
+                    ben_worst = min([a["perf"] for a in assets if a["perf"] > 0], default=0)
+                    if ben_worst >= (1 + coupon_thresh):
+                        # 漲超過 coupon → 拿實際漲幅
+                        actual_gain = round((ben_worst - 1) * 100, 2)
+                        status_msgs.append(f"🚀 到期獲利 {actual_gain}%（超過Coupon實拿漲幅）")
+                        line_status_short = f"🚀 到期獲利 {actual_gain}%"
+                    elif ben_worst >= strike_thresh:
+                        # 執行價 ~ Coupon 之間 → 拿 Coupon
+                        coupon_str = f"{coupon_pct:.1f}%"
+                        status_msgs.append(f"💰 到期獲利 {coupon_str}（拿固定Coupon）")
+                        line_status_short = f"💰 到期獲利 {coupon_str}"
+                    else:
+                        # 跌破執行價 → 接股
+                        status_msgs.append("😭 到期接股（跌破執行價）")
+                        line_status_short = "😭 到期接股"
                 else:
-                    status_msgs.append("🛡️ 到期保本")
-                    line_status_short = "🛡️ 到期保本"
+                    # FCN / 一般商品到期邏輯
+                    final_hit_ki = any(a["perf"] < ki_thresh for a in assets)
+                    if all_above_strike_now:
+                        status_msgs.append("💰 到期獲利")
+                        line_status_short = "💰 到期獲利"
+                    elif final_hit_ki:
+                        status_msgs.append("😭 到期接股")
+                        line_status_short = "😭 到期接股"
+                    else:
+                        status_msgs.append("🛡️ 到期保本")
+                        line_status_short = "🛡️ 到期保本"
                 if row["ValuationDate"] >= lookback_date:
                     need_notify = True
             else:
@@ -476,6 +501,20 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                             need_notify = True
                     else:
                         status_msgs.append("💸 DRA計息中")
+                if is_ben and coupon_thresh is not None:
+                    # BEN 持倉中：顯示目前表現 vs Coupon vs 執行價
+                    ben_worst = min([a["perf"] for a in assets if a["perf"] > 0], default=0)
+                    coupon_str = f"{coupon_pct:.1f}%"
+                    strike_str = f"{strike_thresh_val:.1f}%"
+                    if ben_worst >= (1 + coupon_thresh):
+                        status_msgs.append(f"📈 BEN 超越Coupon（目前漲幅 {round((ben_worst-1)*100,2)}% > Coupon {coupon_str}）")
+                    elif ben_worst >= strike_thresh:
+                        status_msgs.append(f"💰 BEN 介於執行價~Coupon（可拿 {coupon_str}）")
+                    else:
+                        status_msgs.append(f"⚠️ BEN 跌破執行價（執行價 {strike_str}，目前 {round(ben_worst*100,2)}%）")
+                        if notify_ki_daily and not line_status_short:
+                            line_status_short = f"⚠️ BEN 跌破執行價 ({strike_str})"
+                            need_notify = True
             final_status = "\n".join(status_msgs)
             if line_status_short:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
@@ -528,6 +567,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 "NC月份": f"{nc_months}M",
                 "KO設定": f"{ko_initial_val}% (-{ko_step_val}%)" if ko_step_val > 0 else f"{ko_initial_val}%",
                 "KI類型": "AKI" if is_aki else "EKI",
+                "Coupon": f"{coupon_pct:.1f}%" if coupon_pct else "-",
                 "SearchText": copy_text_body,
                 "Line_ID_Raw": row.get("Line_ID", "")
             }
