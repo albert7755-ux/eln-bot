@@ -128,14 +128,13 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     ko_type_idx, _ = find_col_index(cols, ["ko類型", "kotype"]) or find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko", "商品"])
     ki_idx, _ = find_col_index(cols, ["ki", "下檔"], exclude_keywords=["ko", "type"])
     ki_type_idx, _ = find_col_index(cols, ["ki類型", "kitype"])
-    coupon_idx, _ = find_col_index(cols, ["收益率", "coupon", "uf%", "uf", "年化", "紅利"], exclude_keywords=["ko", "ki"])
-    # 若抓不到，嘗試直接搜尋欄位名稱包含「收益」
+    coupon_idx, _ = find_col_index(cols, ["收益率", "coupon", "年化", "紅利"], exclude_keywords=["ko", "ki", "uf"])
+    # 若抓不到，直接搜尋欄位名稱含「收益」
     if coupon_idx is None:
         for idx, col_name in enumerate(cols):
             if "收益" in str(col_name):
                 coupon_idx = idx
                 break
-    print(f"[DEBUG] coupon_idx={coupon_idx}")
     t1_idx, _ = find_col_index(cols, ["標的1", "ticker1"])
     trade_date_idx, _ = find_col_index(cols, ["交易日"])
     issue_date_idx, _ = find_col_index(cols, ["發行日"])
