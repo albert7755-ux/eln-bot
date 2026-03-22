@@ -85,8 +85,10 @@ def clean_name_str(val):
         return "貴賓"
     return s
 def find_col_index(columns, include_keywords, exclude_keywords=None):
+    import re as _re
     for idx, col_name in enumerate(columns):
-        col_str = str(col_name).strip().lower().replace(" ", "")
+        col_str = str(col_name).strip().lower()
+        col_str = col_str.replace("（","").replace("）","").replace("(","").replace(")","").replace("/","").replace("%","").replace(" ","").replace("　","").replace("*","").replace("＊","")
         if exclude_keywords:
             if any(ex in col_str for ex in exclude_keywords):
                 continue
@@ -126,7 +128,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     ko_type_idx, _ = find_col_index(cols, ["ko類型", "kotype"]) or find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko", "商品"])
     ki_idx, _ = find_col_index(cols, ["ki", "下檔"], exclude_keywords=["ko", "type"])
     ki_type_idx, _ = find_col_index(cols, ["ki類型", "kitype"])
-    coupon_idx, _ = find_col_index(cols, ["收益率", "coupon", "uf%", "uf"], exclude_keywords=["ko", "ki"])
+    coupon_idx, _ = find_col_index(cols, ["收益率", "coupon", "uf%", "uf", "年化", "紅利"], exclude_keywords=["ko", "ki"])
     t1_idx, _ = find_col_index(cols, ["標的1", "ticker1"])
     trade_date_idx, _ = find_col_index(cols, ["交易日"])
     issue_date_idx, _ = find_col_index(cols, ["發行日"])
