@@ -445,40 +445,38 @@ def generate_weekly_economic_calendar() -> str:
     fri = mon + timedelta(days=4)
     header_range = f"{mon.strftime('%m/%d')}－{fri.strftime('%m/%d')}"
 
+    # 產生每天的日期標籤，格式：03/23 (一)
+    weekday_short = ["一", "二", "三", "四", "五"]
+    day_labels = []
+    for i in range(5):
+        d = mon + timedelta(days=i)
+        day_labels.append(f"{d.strftime('%m/%d')} ({weekday_short[i]})")
+
     prompt = (
         f"今天是台北時間 {today.strftime('%Y年%m月%d日')}（週一）。\n\n"
-        "請用 web search 查詢本週（週一到週五）全球重要經濟數據與央行會議時程。\n\n"
+        "請用 web search 查詢本週（週一到週五）全球重要經濟數據、央行會議與重要財報。\n\n"
         "【篩選原則】\n"
-        "只列出市場真正在意的重要數據與事件，例如：\n"
-        "• 美國：CPI、PPI、PCE、非農就業、初領失業金、零售銷售、ISM PMI、FOMC利率決策\n"
+        "只列大型市場在意的重要事件，例如：\n"
+        "• 美國：CPI、PPI、PCE、非農就業、初領失業金、零售銷售、ISM PMI、FOMC利率決策、Fed官員談話\n"
         "• 歐元區：CPI、ECB利率決策、PMI\n"
         "• 中國：CPI、PPI、PMI、工業生產\n"
         "• 日本：BOJ利率決策、CPI\n"
         "• 英國：CPI、BOE利率決策\n"
-        "不重要的數據請勿列出。若某天真的沒有重要數據，寫「• 無重要數據」。\n\n"
-        "【每筆數據請附上以下資訊】\n"
-        "一般經濟數據格式：\n"
-        "• 🇺🇸 數據名稱（月份）｜預期：X% ／ 前值：X%\n"
-        "  → 若高於預期：[對市場的含義，例如「通膨偏強，不利降息」]\n"
-        "  → 若低於預期：[對市場的含義]\n\n"
-        "央行利率決策格式：\n"
-        "• 🇺🇸 FOMC 利率決策｜目前利率：X.XX%\n"
-        "  市場預期：[維持不變／升息／降息]（市場隱含機率約X%）\n"
-        "  → 若意外[升息/降息]：[對債市/股市/匯率的影響]\n\n"
-        f"本週日期：{' / '.join(week_dates)}\n\n"
-        "【輸出格式】必須完全如下，不得省略任何區塊：\n\n"
-        f"📅 本週重要經濟數據｜{header_range}\n\n"
-        f"{week_dates[0]}\n"
-        "• [數據或「無重要數據」]\n\n"
-        f"{week_dates[1]}\n"
-        "• [數據]\n\n"
-        f"{week_dates[2]}\n"
-        "• [數據]\n\n"
-        f"{week_dates[3]}\n"
-        "• [數據]\n\n"
-        f"{week_dates[4]}\n"
-        "• [數據]\n\n"
-        "💡 本週市場關注重點：[一句話總結本週最重磅事件與潛在市場影響]"
+        "• 重要財報：台積電、蘋果、微軟、英偉達、Meta等大型科技股或市場關注個股\n"
+        "不重要的數據請勿列出。若某天真的沒有重要事件，寫「無重要數據」。\n\n"
+        "【格式要求】非常重要，必須完全照以下格式輸出：\n\n"
+        f"📊 本週重要經濟數據｜{header_range}\n\n"
+        f"📌 {day_labels[0]} [事件1、事件2]\n"
+        f"📌 {day_labels[1]} [事件1、事件2]\n"
+        f"📌 {day_labels[2]} [事件1、事件2]\n"
+        f"📌 {day_labels[3]} [事件1、事件2]\n"
+        f"📌 {day_labels[4]} [事件1、事件2]\n\n"
+        "💡 本週關注重點：[一句話總結本週最重磅事件]\n\n"
+        "要求：\n"
+        "- 每天只用一行，不要換行分段\n"
+        "- 同一天多個事件用頓號（、）隔開\n"
+        "- 格式簡潔，不要加預期值或前值等細節\n"
+        "- 直接輸出，不要加任何前言或說明文字\n"
     )
 
     try:
@@ -528,6 +526,9 @@ def generate_report() -> tuple:
             print("Generating weekly economic calendar...")
             weekly_calendar = generate_weekly_economic_calendar()
             print("Weekly calendar done.")
+            # 週一：把經濟數據加在日報最前面
+            if weekly_calendar:
+                report_text = weekly_calendar + "\n\n" + "─" * 20 + "\n\n" + report_text
         except Exception as e:
             print(f"Weekly calendar error: {e}")
 
