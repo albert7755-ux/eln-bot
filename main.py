@@ -980,7 +980,8 @@ def handle_text_message(event):
                         "/eln result — 查看最近結果\n"
                         "/runnow — 手動執行追蹤\n"
                         "/tracklog — 查看最近排程紀錄\n"
-                        "/end YYYYMM — 查詢指定月份到期商品（例：/end 202604）"
+                        "/end YYYYMM — 查詢指定月份到期商品（例：/end 202604）\n"
+                        "/chart 商品代號 — 產生走勢圖+防守線（KO/KI/Strike）"
                     )
                 elif help_arg in ("report", "pdf", "報告", "簡報"):
                     msg = (
@@ -1168,8 +1169,6 @@ def handle_text_message(event):
                 from daily_report import generate_report, save_report_to_db
                 report, image_url, weekly_calendar = generate_report()
                 save_report_to_db(report)
-                if weekly_calendar:
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=weekly_calendar[:4900]))
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=report[:4900]))
                 if image_url:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📊 今日市場摘要圖\n{image_url}"))
@@ -1543,6 +1542,29 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"新聞抓取失敗: {e}"))
             return
+        if cmd.startswith("chart"):
+            parts = text_raw.split(" ", 1)
+            if len(parts) < 2 or not parts[1].strip():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="請輸入商品代號\n例：/chart WMGS25100246"
+                ))
+                return
+            bond_id = parts[1].strip().upper()
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=f"📊 正在產生 {bond_id} 走勢圖，請稍候..."
+            ))
+            try:
+                from eln_chart import generate_eln_chart
+                url = generate_eln_chart(bond_id, engine)
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                    text=f"📊 {bond_id} 防守線走勢圖\n\n🟢 綠線 = KO價\n🔴 紅線 = KI價\n🔵 藍線 = Strike\n\n{url}"
+                ))
+            except Exception as e:
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                    text=f"圖表產生失敗：{str(e)[:200]}"
+                ))
+            return
+
         if cmd.startswith("end"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
