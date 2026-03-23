@@ -28,9 +28,7 @@ def _safe_close_pair(symbol: str):
     prev_close = float(close.iloc[-2])
     last_close = float(close.iloc[-1])
 
-    if symbol == "^TNX":
-        prev_close = prev_close / 10.0
-        last_close = last_close / 10.0
+    # ^TNX 已是百分比格式（如 4.44 代表 4.44%），不需除以 10
 
     change = last_close - prev_close
     pct = (change / prev_close) * 100 if prev_close else 0.0
@@ -124,21 +122,43 @@ def build_market_snapshot(data):
     return "\n".join(lines)
 
 
-def generate_commentary_with_claude(snapshot_text: str) -> str:
+def generate_commentary_with_claude(snapshot_text: str, market_data: dict = None) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    # 把真實數據整理成給 Claude 的參考表
+    data_ref = ""
+    if market_data:
+        def fmt(d, suffix=""):
+            if not d:
+                return "N/A"
+            arrow = "上漲" if d["change"] >= 0 else "下跌"
+            return f"{d['price']:,.2f}{suffix}（{arrow} {abs(d['pct']):.2f}%）"
+        data_ref = (
+            "【以下是今日 yfinance 抓取的真實數據，撰寫新聞時必須與這些數字一致，不可自行更改】\n"
+            f"• 道瓊：{fmt(market_data.get('Dow Jones'))} 點\n"
+            f"• 標普500：{fmt(market_data.get('S&P 500'))} 點\n"
+            f"• 那斯達克：{fmt(market_data.get('NASDAQ'))} 點\n"
+            f"• 費城半導體：{fmt(market_data.get('SOX'))} 點\n"
+            f"• 美國10年期公債殖利率：{fmt(market_data.get('US10Y'), '%')}\n"
+            f"• 美元指數(DXY)：{fmt(market_data.get('DXY'))}\n"
+            f"• WTI原油：{fmt(market_data.get('WTI'))} 美元\n"
+            f"• 黃金：{fmt(market_data.get('Gold'))} 美元\n\n"
+        )
 
     prompt = (
         "你是一位專業的財經日報撰寫助理，服務對象是銀行分行的理財專員。\n\n"
-        "以下是今日固定版型的市場數據：\n\n"
+        "以下是今日固定版型的市場數據快照：\n\n"
         f"{snapshot_text}\n\n"
+        f"{data_ref}"
         "請上網搜尋最新、最相關的國際財經消息，再根據這些數據與新聞事件，撰寫以下內容。\n"
         "重點是要有新聞感與事件感，不要只寫空泛結論。\n\n"
         "請完成：\n"
-        "1. 開頭市場重點：用一段話（不超過2句）描述昨日整體行情走勢，語氣像晨會口頭摘要，必須點出最重要的交易主線，不要條列、不要分點，用流暢連貫的中文寫成一段。\n"
+        "1. 開頭市場重點：用一段話（不超過2句）描述昨日整體行情走勢，語氣像晨會口頭摘要，必須點出最重要的交易主線，不要條列、不要分點，用流暢連貫的中文寫成一段。必須引用上方真實數據的漲跌幅。\n"
         "2. 撰寫【總經總覽】：2-3句，必須提到具體事件或消息，例如聯準會官員談話、重要經濟數據、政策、關稅、地緣政治、油價變化等。\n"
-        "3. 撰寫【美國市場】：1-2句，必須點出美股漲跌主因，例如科技股、AI、銀行股、能源股、財報或特定新聞。\n"
-        "4. 撰寫【債券市場】：1-2句，必須說明美債殖利率變動背後的原因，並區分中短天期與長天期債券表現不一定一致；若只有10年期殖利率資訊，不可直接泛化成整體公債價格全面上揚或下跌。最後補一句固定收益商品的觀察重點。\n\n"
+        "3. 撰寫【美國市場】：1-2句，必須點出美股漲跌主因，引用上方真實的指數漲跌幅數字，例如科技股、AI、銀行股、能源股、財報或特定新聞。\n"
+        "4. 撰寫【債券市場】：1-2句，必須說明美債殖利率變動背後的原因，引用上方真實的殖利率數字，並區分中短天期與長天期債券表現不一定一致。最後補一句固定收益商品的觀察重點。\n\n"
         "要求：\n"
+        "- 所有數字必須與上方 yfinance 真實數據一致，不可自行更改或使用其他來源的數字。\n"
         "- 一定要具體，不要寫成空泛模板。\n"
         "- 優先使用最近24小時內最重要的財經新聞脈絡。\n"
         "- 不要亂編新聞，如果沒有明確事件，就誠實寫市場主要關注焦點。\n"
@@ -380,7 +400,7 @@ def upload_to_imgur(image_bytes: bytes) -> str:
 
 def build_final_report(data: dict) -> tuple:
     snapshot = build_market_snapshot(data)
-    commentary = generate_commentary_with_claude(snapshot)
+    commentary = generate_commentary_with_claude(snapshot, market_data=data)
 
     intro     = extract_section(commentary, "前言")
     macro     = extract_section(commentary, "總經總覽")
