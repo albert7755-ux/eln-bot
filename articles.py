@@ -200,7 +200,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   }
   .content-text {
     font-size: 13px;
-    color: var(--text3);
+    color: var(--text);
     line-height: 1.7;
     white-space: pre-wrap;
     word-break: break-all;
