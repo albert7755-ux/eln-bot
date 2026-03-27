@@ -1965,6 +1965,12 @@ def handle_text_message(event):
             return
         # ──────────────────────────────────────────────────────────
 
+        if cmd == "web":
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="📚 龍蝦文章庫\n\nhttps://eln-bot.onrender.com/articles"
+            ))
+            return
+
         if cmd == "forget":
             try:
                 with engine.begin() as conn:
