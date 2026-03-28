@@ -24,20 +24,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <style>
   :root {
-    --bg: #0f0f0f;
-    --bg2: #161616;
-    --bg3: #1e1e1e;
-    --border: #2a2a2a;
-    --border2: #333;
-    --gold: #c9a84c;
-    --gold2: #e8c96a;
-    --text: #e8e4dc;
-    --text2: #a09890;
-    --text3: #b0a898;
-    --red: #e05252;
-    --green: #52a878;
-    --blue: #5288e0;
-    --radius: 12px;
+    --bg: #f5f5f0;
+    --bg2: #ffffff;
+    --bg3: #f0ede8;
+    --border: #e0ddd8;
+    --border2: #d0cdc8;
+    --gold: #b8860b;
+    --gold2: #d4a017;
+    --text: #1a1a1a;
+    --text2: #555550;
+    --text3: #888880;
+    --red: #dc3545;
+    --green: #28a745;
+    --blue: #2563eb;
+    --orange: #e87020;
+    --purple: #7c3aed;
+    --radius: 14px;
+    --shadow: 0 2px 12px rgba(0,0,0,0.08);
+    --shadow2: 0 4px 20px rgba(0,0,0,0.12);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -48,27 +52,41 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     font-size: 15px;
     line-height: 1.7;
   }
+
+  /* ── 頂部 ── */
   .topbar {
-    background: var(--bg2);
-    border-bottom: 1px solid var(--border);
-    padding: 16px 20px;
+    background: linear-gradient(135deg, #ff6b35 0%, #f7c59f 50%, #efefd0 100%);
+    padding: 18px 24px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     position: sticky;
     top: 0;
     z-index: 100;
+    box-shadow: var(--shadow);
   }
   .topbar-logo {
     font-family: 'Noto Serif TC', serif;
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 700;
-    color: var(--gold);
+    color: #fff;
     letter-spacing: 0.05em;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.2);
   }
-  .topbar-sub { font-size: 12px; color: var(--text3); margin-top: 2px; }
-  .topbar-stats { display: flex; gap: 16px; font-size: 13px; color: var(--text2); }
-  .stat-num { color: var(--gold); font-weight: 500; }
+  .topbar-sub { font-size: 12px; color: rgba(255,255,255,0.85); margin-top: 2px; }
+  .topbar-stats { display: flex; gap: 16px; }
+  .stat-pill {
+    background: rgba(255,255,255,0.35);
+    backdrop-filter: blur(8px);
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    color: #fff;
+    font-weight: 500;
+  }
+  .stat-num { font-weight: 700; }
+
+  /* ── 篩選列 ── */
   .filterbar {
     background: var(--bg2);
     border-bottom: 1px solid var(--border);
@@ -77,35 +95,48 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     gap: 8px;
     flex-wrap: wrap;
     align-items: center;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.05);
   }
   .search-box {
     flex: 1; min-width: 160px;
-    padding: 6px 14px;
-    border-radius: 20px;
-    border: 1px solid var(--border2);
+    padding: 7px 16px;
+    border-radius: 24px;
+    border: 1.5px solid var(--border2);
     background: var(--bg3);
     color: var(--text);
     font-size: 13px;
     font-family: 'Noto Sans TC', sans-serif;
     outline: none;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, box-shadow 0.15s;
   }
-  .search-box:focus { border-color: var(--gold); }
+  .search-box:focus { border-color: #ff6b35; box-shadow: 0 0 0 3px rgba(255,107,53,0.12); }
   .search-box::placeholder { color: var(--text3); }
+
   .filter-btn {
-    padding: 5px 13px;
+    padding: 6px 14px;
     border-radius: 20px;
-    border: 1px solid var(--border2);
-    background: transparent;
+    border: 1.5px solid var(--border2);
+    background: var(--bg2);
     color: var(--text2);
     font-size: 12px;
     cursor: pointer;
     font-family: 'Noto Sans TC', sans-serif;
     transition: all 0.15s;
     white-space: nowrap;
+    font-weight: 500;
   }
-  .filter-btn:hover { border-color: var(--gold); color: var(--gold); }
-  .filter-btn.active { background: var(--gold); border-color: var(--gold); color: #000; font-weight: 500; }
+  .filter-btn:hover { border-color: #ff6b35; color: #ff6b35; background: #fff5f2; }
+  .filter-btn.active { background: #ff6b35; border-color: #ff6b35; color: #fff; }
+  .filter-btn.f-finance.active { background: #2563eb; border-color: #2563eb; }
+  .filter-btn.f-finance:hover { border-color: #2563eb; color: #2563eb; background: #eff6ff; }
+  .filter-btn.f-food.active { background: #e8a020; border-color: #e8a020; }
+  .filter-btn.f-food:hover { border-color: #e8a020; color: #e8a020; background: #fffbeb; }
+  .filter-btn.f-travel.active { background: #28a745; border-color: #28a745; }
+  .filter-btn.f-travel:hover { border-color: #28a745; color: #28a745; background: #f0fdf4; }
+  .filter-btn.f-shopping.active { background: #7c3aed; border-color: #7c3aed; }
+  .filter-btn.f-shopping:hover { border-color: #7c3aed; color: #7c3aed; background: #faf5ff; }
+
+  /* ── 視圖切換 ── */
   .viewbar {
     background: var(--bg2);
     border-bottom: 1px solid var(--border);
@@ -114,112 +145,128 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     gap: 8px;
   }
   .view-btn {
-    padding: 5px 14px;
-    border-radius: 8px;
-    border: 1px solid var(--border2);
-    background: transparent;
+    padding: 6px 16px;
+    border-radius: 10px;
+    border: 1.5px solid var(--border2);
+    background: var(--bg2);
     color: var(--text2);
     font-size: 13px;
     cursor: pointer;
     font-family: 'Noto Sans TC', sans-serif;
     transition: all 0.15s;
+    font-weight: 500;
   }
-  .view-btn.active { background: var(--bg3); border-color: var(--gold); color: var(--gold); }
-  .articles-wrap {
-    max-width: 760px;
-    margin: 0 auto;
-    padding: 16px 16px 60px;
-  }
+  .view-btn:hover { border-color: #ff6b35; color: #ff6b35; }
+  .view-btn.active { background: #fff5f2; border-color: #ff6b35; color: #ff6b35; }
+
+  /* ── 文章列表 ── */
+  .articles-wrap { max-width: 780px; margin: 0 auto; padding: 18px 16px 60px; }
   .article-card {
     background: var(--bg2);
-    border: 1px solid var(--border);
+    border: 1.5px solid var(--border);
     border-radius: var(--radius);
-    margin-bottom: 10px;
+    margin-bottom: 12px;
     overflow: hidden;
-    transition: border-color 0.15s;
+    transition: box-shadow 0.2s, border-color 0.2s, transform 0.15s;
     cursor: pointer;
+    box-shadow: var(--shadow);
   }
-  .article-card:hover { border-color: var(--border2); }
-  .article-card.read { opacity: 0.5; }
-  .card-header { padding: 14px 16px 10px; display: flex; align-items: flex-start; gap: 10px; }
-  .card-icon { font-size: 18px; margin-top: 2px; flex-shrink: 0; }
+  .article-card:hover { box-shadow: var(--shadow2); border-color: #ff6b35; transform: translateY(-1px); }
+  .article-card.read { opacity: 0.6; }
+
+  /* 左側彩色邊條 */
+  .article-card.cat-finance { border-left: 4px solid #2563eb; }
+  .article-card.cat-food    { border-left: 4px solid #e8a020; }
+  .article-card.cat-travel  { border-left: 4px solid #28a745; }
+  .article-card.cat-shopping{ border-left: 4px solid #7c3aed; }
+  .article-card.cat-other   { border-left: 4px solid #aaa; }
+
+  .card-header { padding: 14px 16px 10px; display: flex; align-items: flex-start; gap: 12px; }
+  .card-icon { font-size: 22px; margin-top: 1px; flex-shrink: 0; }
   .card-main { flex: 1; min-width: 0; }
   .card-title {
     font-family: 'Noto Serif TC', serif;
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text);
-    line-height: 1.4;
-    margin-bottom: 5px;
-    word-break: break-all;
+    font-size: 15px; font-weight: 600;
+    color: var(--text); line-height: 1.4;
+    margin-bottom: 6px; word-break: break-all;
   }
-  .card-meta { display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--text3); align-items: center; }
-  .badge { padding: 2px 7px; border-radius: 10px; font-size: 11px; font-weight: 500; }
-  .badge-unread { background: rgba(201,168,76,0.15); color: var(--gold); border: 1px solid rgba(201,168,76,0.3); }
-  .badge-read { background: rgba(106,98,96,0.2); color: var(--text3); border: 1px solid var(--border); }
-  .badge-url { background: rgba(82,136,224,0.15); color: var(--blue); border: 1px solid rgba(82,136,224,0.3); }
-  .badge-image { background: rgba(82,168,120,0.15); color: var(--green); border: 1px solid rgba(82,168,120,0.3); }
-  .badge-text { background: rgba(160,152,144,0.15); color: var(--text2); border: 1px solid var(--border2); }
-  .badge-finance { background: rgba(82,136,224,0.12); color: #7aabf0; border: 1px solid rgba(82,136,224,0.25); }
-  .badge-food { background: rgba(224,140,82,0.12); color: #f0b07a; border: 1px solid rgba(224,140,82,0.25); }
-  .badge-travel { background: rgba(82,168,120,0.12); color: var(--green); border: 1px solid rgba(82,168,120,0.25); }
-  .badge-shopping { background: rgba(168,82,168,0.12); color: #c07af0; border: 1px solid rgba(168,82,168,0.25); }
-  .badge-other { background: rgba(160,152,144,0.12); color: var(--text2); border: 1px solid var(--border2); }
-  .location-tag { color: var(--green); font-size: 11px; }
-  .card-body { display: none; border-top: 1px solid var(--border); }
+  .card-meta { display: flex; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--text3); align-items: center; }
+
+  .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge-unread { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }
+  .badge-read   { background: #f0f0f0; color: #888; border: 1px solid #ddd; }
+  .badge-finance  { background: #dbeafe; color: #1d4ed8; border: 1px solid #93c5fd; }
+  .badge-food     { background: #fef9c3; color: #92400e; border: 1px solid #fcd34d; }
+  .badge-travel   { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+  .badge-shopping { background: #f3e8ff; color: #6b21a8; border: 1px solid #c4b5fd; }
+  .badge-other    { background: #f3f4f6; color: #6b7280; border: 1px solid #d1d5db; }
+  .badge-url   { background: #dbeafe; color: #1d4ed8; border: 1px solid #93c5fd; }
+  .badge-image { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+  .badge-text  { background: #f3f4f6; color: #6b7280; border: 1px solid #d1d5db; }
+  .location-tag { color: #28a745; font-size: 11px; font-weight: 500; }
+
+  /* ── 展開內容 ── */
+  .card-body { display: none; border-top: 1.5px solid var(--border); background: #fafaf8; }
   .card-body.open { display: block; }
   .section { padding: 12px 16px; }
   .section + .section { border-top: 1px solid var(--border); }
   .section-label {
-    font-size: 11px; font-weight: 500;
+    font-size: 11px; font-weight: 600;
     letter-spacing: 0.08em; color: var(--text3);
     text-transform: uppercase; margin-bottom: 6px;
   }
-  .summary-text { font-size: 14px; color: var(--text2); line-height: 1.75; white-space: pre-wrap; word-break: break-all; }
+  .summary-text { font-size: 14px; color: var(--text2); line-height: 1.8; white-space: pre-wrap; word-break: break-all; }
   .content-text {
     font-size: 13px; color: var(--text); line-height: 1.7;
     white-space: pre-wrap; word-break: break-all;
     max-height: 280px; overflow-y: auto;
   }
-  .content-text a { color: var(--blue); word-break: break-all; }
+  .content-text a { color: var(--blue); }
   .content-text::-webkit-scrollbar { width: 4px; }
   .content-text::-webkit-scrollbar-track { background: transparent; }
   .content-text::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
   .card-actions {
-    padding: 8px 16px; border-top: 1px solid var(--border);
+    padding: 10px 16px; border-top: 1px solid var(--border);
     display: flex; gap: 8px; justify-content: flex-end;
+    background: var(--bg2);
   }
-  .btn { padding: 5px 14px; border-radius: 8px; border: none; font-size: 13px; font-family: 'Noto Sans TC', sans-serif; cursor: pointer; transition: all 0.15s; }
-  .btn-mark { background: var(--gold); color: #000; font-weight: 500; }
-  .btn-mark:hover { background: var(--gold2); }
-  .btn-mark:disabled { background: var(--border2); color: var(--text3); cursor: default; }
-  .btn-del { background: transparent; border: 1px solid var(--border2); color: var(--text3); }
-  .btn-del:hover { border-color: var(--red); color: var(--red); }
+  .btn { padding: 6px 16px; border-radius: 8px; border: none; font-size: 13px; font-family: 'Noto Sans TC', sans-serif; cursor: pointer; transition: all 0.15s; font-weight: 500; }
+  .btn-mark { background: #ff6b35; color: #fff; }
+  .btn-mark:hover { background: #e85520; }
+  .btn-mark:disabled { background: #e0e0e0; color: #aaa; cursor: default; }
+  .btn-del { background: #fff; border: 1.5px solid var(--border2); color: var(--text3); }
+  .btn-del:hover { border-color: var(--red); color: var(--red); background: #fff5f5; }
+
+  /* ── 地圖 ── */
   #map-view { display: none; }
-  #map { height: calc(100vh - 165px); width: 100%; }
+  #map { height: calc(100vh - 168px); width: 100%; }
   .leaflet-popup-content-wrapper {
-    background: #1e1e1e !important; color: #e8e4dc !important;
-    border: 1px solid #333 !important; border-radius: 10px !important;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.5) !important;
+    background: #fff !important; color: #1a1a1a !important;
+    border-radius: 12px !important;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.15) !important;
   }
-  .leaflet-popup-tip { background: #1e1e1e !important; }
-  .popup-title { font-family: 'Noto Serif TC', serif; font-size: 14px; font-weight: 600; margin-bottom: 4px; color: #e8e4dc; }
-  .popup-cat { font-size: 11px; color: #b0a898; margin-bottom: 6px; }
-  .popup-summary { font-size: 12px; color: #a09890; line-height: 1.5; max-height: 100px; overflow-y: auto; }
+  .popup-title { font-family: 'Noto Serif TC', serif; font-size: 14px; font-weight: 700; margin-bottom: 4px; color: #1a1a1a; }
+  .popup-cat { font-size: 11px; color: #888; margin-bottom: 6px; }
+  .popup-summary { font-size: 12px; color: #555; line-height: 1.5; max-height: 100px; overflow-y: auto; }
+
+  /* ── 空狀態 ── */
   .empty { text-align: center; padding: 60px 20px; color: var(--text3); }
-  .empty-icon { font-size: 48px; margin-bottom: 12px; }
-  .map-empty {
-    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
-    text-align: center; color: #b0a898; z-index: 1000; pointer-events: none;
-  }
+  .empty-icon { font-size: 52px; margin-bottom: 14px; }
+  .empty-text { font-size: 15px; color: var(--text2); }
+
+  /* ── Toast ── */
   .toast {
     position: fixed; bottom: 24px; left: 50%;
     transform: translateX(-50%) translateY(80px);
-    background: var(--bg3); border: 1px solid var(--border2);
-    color: var(--text); padding: 10px 20px; border-radius: 20px;
-    font-size: 13px; transition: transform 0.3s ease; z-index: 1000; white-space: nowrap;
+    background: #333; color: #fff;
+    padding: 10px 22px; border-radius: 24px;
+    font-size: 13px; transition: transform 0.3s ease;
+    z-index: 1000; white-space: nowrap;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
   }
   .toast.show { transform: translateX(-50%) translateY(0); }
+
   @media (max-width: 480px) {
     .topbar-stats { display: none; }
     .filterbar { padding: 8px 12px; }
@@ -235,20 +282,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="topbar-sub">Albert 的閱讀 & 探索清單</div>
   </div>
   <div class="topbar-stats">
-    <span>全部 <span class="stat-num" id="cnt-all">0</span></span>
-    <span>未讀 <span class="stat-num" id="cnt-unread">0</span></span>
-    <span>有地點 <span class="stat-num" id="cnt-loc">0</span></span>
+    <div class="stat-pill">全部 <span class="stat-num" id="cnt-all">0</span></div>
+    <div class="stat-pill">未讀 <span class="stat-num" id="cnt-unread">0</span></div>
+    <div class="stat-pill">📍 <span class="stat-num" id="cnt-loc">0</span> 個地點</div>
   </div>
 </div>
 
 <div class="filterbar">
-  <input class="search-box" type="text" placeholder="搜尋標題、地點、內容..." id="search-input" oninput="renderArticles()">
+  <input class="search-box" type="text" placeholder="🔍 搜尋標題、地點、內容..." id="search-input" oninput="renderArticles()">
   <button class="filter-btn active" onclick="setFilter('all',this)">全部</button>
   <button class="filter-btn" onclick="setFilter('unread',this)">未讀</button>
-  <button class="filter-btn" onclick="setFilter('finance',this)">📊 財經</button>
-  <button class="filter-btn" onclick="setFilter('food',this)">🍜 美食</button>
-  <button class="filter-btn" onclick="setFilter('travel',this)">📍 旅遊</button>
-  <button class="filter-btn" onclick="setFilter('shopping',this)">🛍️ 購物</button>
+  <button class="filter-btn f-finance" onclick="setFilter('finance',this)">📊 財經</button>
+  <button class="filter-btn f-food" onclick="setFilter('food',this)">🍜 美食</button>
+  <button class="filter-btn f-travel" onclick="setFilter('travel',this)">📍 旅遊</button>
+  <button class="filter-btn f-shopping" onclick="setFilter('shopping',this)">🛍️ 購物</button>
   <button class="filter-btn" onclick="setFilter('other',this)">其他</button>
 </div>
 
@@ -263,7 +310,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<div id="map-view" style="position:relative;">
+<div id="map-view">
   <div id="map"></div>
 </div>
 
@@ -281,6 +328,7 @@ const catIcon  = { finance:'📊', food:'🍜', travel:'📍', shopping:'🛍️
 const catLabel = { finance:'財經', food:'美食', travel:'旅遊', shopping:'購物', other:'其他' };
 const srcIcon  = { url:'🔗', image:'🖼️', text:'📝' };
 const srcLabel = { url:'網址', image:'圖片', text:'文字' };
+const catColor = { finance:'#2563eb', food:'#e8a020', travel:'#28a745', shopping:'#7c3aed', other:'#aaa' };
 
 function fmt(iso) {
   const d = new Date(iso);
@@ -305,7 +353,7 @@ function getFiltered() {
 function updateStats() {
   document.getElementById('cnt-all').textContent = ARTICLES.length;
   document.getElementById('cnt-unread').textContent = ARTICLES.filter(a=>!a.is_read).length;
-  document.getElementById('cnt-loc').textContent = ARTICLES.filter(a=>a.location_name).length;
+  document.getElementById('cnt-loc').textContent = ARTICLES.filter(a=>a.lat&&a.lng).length;
 }
 function renderArticles() {
   updateStats();
@@ -313,14 +361,15 @@ function renderArticles() {
   const filtered = getFiltered();
   const container = document.getElementById('articles-container');
   if (!filtered.length) {
-    container.innerHTML = `<div class="empty"><div class="empty-icon">📭</div><div>沒有符合的文章</div></div>`;
+    container.innerHTML = `<div class="empty"><div class="empty-icon">📭</div><div class="empty-text">沒有符合的文章</div></div>`;
     return;
   }
   container.innerHTML = filtered.map(a => {
     const ci = catIcon[a.category]||'📄';
-    const catB = `<span class="badge badge-${a.category||'other'}">${ci} ${catLabel[a.category]||'其他'}</span>`;
+    const cat = a.category||'other';
+    const catB = `<span class="badge badge-${cat}">${ci} ${catLabel[cat]||'其他'}</span>`;
     const srcB = `<span class="badge badge-${a.source_type||'text'}">${srcIcon[a.source_type]||'📄'} ${srcLabel[a.source_type]||'文字'}</span>`;
-    const readB = a.is_read ? `<span class="badge badge-read">已讀</span>` : `<span class="badge badge-unread">未讀</span>`;
+    const readB = a.is_read ? `<span class="badge badge-read">✓ 已讀</span>` : `<span class="badge badge-unread">● 未讀</span>`;
     const locT = a.location_name ? `<span class="location-tag">📍 ${esc(a.location_name)}</span>` : '';
     let contentBlock = '';
     if (a.source_type==='url' && a.content && a.content.startsWith('http')) {
@@ -332,7 +381,7 @@ function renderArticles() {
     }
     const md = a.is_read ? 'disabled' : '';
     const mt = a.is_read ? '✅ 已讀' : '標記已讀';
-    return `<div class="article-card${a.is_read?' read':''}" id="card-${a.id}">
+    return `<div class="article-card cat-${cat}${a.is_read?' read':''}" id="card-${a.id}">
       <div class="card-header" onclick="toggleCard(${a.id})">
         <div class="card-icon">${ci}</div>
         <div class="card-main">
@@ -347,7 +396,7 @@ function renderArticles() {
         </div>
         ${contentBlock}
         <div class="card-actions">
-          <button class="btn btn-del" onclick="deleteArticle(${a.id},event)">刪除</button>
+          <button class="btn btn-del" onclick="deleteArticle(${a.id},event)">🗑️ 刪除</button>
           <button class="btn btn-mark" id="btn-${a.id}" onclick="markRead(${a.id},event)" ${md}>${mt}</button>
         </div>
       </div>
@@ -357,8 +406,8 @@ function renderArticles() {
 function renderMap() {
   if (!map) {
     map = L.map('map').setView([23.5, 121], 7);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution:'© OpenStreetMap © CARTO', maxZoom:19
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution:'© OpenStreetMap contributors', maxZoom:19
     }).addTo(map);
   }
   markers.forEach(m => map.removeLayer(m));
@@ -367,13 +416,18 @@ function renderMap() {
   if (!filtered.length) return;
   const bounds = [];
   filtered.forEach(a => {
-    const ci = catIcon[a.category]||'📍';
+    const cat = a.category||'other';
+    const ci = catIcon[cat]||'📍';
+    const color = catColor[cat]||'#aaa';
     const m = L.marker([a.lat, a.lng], {
-      icon: L.divIcon({ html:`<div style="font-size:26px;line-height:1;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.5))">${ci}</div>`, className:'', iconSize:[32,32], iconAnchor:[16,16] })
+      icon: L.divIcon({
+        html:`<div style="font-size:28px;line-height:1;filter:drop-shadow(0 2px 6px rgba(0,0,0,0.3))">${ci}</div>`,
+        className:'', iconSize:[36,36], iconAnchor:[18,18]
+      })
     }).addTo(map);
     m.bindPopup(`
       <div class="popup-title">${esc(a.title||'無標題')}</div>
-      <div class="popup-cat">${ci} ${catLabel[a.category]||''} · ${esc(a.location_name||'')}</div>
+      <div class="popup-cat">${ci} ${catLabel[cat]||''} · ${esc(a.location_name||'')}</div>
       <div class="popup-summary">${esc((a.summary||'').slice(0,200))}</div>
     `);
     markers.push(m);
