@@ -1020,7 +1020,7 @@ def handle_text_message(event):
                         "輸入 /help alert 看完整範例\n"
                         "─────────────────\n"
                         "📧 其他\n"
-                        "/mail  /invest  /forget\n"
+                        "/mail  /invest  /forget  /spending\n"
                         "上傳錄音 → 自動逐字稿 / 摘要\n"
                         "上傳檔案 → 自動分析\n"
                         "─────────────────\n"
