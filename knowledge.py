@@ -18,11 +18,13 @@ CHROMA_DIR = BASE_DIR / "chroma_db"
 for d in [UPLOAD_DIR, PAGES_DIR, CHROMA_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-# ── ChromaDB ──
+# ── ChromaDB：改用多語言 embedding 模型 ──
 chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-embedding_fn = embedding_functions.DefaultEmbeddingFunction()
+embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+    model_name="paraphrase-multilingual-MiniLM-L12-v2"
+)
 collection = chroma_client.get_or_create_collection(
-    name="knowledge_base",
+    name="knowledge_base_v2",
     embedding_function=embedding_fn,
     metadata={"hnsw:space": "cosine"}
 )
@@ -73,7 +75,7 @@ def process_image_file(img_path: Path):
     media_type = media_map.get(suffix, "image/png")
 
     response = claude_client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-sonnet-4-20250514",
         max_tokens=1000,
         messages=[{
             "role": "user",
@@ -86,16 +88,39 @@ def process_image_file(img_path: Path):
     return [{"page": 0, "text": response.content[0].text}]
 
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100):
-    """切割文字成小段"""
-    words = text.split()
+def chunk_text(text: str, chunk_size: int = 300, overlap: int = 50) -> list[str]:
+    """
+    中文友善的切割方式：
+    - 按字數切（不用空格）
+    - 優先在句號、換行處切割
+    - overlap 讓相鄰段落有重疊，避免答案被切斷
+    """
+    # 先按段落切
+    paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+    
     chunks = []
-    start = 0
-    while start < len(words):
-        chunk = " ".join(words[start:start + chunk_size])
-        chunks.append(chunk)
-        start += chunk_size - overlap
-    return chunks
+    current = ""
+    
+    for para in paragraphs:
+        # 如果加入這段還不超過限制，直接合併
+        if len(current) + len(para) <= chunk_size:
+            current = current + para if not current else current + "\n" + para
+        else:
+            # 先把現有的存起來
+            if current:
+                chunks.append(current)
+            # 如果單一段落超過限制，按字數強制切
+            if len(para) > chunk_size:
+                for i in range(0, len(para), chunk_size - overlap):
+                    chunks.append(para[i:i + chunk_size])
+                current = para[-(overlap):]  # 保留結尾作為下一段的開頭
+            else:
+                current = para
+    
+    if current:
+        chunks.append(current)
+    
+    return [c for c in chunks if len(c.strip()) > 10]  # 過濾太短的段落
 
 
 def process_and_index_file(filename: str, file_bytes: bytes) -> dict:
@@ -154,8 +179,8 @@ def process_and_index_file(filename: str, file_bytes: bytes) -> dict:
     }
 
 
-def query_knowledge(question: str, top_k: int = 5) -> dict:
-    """問問題，從資料庫找答案"""
+def query_knowledge(question: str, top_k: int = 8) -> dict:
+    """問問題，從資料庫找答案（搜尋更多段落）"""
     count = collection.count()
     if count == 0:
         return {"answer": "資料庫中尚無任何文件，請先上傳。", "sources": []}
@@ -192,15 +217,15 @@ def query_knowledge(question: str, top_k: int = 5) -> dict:
 你只能根據使用者提供的文件內容來回答問題。
 如果提供的資料中找不到答案，請明確說「資料庫中無此資訊」。
 絕對不能使用任何外部知識或自行推測。
-請用繁體中文回答，並標明資訊來自哪個文件的哪一頁。"""
+請用繁體中文回答，盡量詳細完整，並標明資訊來自哪個文件的哪一頁。"""
 
     response = claude_client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=2000,
+        model="claude-sonnet-4-20250514",
+        max_tokens=3000,
         system=system_prompt,
         messages=[{
             "role": "user",
-            "content": f"以下是資料庫中找到的相關內容：\n\n{context}\n\n問題：{question}"
+            "content": f"以下是資料庫中找到的相關內容：\n\n{context}\n\n問題：{question}\n\n請根據以上內容詳細回答，不要省略重要細節。"
         }]
     )
 
