@@ -1715,6 +1715,64 @@ def handle_text_message(event):
             reply = ai_router(forced_prompt, chat_key=ck, forced_model=cmd)
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🦞 龍蝦（{model_map[cmd]}）\n\n{reply[:4700]}"))
             return
+        if cmd == "kb":
+            parts = text_raw.split(" ", 1)
+            if len(parts) < 2 or not parts[1].strip():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="📚 知識庫查詢\n\n用法：/kb 你的問題\n\n例：/kb PIMCO收益基金的投資策略是什麼？"
+                ))
+                return
+            query = parts[1].strip()
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📚 查詢知識庫中，請稍候..."))
+            try:
+                result = knowledge.query_knowledge(query)
+                answer = result.get("answer", "查無結果")
+                sources = result.get("sources", [])
+                src_text = ""
+                if sources:
+                    src_text = "\n\n📍 來源：" + "、".join(
+                        [f"{s['filename']} 第{s['page']}頁" for s in sources[:3]]
+                    )
+                _bot_api.push_message(
+                    ck.split(":", 1)[1],
+                    TextSendMessage(text=f"📚 知識庫\n\n{answer[:4500]}{src_text}")
+                )
+            except Exception as e:
+                _bot_api.push_message(
+                    ck.split(":", 1)[1],
+                    TextSendMessage(text=f"❌ 查詢失敗：{str(e)[:200]}")
+                )
+            return
+
+        if cmd == "kb":
+            parts = text_raw.split(" ", 1)
+            if len(parts) < 2 or not parts[1].strip():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="📚 知識庫查詢\n\n用法：/kb 你的問題\n\n例：/kb PIMCO收益基金的投資策略是什麼？"
+                ))
+                return
+            query = parts[1].strip()
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📚 查詢知識庫中，請稍候..."))
+            try:
+                result = knowledge.query_knowledge(query)
+                answer = result.get("answer", "查無結果")
+                sources = result.get("sources", [])
+                src_text = ""
+                if sources:
+                    src_text = "\n\n📍 來源：" + "、".join(
+                        [f"{s['filename']} 第{s['page']}頁" for s in sources[:3]]
+                    )
+                _bot_api.push_message(
+                    ck.split(":", 1)[1],
+                    TextSendMessage(text=f"📚 知識庫\n\n{answer[:4500]}{src_text}")
+                )
+            except Exception as e:
+                _bot_api.push_message(
+                    ck.split(":", 1)[1],
+                    TextSendMessage(text=f"❌ 查詢失敗：{str(e)[:200]}")
+                )
+            return
+
         if cmd == "forget":
             try:
                 with engine.begin() as conn:
