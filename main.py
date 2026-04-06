@@ -1,10 +1,14 @@
+import knowledge
+from fastapi import Form
 import os
 import re
 import json
 import traceback as _traceback
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage, ImageMessage, AudioMessage
@@ -72,7 +76,6 @@ elif DATABASE_URL.startswith("postgresql://"):
 # 龍蝦主Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
 # ── ELN Auto-Tracking 群組 Bot（第二個 handler）──
 ELN_GROUP_CHANNEL_SECRET = os.getenv("AGENT_LINE_CHANNEL_SECRET", "")
 ELN_GROUP_ACCESS_TOKEN = os.getenv("AGENT_LINE_CHANNEL_ACCESS_TOKEN", "")
@@ -257,19 +260,12 @@ def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str, str]]
         LIMIT :lim
         """), {"k": chat_key, "lim": int(limit)}).fetchall()
     return [(r[0], r[1], r[2]) for r in rows] if rows else []
-
 def bond_status_tag(detail: str) -> str:
-    """
-    根據 detail 文字判斷整張商品狀態，回傳標記。
-    狀態文字在兩條 ---------------- 之間。
-    """
-    # 擷取狀態區段（兩條分隔線之間）
     import re as _re
     status_block = ""
     m = _re.search(r"-{4,}\n(.*?)\n-{4,}", detail, _re.S)
     if m:
         status_block = m.group(1).strip()
-    # 判斷順序：提前KO > 到期 > 其他
     if "提前出場" in status_block or "🎉" in status_block:
         return " ✅提前KO"
     if "到期獲利" in status_block:
@@ -382,11 +378,8 @@ async def callback(request: Request):
         return "OK"
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
-
-# 用 threading.local 記錄當前使用哪個 bot_api
 import threading
 _current_bot_api = threading.local()
-
 @app.post("/callback2")
 async def callback2(request: Request):
     """ELN Auto-Tracking - skip signature check"""
@@ -627,7 +620,6 @@ SPENDING_NL_KEYWORDS = [
     "消費明細", "花了多少", "這個月花", "上個月花", "消費分析",
     "帳單分析", "錢花到哪", "月度消費", "消費統計"
 ]
-
 AUTO_FINANCE_KEYWORDS = [
     "財經", "市場", "美股", "台股", "債券", "殖利率", "基金", "匯率", "美元",
     "聯準會", "fed", "fomc", "通膨", "cpi", "pce", "非農", "失業率",
@@ -1107,21 +1099,6 @@ def handle_text_message(event):
                 result_text += "\n\n✅ 所有通知已處理完畢"
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=result_text))
             return
-        if cmd == "send" and len(parts) > 1 and parts[1].strip().lower() == "list":
-            with engine.begin() as conn:
-                rows = conn.execute(text(
-                    "SELECT id, agent_name, bond_id, status "
-                    "FROM eln_pending_notifications WHERE chat_key=:k ORDER BY id"
-                ), {"k": ck}).fetchall()
-            if not rows:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有待確認的通知。"))
-            else:
-                lines = [f"📋 待確認通知（{len(rows)}筆）\n"]
-                for i, row in enumerate(rows, start=1):
-                    lines.append(f"{i}️⃣ {row.agent_name} | {row.bond_id} | {row.status}\n  /send {i}　/skip {i}")
-                lines.append("\n/send all 全部發送　/skip all 全部略過")
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n\n".join(lines)))
-            return
         if cmd == "invest":
             db_invest_set(ck, "await_image")
             _bot_api.reply_message(event.reply_token, TextSendMessage(
@@ -1149,7 +1126,6 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"生成失敗：{str(e)[:200]}"))
             return
-        # ── DAILY REPORT ──────────────────────────────────────────
         if cmd.startswith("daily"):
             parts = text_raw.split(" ", 1)
             use_cache = len(parts) > 1 and parts[1].strip().lower() == "cache"
@@ -1181,7 +1157,6 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"日報產生失敗: {e}"))
             return
-        # ──────────────────────────────────────────────────────────
         if cmd == "settarget":
             targets = load_targets()
             if event.source.type == "group":
@@ -1246,12 +1221,10 @@ def handle_text_message(event):
             if not bonds:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無已保存結果。請先 /calc 上傳 Excel。"))
                 return
-            # 建立 bond_id -> (detail, status_tag) 對照
             detail_map = {}
             for bond_id, agent_raw, detail in bonds:
                 detail_map[bond_id] = bond_status_tag(detail)
             if name_filter:
-                # 按姓名查詢模式
                 matched = []
                 seen = set()
                 for bond_id, agent_raw, detail in bonds:
@@ -1267,7 +1240,6 @@ def handle_text_message(event):
                     lines.append(f"   • {b}{tag}")
                 full_text = "\n".join(lines)
             else:
-                # 全部模式，按理專分組
                 grouped = defaultdict(list)
                 for bond_id, agent_raw, detail in bonds:
                     agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()]
@@ -1537,17 +1509,6 @@ def handle_text_message(event):
                 text="價格警示指令：\n/alert add <標的> <價格> <above/below>\n/alert add <標的> <above/below> <價格>\n/alert add <標的> ma20 <above/below>\n/alert add <標的> ma5 cross ma20\n/alert add <標的> ma5 under ma20\n/alert list → 查看清單\n/alert del <編號> → 刪除\n\n別名：dxy / spx / ndx / sox / vix / ust10y / gold / silver / oil\n\n範例：\n/alert add dxy below 100\n/alert add ust10y above 45\n/alert add NVDA ma20 above\n/alert add NVDA ma5 cross ma20"
             ))
             return
-        if cmd == "news pdf" or cmd == "news":
-            from news_fetcher import generate_news_report
-            from pdf_generator import create_and_upload_pdf
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="正在抓取最新財經新聞並整理中，請稍候約30秒..."))
-            try:
-                report = generate_news_report()
-                link = create_and_upload_pdf("news", report)
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📰 今日財經新聞摘要 PDF 已產生！\n\n{link}"))
-            except Exception as e:
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"新聞抓取失敗: {e}"))
-            return
         if cmd.startswith("chart"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
@@ -1570,7 +1531,6 @@ def handle_text_message(event):
                     text=f"圖表產生失敗：{str(e)[:200]}"
                 ))
             return
-
         if cmd.startswith("spending"):
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text="💳 正在分析你的消費明細，請稍候約30秒..."
@@ -1582,7 +1542,6 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 消費分析失敗：{str(e)[:200]}"))
             return
-
         if cmd.startswith("end"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
@@ -1594,7 +1553,6 @@ def handle_text_message(event):
                 return
             year = query_month[:4]
             month = query_month[4:]
-            # 從 eln_detail 搜尋 detail 欄位包含該年月的商品
             with engine.begin() as conn:
                 rows = conn.execute(text("""
                 SELECT bond_id, agent_name, detail FROM eln_detail
@@ -1607,7 +1565,6 @@ def handle_text_message(event):
             matched = []
             search_str = f"{year}-{month}"
             for bond_id, agent_name, detail in rows:
-                # 搜尋 detail 裡的最終評價日欄位
                 if f"最終評價日: {search_str}" in detail:
                     tag = bond_status_tag(detail)
                     matched.append((bond_id, agent_name or "-", tag))
@@ -1620,7 +1577,6 @@ def handle_text_message(event):
             full_text = "\n".join(lines)
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=full_text[:4900]))
             return
-
         if cmd.startswith("detail"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
@@ -1767,7 +1723,6 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"清除失敗：{e}"))
             return
-        # 自然語言消費分析觸發
         if any(k in text_raw for k in SPENDING_NL_KEYWORDS):
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text="💳 收到！正在幫你分析消費明細，請稍候約30秒..."
@@ -1779,7 +1734,6 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 消費分析失敗：{str(e)[:200]}"))
             return
-
         reply = ai_router(text_raw, chat_key=ck)
         _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🦞 龍蝦\n\n{reply[:4700]}"))
     except Exception as e:
@@ -2057,23 +2011,17 @@ def handle_audio_message(event, _override_bot_api=None):
             pass
 # ==============================
 # ELN Auto-Tracking 群組專用 handler
-# 只處理 /list 和 /detail，資料來自龍蝦的 personal chat_key
 # ==============================
 ELN_PERSONAL_CHAT_KEY = f"user:{os.getenv('LINE_USER_ID', '')}"
-
 @eln_group_handler.add(MessageEvent, message=TextMessage)
 def handle_eln_group_message(event):
     try:
         text_raw = (event.message.text or "").strip()
         tl = text_raw.lower().strip()
         print(f"[ELN-GROUP] {repr(text_raw)}")
-
-        # 只處理 /list 和 /detail，其他靜音
         if not (tl.startswith("/list") or tl.startswith("/detail")):
             return
-
-        ck = ELN_PERSONAL_CHAT_KEY  # 固定用龍蝦的資料
-
+        ck = ELN_PERSONAL_CHAT_KEY
         if tl.startswith("/list"):
             from collections import defaultdict
             list_parts = text_raw.split(" ", 1)
@@ -2129,7 +2077,6 @@ def handle_eln_group_message(event):
             for chunk in chunks[1:]:
                 eln_group_bot_api.push_message(event.source.user_id, TextSendMessage(text=chunk))
             return
-
         if tl.startswith("/detail"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
@@ -2148,7 +2095,6 @@ def handle_eln_group_message(event):
             return
     except Exception as e:
         print(f"[ELN-GROUP ERROR] {e}")
-
 # ==============================
 # 內建排程
 # ==============================
@@ -2193,7 +2139,6 @@ def write_job_log(job_name: str, status: str, message: str = ""):
     except Exception as e:
         print(f"[LOG] 寫入失敗: {e}")
 def job_spending_report():
-    """每月最後一天自動發送消費明細"""
     now = datetime.now(TZ_TAIPEI_PYTZ)
     import calendar
     last_day = calendar.monthrange(now.year, now.month)[1]
@@ -2210,7 +2155,6 @@ def job_spending_report():
     except Exception as e:
         print(f"[Scheduler] 消費明細失敗: {e}")
         write_job_log("月度消費明細", "error", str(e))
-
 def job_auto_tracking():
     now = datetime.now(TZ_TAIPEI_PYTZ)
     if now.weekday() >= 5:
@@ -2258,3 +2202,47 @@ def start_scheduler():
     print("[Scheduler] 排程啟動完成 ✅")
     return scheduler
 _scheduler = start_scheduler()
+
+# ==============================
+# 知識庫路由 /kb
+# ==============================
+@app.get("/kb")
+async def kb_home():
+    with open("static/kb/index.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
+@app.post("/kb/upload")
+async def kb_upload(file: UploadFile = File(...)):
+    try:
+        file_bytes = await file.read()
+        result = knowledge.process_and_index_file(file.filename, file_bytes)
+        return {"success": True, **result,
+                "message": f"✅ 成功處理 {result['pages']} 頁，建立 {result['chunks']} 個索引"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"處理失敗：{str(e)}")
+
+@app.post("/kb/ask")
+async def kb_ask(question: str = Form(...)):
+    try:
+        return knowledge.query_knowledge(question)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查詢失敗：{str(e)}")
+
+@app.get("/kb/page-image/{doc_id}/{page_num}")
+async def kb_page_image(doc_id: str, page_num: int):
+    try:
+        img_data = knowledge.get_page_image_base64(doc_id, page_num)
+        return {"image_base64": img_data}
+    except:
+        raise HTTPException(status_code=404, detail="頁面圖片不存在")
+
+@app.get("/kb/documents")
+async def kb_documents():
+    return {"documents": knowledge.list_documents()}
+
+@app.delete("/kb/document/{doc_id}")
+async def kb_delete(doc_id: str):
+    knowledge.delete_document(doc_id)
+    return {"success": True}
+
+app.mount("/kb/static", StaticFiles(directory="static/kb"), name="kb-static")
