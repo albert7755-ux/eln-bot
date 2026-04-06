@@ -30,4 +30,3 @@ supabase
 chromadb
 pymupdf
 python-multipart
-sentence-transformers
