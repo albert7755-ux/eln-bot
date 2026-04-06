@@ -174,14 +174,104 @@ def process_and_index_file(filename: str, file_bytes: bytes) -> dict:
     }
 
 
+# ── 財金專業術語同義詞對照表 ──────────────────────────────
+SYNONYMS = {
+    # 客戶分類
+    "專投": ["專業投資人", "專業投資機構", "專業投資"],
+    "專業投資人": ["專投", "專業投資機構"],
+    "一般投資人": ["一般投資", "散戶"],
+    "hnw": ["高資產客戶", "高淨值客戶", "高淨值", "高資產"],
+    "高資產": ["hnw", "高淨值客戶", "高資產客戶"],
+    "vip": ["貴賓", "高資產客戶", "重要客戶"],
+
+    # 結構型商品
+    "si": ["結構型商品", "組合式商品", "組合式產品", "結構型產品", "sn", "structured investment"],
+    "sn": ["結構型商品", "組合式商品", "組合式產品", "結構型產品", "si"],
+    "結構型商品": ["si", "sn", "組合式商品", "組合式產品", "結構型產品"],
+    "組合式產品": ["si", "sn", "結構型商品", "結構型產品", "組合式商品"],
+    "dci": ["雙元貨幣", "dual currency investment", "雙元投資"],
+    "雙元貨幣": ["dci", "dual currency investment"],
+    "ben": ["保本票據", "保本型", "barrier enhanced note"],
+    "eln": ["股票連結票據", "股連結", "equity linked note"],
+    "股票連結票據": ["eln", "股連結"],
+    "ko": ["提前出場", "knock out", "提前到期"],
+    "ki": ["knock in", "敲入", "保護線"],
+    "strike": ["執行價", "履約價", "行使價"],
+
+    # 質借業務
+    "lbl": ["lombard", "lombard lending", "有價證券質借", "有價質借", "證券質借"],
+    "lombard": ["lbl", "lombard lending", "有價證券質借", "有價質借"],
+    "lombard lending": ["lbl", "lombard", "有價證券質借"],
+    "有價證券質借": ["lbl", "lombard", "lombard lending", "有價質借"],
+    "信託質借": ["信託質押借款", "信託借款", "質借信託"],
+    "金市質借": ["黃金質借", "金市借款", "黃金質押"],
+
+    # 基金相關
+    "pimco": ["品浩", "pimco收益基金", "pimco income"],
+    "收益基金": ["pimco收益", "income fund", "配息基金"],
+    "配息": ["收益分配", "股息", "息收", "殖利率"],
+    "高收益債": ["垃圾債", "high yield", "hy", "非投資等級債"],
+    "hy": ["高收益債", "high yield bond", "非投資等級債"],
+    "ig": ["投資等級債", "investment grade", "投資級債券"],
+    "投資等級債": ["ig", "investment grade bond"],
+    "可轉債": ["cb", "convertible bond", "轉換公司債"],
+    "cb": ["可轉債", "convertible bond"],
+    "etf": ["指數股票型基金", "指數型基金", "交易所交易基金"],
+
+    # 市場指標
+    "fed": ["聯準會", "美聯儲", "federal reserve", "fomc"],
+    "聯準會": ["fed", "美聯儲", "fomc", "federal reserve"],
+    "fomc": ["聯準會", "fed", "聯邦公開市場委員會"],
+    "ecb": ["歐洲央行", "european central bank"],
+    "boj": ["日本央行", "bank of japan"],
+    "cpi": ["消費者物價指數", "通膨指標", "物價指數"],
+    "pce": ["個人消費支出", "核心pce", "通膨指標"],
+    "非農": ["非農就業", "nfp", "就業報告", "non-farm payroll"],
+    "殖利率": ["yield", "利率", "收益率"],
+    "利差": ["spread", "信用利差", "credit spread"],
+    "dxy": ["美元指數", "美元強弱", "dollar index"],
+    "spx": ["標普500", "s&p500", "標準普爾500"],
+    "ndx": ["那斯達克100", "nasdaq 100"],
+    "vix": ["恐慌指數", "波動率指數", "volatility index"],
+
+    # 業務流程
+    "kyc": ["認識客戶", "客戶盡職調查", "know your customer"],
+    "aml": ["反洗錢", "防制洗錢", "anti money laundering"],
+    "kid": ["關鍵資訊文件", "商品說明書"],
+    "nav": ["淨值", "資產淨值", "net asset value"],
+    "aum": ["資產管理規模", "管理資產", "assets under management"],
+}
+
+def expand_query_with_synonyms(question: str) -> str:
+    """將問題中的術語展開成同義詞，提升搜尋命中率"""
+    q_lower = question.lower()
+    extra_terms = []
+
+    for term, synonyms in SYNONYMS.items():
+        if term.lower() in q_lower:
+            extra_terms.extend(synonyms)
+
+    if extra_terms:
+        # 去重，限制數量避免太長
+        unique_extras = list(dict.fromkeys(extra_terms))[:10]
+        expanded = question + " " + " ".join(unique_extras)
+        print(f"[KB] 查詢展開：{question} → 加入 {unique_extras}")
+        return expanded
+
+    return question
+
+
 def query_knowledge(question: str, top_k: int = 8) -> dict:
     """問問題，從資料庫找答案"""
     count = collection.count()
     if count == 0:
         return {"answer": "資料庫中尚無任何文件，請先上傳。", "sources": []}
 
+    # 展開同義詞
+    expanded_question = expand_query_with_synonyms(question)
+
     results = collection.query(
-        query_texts=[question],
+        query_texts=[expanded_question],
         n_results=min(top_k, count)
     )
 
