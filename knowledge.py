@@ -18,13 +18,11 @@ CHROMA_DIR = BASE_DIR / "chroma_db"
 for d in [UPLOAD_DIR, PAGES_DIR, CHROMA_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-# ── ChromaDB：改用多語言 embedding 模型 ──
+# ── ChromaDB ──
 chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name="paraphrase-multilingual-MiniLM-L12-v2"
-)
+embedding_fn = embedding_functions.DefaultEmbeddingFunction()
 collection = chroma_client.get_or_create_collection(
-    name="knowledge_base_v2",
+    name="knowledge_base",
     embedding_function=embedding_fn,
     metadata={"hnsw:space": "cosine"}
 )
@@ -90,37 +88,34 @@ def process_image_file(img_path: Path):
 
 def chunk_text(text: str, chunk_size: int = 300, overlap: int = 50) -> list[str]:
     """
-    中文友善的切割方式：
-    - 按字數切（不用空格）
-    - 優先在句號、換行處切割
-    - overlap 讓相鄰段落有重疊，避免答案被切斷
+    中文友善切割：
+    - 按字數切（不依賴空格）
+    - 優先在換行、句號處切割
+    - overlap 讓相鄰段落重疊，避免答案被切斷
     """
     # 先按段落切
     paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
-    
+
     chunks = []
     current = ""
-    
+
     for para in paragraphs:
-        # 如果加入這段還不超過限制，直接合併
         if len(current) + len(para) <= chunk_size:
             current = current + para if not current else current + "\n" + para
         else:
-            # 先把現有的存起來
             if current:
                 chunks.append(current)
-            # 如果單一段落超過限制，按字數強制切
             if len(para) > chunk_size:
                 for i in range(0, len(para), chunk_size - overlap):
                     chunks.append(para[i:i + chunk_size])
-                current = para[-(overlap):]  # 保留結尾作為下一段的開頭
+                current = para[-(overlap):]
             else:
                 current = para
-    
+
     if current:
         chunks.append(current)
-    
-    return [c for c in chunks if len(c.strip()) > 10]  # 過濾太短的段落
+
+    return [c for c in chunks if len(c.strip()) > 10]
 
 
 def process_and_index_file(filename: str, file_bytes: bytes) -> dict:
@@ -180,7 +175,7 @@ def process_and_index_file(filename: str, file_bytes: bytes) -> dict:
 
 
 def query_knowledge(question: str, top_k: int = 8) -> dict:
-    """問問題，從資料庫找答案（搜尋更多段落）"""
+    """問問題，從資料庫找答案"""
     count = collection.count()
     if count == 0:
         return {"answer": "資料庫中尚無任何文件，請先上傳。", "sources": []}
