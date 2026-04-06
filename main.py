@@ -1008,6 +1008,11 @@ def handle_text_message(event):
                         "📑 報告\n"
                         "/report  /pdf\n"
                         "─────────────────\n"
+                        "📚 知識庫\n"
+                        "/kb <問題> → 查詢知識庫\n"
+                        "/kb上傳 → 上傳檔案\n"
+                        "/kb清單 → 查看文件清單\n"
+                        "─────────────────\n"
                         "🔔 警示\n"
                         "/alert add  /alert list  /alert del\n"
                         "輸入 /help alert 看完整範例\n"
@@ -1717,44 +1722,59 @@ def handle_text_message(event):
             return
         if cmd == "kb":
             parts = text_raw.split(" ", 1)
-            if len(parts) < 2 or not parts[1].strip():
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="📚 知識庫查詢\n\n用法：/kb 你的問題\n\n例：/kb PIMCO收益基金的投資策略是什麼？"
-                ))
-                return
-            query = parts[1].strip()
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📚 查詢知識庫中，請稍候..."))
-            try:
-                result = knowledge.query_knowledge(query)
-                answer = result.get("answer", "查無結果")
-                sources = result.get("sources", [])
-                src_text = ""
-                if sources:
-                    src_text = "\n\n📍 來源：" + "、".join(
-                        [f"{s['filename']} 第{s['page']}頁" for s in sources[:3]]
-                    )
-                _bot_api.push_message(
-                    ck.split(":", 1)[1],
-                    TextSendMessage(text=f"📚 知識庫\n\n{answer[:4500]}{src_text}")
-                )
-            except Exception as e:
-                _bot_api.push_message(
-                    ck.split(":", 1)[1],
-                    TextSendMessage(text=f"❌ 查詢失敗：{str(e)[:200]}")
-                )
-            return
+            arg = parts[1].strip() if len(parts) > 1 else ""
 
-        if cmd == "kb":
-            parts = text_raw.split(" ", 1)
-            if len(parts) < 2 or not parts[1].strip():
+            # /kb上傳
+            if arg.lower() in ("上傳", "upload"):
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                    INSERT INTO eln_session(chat_key, await_file, invest_mode, updated_at)
+                    VALUES (:k, TRUE, 'kb_upload', NOW())
+                    ON CONFLICT (chat_key) DO UPDATE
+                    SET await_file=TRUE, invest_mode='kb_upload', updated_at=NOW()
+                    """), {"k": ck})
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="📚 知識庫查詢\n\n用法：/kb 你的問題\n\n例：/kb PIMCO收益基金的投資策略是什麼？"
+                    text="📚 請直接傳送檔案給我\n\n支援格式：PDF、PPT、Word、圖片\n\n傳完後會自動存入知識庫 ✅"
                 ))
                 return
-            query = parts[1].strip()
+
+            # /kb清單
+            if arg.lower() in ("清單", "list", "列表"):
+                try:
+                    docs = knowledge.list_documents()
+                    if not docs:
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(text="📚 知識庫目前沒有任何文件。"))
+                        return
+                    icons = {"pdf": "📄", "pptx": "📊", "ppt": "📊", "docx": "📝", "doc": "📝"}
+                    lines = [f"📚 知識庫文件（共 {len(docs)} 份）\n"]
+                    for d in docs:
+                        ext = d["filename"].split(".")[-1].lower()
+                        icon = icons.get(ext, "📎")
+                        lines.append(f"{icon} {d['filename']}（{d['page_count']} 頁）")
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900]))
+                except Exception as e:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 讀取清單失敗：{str(e)[:200]}"))
+                return
+
+            # /kb（沒有參數）→ 顯示說明
+            if not arg:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="📚 知識庫指令\n"
+                         "─────────────────\n"
+                         "/kb <問題> → 查詢知識庫\n"
+                         "/kb上傳 → 上傳檔案到知識庫\n"
+                         "/kb清單 → 查看已上傳文件\n"
+                         "─────────────────\n"
+                         "範例：\n"
+                         "/kb PIMCO收益基金的投資策略\n"
+                         "/kb ELN的KO條件是什麼"
+                ))
+                return
+
+            # /kb <問題> → 查詢
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="📚 查詢知識庫中，請稍候..."))
             try:
-                result = knowledge.query_knowledge(query)
+                result = knowledge.query_knowledge(arg)
                 answer = result.get("answer", "查無結果")
                 sources = result.get("sources", [])
                 src_text = ""
@@ -1945,6 +1965,26 @@ def handle_file_message(event):
             push_long_message(_bot_api, ck.split(":", 1)[1], f"📌 會議摘要：\n\n{summary}")
             _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text="要不要把這份會議重點做成 PDF？\n\n可直接回：做成 PDF / 不用"))
             return
+        # 知識庫上傳模式
+        invest_mode_now, _ = db_invest_get(ck)
+        if invest_mode_now == "kb_upload" and ext in (".pdf", ".pptx", ".ppt", ".docx", ".doc", ".jpg", ".jpeg", ".png", ".gif", ".webp"):
+            db_set_await(ck, False)
+            with engine.begin() as conn:
+                conn.execute(text("""
+                UPDATE eln_session SET invest_mode='', await_file=FALSE WHERE chat_key=:k
+                """), {"k": ck})
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📚 收到！正在處理 {filename} 並存入知識庫，請稍候..."))
+            try:
+                with open(tmp_path, "rb") as f:
+                    file_bytes = f.read()
+                result = knowledge.process_and_index_file(filename, file_bytes)
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                    text=f"✅ 已存入知識庫！\n\n📄 {filename}\n📑 {result['pages']} 頁\n🔍 {result['chunks']} 個索引\n\n現在可以用 /kb 問題 來查詢了！"
+                ))
+            except Exception as e:
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 存入知識庫失敗：{str(e)[:200]}"))
+            return
+
         if ext in (".xlsx", ".xls") and db_is_await(ck):
             db_set_await(ck, False)
             summary, top5_lines, detail_map, agent_name_map = run_autotracking(str(tmp_path))
