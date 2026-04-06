@@ -153,10 +153,13 @@
     </div>
   </div>
 
-  <div class="sidebar-section" style="flex:0;padding-bottom:12px;">
-    <h3>已上傳文件</h3>
+  <div class="sidebar-section" style="flex:0;padding-bottom:12px;cursor:pointer;" onclick="toggleDocList()">
+    <h3 style="display:flex;justify-content:space-between;align-items:center;">
+      已上傳文件
+      <span id="docToggleIcon" style="font-size:14px;color:var(--text-muted);">▶</span>
+    </h3>
   </div>
-  <div class="doc-list" id="docList">
+  <div class="doc-list" id="docList" style="display:none;">
     <div class="empty-docs">尚未上傳任何文件</div>
   </div>
 </aside>
@@ -189,8 +192,20 @@
 <div class="toast" id="toast"></div>
 
 <script>
+  function toggleDocList() {
+    const list = document.getElementById('docList');
+    const icon = document.getElementById('docToggleIcon');
+    if (list.style.display === 'none') {
+      list.style.display = 'block';
+      icon.textContent = '▼';
+    } else {
+      list.style.display = 'none';
+      icon.textContent = '▶';
+    }
+  }
+
   // ── 密碼設定（改這裡）──
-  const UPLOAD_PASSWORD = "albert0705";
+  const UPLOAD_PASSWORD = "albert2025";
 
   let unlocked = false;
 
