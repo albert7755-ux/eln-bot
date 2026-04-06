@@ -27,3 +27,6 @@ numpy
 apscheduler
 pydub
 supabase
+chromadb
+pymupdf
+python-multipart
