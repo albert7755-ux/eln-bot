@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>知識庫 · 檔案管理</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap');
+  :root {
+    --bg: #0f0f0f; --surface: #1a1a1a; --surface2: #242424;
+    --border: #2e2e2e; --accent: #e8d5a3; --accent2: #c4a97d;
+    --text: #e8e8e8; --text-muted: #888; --danger: #e07070; --success: #7ec8a0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Noto Sans TC', sans-serif; min-height: 100vh; }
+
+  header {
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 24px; height: 60px; gap: 16px;
+  }
+  header .logo { font-family: 'Space Mono', monospace; font-size: 16px; color: var(--accent); letter-spacing: 2px; }
+  header .sep { color: var(--border); }
+  header .page-title { font-size: 13px; color: var(--text-muted); }
+  header .back-btn {
+    margin-left: auto; background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text-muted); border-radius: 8px; padding: 6px 14px;
+    font-size: 12px; cursor: pointer; text-decoration: none;
+    font-family: 'Space Mono', monospace; transition: all 0.2s;
+  }
+  header .back-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .container { max-width: 900px; margin: 0 auto; padding: 32px 24px; }
+
+  /* 密碼 */
+  .pw-bar {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 20px;
+    display: flex; align-items: center; gap: 12px; margin-bottom: 24px;
+  }
+  .pw-bar input {
+    flex: 1; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); font-size: 13px;
+    padding: 8px 14px; outline: none; font-family: 'Space Mono', monospace;
+    max-width: 200px;
+  }
+  .pw-bar input:focus { border-color: var(--accent2); }
+  .pw-bar input::placeholder { color: var(--text-muted); }
+  .pw-bar button {
+    background: var(--accent); color: #1a1a1a; border: none;
+    border-radius: 8px; padding: 8px 16px; font-size: 12px;
+    cursor: pointer; font-weight: 600;
+  }
+  .pw-bar button:hover { background: var(--accent2); }
+  .pw-label { font-size: 12px; color: var(--text-muted); font-family: 'Space Mono', monospace; }
+  .pw-label.ok { color: var(--success); }
+  .pw-label.fail { color: var(--danger); }
+
+  /* 統計 */
+  .stats { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 20px; flex: 1; min-width: 120px;
+  }
+  .stat-card .num { font-size: 28px; font-weight: 700; color: var(--accent); font-family: 'Space Mono', monospace; }
+  .stat-card .label { font-size: 11px; color: var(--text-muted); margin-top: 4px; letter-spacing: 1px; text-transform: uppercase; }
+
+  /* 上傳區 */
+  .upload-area {
+    background: var(--surface); border: 1px dashed var(--border);
+    border-radius: 10px; padding: 24px; text-align: center;
+    margin-bottom: 24px; transition: all 0.2s; position: relative;
+  }
+  .upload-area.unlocked { cursor: pointer; }
+  .upload-area.unlocked:hover, .upload-area.dragover { border-color: var(--accent); background: rgba(232,213,163,0.03); }
+  .upload-area.locked { opacity: 0.5; }
+  .upload-area input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+  .upload-area .icon { font-size: 32px; margin-bottom: 8px; }
+  .upload-area p { font-size: 13px; color: var(--text-muted); }
+  .upload-area strong { color: var(--accent); }
+  .progress-wrap { margin-top: 12px; display: none; }
+  .progress-bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.3s; }
+  .progress-text { font-size: 11px; color: var(--text-muted); margin-top: 6px; font-family: 'Space Mono', monospace; }
+
+  /* 檔案表格 */
+  .table-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .table-title { font-size: 13px; color: var(--text-muted); font-family: 'Space Mono', monospace; letter-spacing: 1px; text-transform: uppercase; }
+  .refresh-btn {
+    background: none; border: 1px solid var(--border); color: var(--text-muted);
+    border-radius: 6px; padding: 5px 12px; font-size: 11px; cursor: pointer;
+    font-family: 'Space Mono', monospace; transition: all 0.2s;
+  }
+  .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .file-table { width: 100%; border-collapse: collapse; }
+  .file-table th {
+    text-align: left; font-size: 11px; color: var(--text-muted);
+    font-family: 'Space Mono', monospace; letter-spacing: 1px;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+    text-transform: uppercase;
+  }
+  .file-table td { padding: 14px 12px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: middle; }
+  .file-table tr:last-child td { border-bottom: none; }
+  .file-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+  .file-icon { font-size: 20px; }
+  .file-name { font-weight: 500; color: var(--text); }
+  .file-meta { font-size: 11px; color: var(--text-muted); font-family: 'Space Mono', monospace; margin-top: 3px; }
+  .file-badge {
+    display: inline-block; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 8px; font-size: 10px;
+    font-family: 'Space Mono', monospace; color: var(--text-muted); text-transform: uppercase;
+  }
+  .file-badge.pdf { border-color: #e07070; color: #e07070; }
+  .file-badge.pptx, .file-badge.ppt { border-color: #e8a87c; color: #e8a87c; }
+  .file-badge.docx, .file-badge.doc { border-color: #7ca8e8; color: #7ca8e8; }
+  .file-badge.jpg, .file-badge.jpeg, .file-badge.png { border-color: #7ec8a0; color: #7ec8a0; }
+
+  .del-btn {
+    background: none; border: 1px solid var(--border); color: var(--text-muted);
+    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+    transition: all 0.2s;
+  }
+  .del-btn:hover { border-color: var(--danger); color: var(--danger); }
+  .del-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .empty-state { text-align: center; padding: 48px; color: var(--text-muted); font-size: 13px; line-height: 2; }
+
+  /* Toast */
+  .toast {
+    position: fixed; bottom: 24px; right: 24px; background: var(--surface2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px;
+    font-size: 13px; z-index: 999; opacity: 0; transform: translateY(10px);
+    transition: all 0.3s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.success { border-color: var(--success); color: var(--success); }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">KNOWLEDGE BOT</div>
+  <div class="sep">／</div>
+  <div class="page-title">檔案管理</div>
+  <a href="/kb" class="back-btn">← 返回問答</a>
+</header>
+
+<div class="container">
+
+  <!-- 密碼 -->
+  <div class="pw-bar">
+    <span class="pw-label" id="pwLabel">🔒 輸入密碼才能刪除或上傳</span>
+    <input type="password" id="pwInput" placeholder="管理密碼" onkeydown="if(event.key==='Enter')checkPw()">
+    <button onclick="checkPw()">解鎖</button>
+  </div>
+
+  <!-- 統計 -->
+  <div class="stats">
+    <div class="stat-card">
+      <div class="num" id="statFiles">-</div>
+      <div class="label">檔案數量</div>
+    </div>
+    <div class="stat-card">
+      <div class="num" id="statPages">-</div>
+      <div class="label">總頁數</div>
+    </div>
+    <div class="stat-card">
+      <div class="num" id="statSize">-</div>
+      <div class="label">總容量</div>
+    </div>
+  </div>
+
+  <!-- 上傳區 -->
+  <div class="upload-area locked" id="uploadArea">
+    <input type="file" id="fileInput" multiple accept=".pdf,.pptx,.ppt,.docx,.doc,.jpg,.jpeg,.png,.gif,.webp" disabled>
+    <div class="icon">📂</div>
+    <p>解鎖後可拖曳上傳<br><strong>PDF · PPT · Word · 圖片</strong></p>
+    <div class="progress-wrap" id="progressWrap">
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-text" id="progressText">處理中...</div>
+    </div>
+  </div>
+
+  <!-- 檔案列表 -->
+  <div class="table-header">
+    <div class="table-title">已上傳文件</div>
+    <button class="refresh-btn" onclick="loadFiles()">↻ 重新整理</button>
+  </div>
+
+  <div id="fileListWrap">
+    <div class="empty-state">載入中...</div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const UPLOAD_PASSWORD = "albert2025"; // ← 改這裡
+  let unlocked = false;
+
+  function checkPw() {
+    const pw = document.getElementById('pwInput').value;
+    const label = document.getElementById('pwLabel');
+    const area = document.getElementById('uploadArea');
+    const fileInput = document.getElementById('fileInput');
+    if (pw === UPLOAD_PASSWORD) {
+      unlocked = true;
+      label.textContent = '✅ 已解鎖管理功能';
+      label.className = 'pw-label ok';
+      area.classList.remove('locked');
+      area.classList.add('unlocked');
+      fileInput.disabled = false;
+      loadFiles(); // 重新載入顯示刪除按鈕
+    } else {
+      label.textContent = '❌ 密碼錯誤';
+      label.className = 'pw-label fail';
+    }
+  }
+
+  // 上傳
+  const uploadArea = document.getElementById('uploadArea');
+  const fileInput = document.getElementById('fileInput');
+  uploadArea.addEventListener('dragover', e => { if (!unlocked) return; e.preventDefault(); uploadArea.classList.add('dragover'); });
+  uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+  uploadArea.addEventListener('drop', e => { if (!unlocked) return; e.preventDefault(); uploadArea.classList.remove('dragover'); uploadFiles(e.dataTransfer.files); });
+  fileInput.addEventListener('change', e => uploadFiles(e.target.files));
+
+  async function uploadFiles(files) {
+    if (!unlocked || !files.length) return;
+    const wrap = document.getElementById('progressWrap');
+    const fill = document.getElementById('progressFill');
+    const text = document.getElementById('progressText');
+    wrap.style.display = 'block';
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      text.textContent = `處理中：${file.name}`;
+      fill.style.width = `${(i / files.length) * 100}%`;
+      const fd = new FormData();
+      fd.append('file', file);
+      try {
+        const res = await fetch('/kb/upload', { method: 'POST', body: fd });
+        const data = await res.json();
+        showToast(data.success ? `✅ ${file.name} 上傳成功` : `❌ ${file.name} 失敗`, data.success ? 'success' : 'error');
+      } catch (e) { showToast(`❌ ${file.name} 錯誤`, 'error'); }
+    }
+    fill.style.width = '100%';
+    text.textContent = '完成！';
+    setTimeout(() => { wrap.style.display = 'none'; fill.style.width = '0%'; }, 1500);
+    fileInput.value = '';
+    loadFiles();
+  }
+
+  // 載入檔案列表
+  async function loadFiles() {
+    const wrap = document.getElementById('fileListWrap');
+    try {
+      const res = await fetch('/kb/files-data');
+      const data = await res.json();
+      const files = data.files || [];
+
+      // 更新統計
+      document.getElementById('statFiles').textContent = files.length;
+      document.getElementById('statPages').textContent = files.reduce((s, f) => s + f.page_count, 0);
+      const totalBytes = files.reduce((s, f) => s + f.size_bytes, 0);
+      document.getElementById('statSize').textContent = totalBytes < 1024*1024
+        ? `${(totalBytes/1024).toFixed(1)}K`
+        : `${(totalBytes/1024/1024).toFixed(1)}M`;
+
+      if (!files.length) {
+        wrap.innerHTML = '<div class="empty-state">📭 尚未上傳任何文件<br>請先上傳 PDF 或其他檔案</div>';
+        return;
+      }
+
+      const icons = { pdf:'📄', pptx:'📊', ppt:'📊', docx:'📝', doc:'📝', jpg:'🖼️', jpeg:'🖼️', png:'🖼️', gif:'🖼️', webp:'🖼️' };
+
+      wrap.innerHTML = `
+        <table class="file-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>檔案名稱</th>
+              <th>格式</th>
+              <th>頁數</th>
+              <th>大小</th>
+              <th>上傳時間</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${files.map(f => `
+              <tr id="row-${f.doc_id}">
+                <td class="file-icon">${icons[f.suffix] || '📎'}</td>
+                <td>
+                  <div class="file-name">${escHtml(f.filename)}</div>
+                  <div class="file-meta">${f.doc_id}</div>
+                </td>
+                <td><span class="file-badge ${f.suffix}">${f.suffix.toUpperCase()}</span></td>
+                <td style="font-family:'Space Mono',monospace;font-size:13px;">${f.page_count}</td>
+                <td style="font-family:'Space Mono',monospace;font-size:12px;color:var(--text-muted);">${f.size}</td>
+                <td style="font-family:'Space Mono',monospace;font-size:11px;color:var(--text-muted);">${f.modified}</td>
+                <td>
+                  <button class="del-btn" id="del-${f.doc_id}"
+                    onclick="deleteFile('${f.doc_id}','${escHtml(f.filename)}')"
+                    ${unlocked ? '' : 'disabled'}>
+                    刪除
+                  </button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    } catch (e) {
+      wrap.innerHTML = `<div class="empty-state">❌ 載入失敗：${e.message}</div>`;
+    }
+  }
+
+  async function deleteFile(docId, filename) {
+    if (!unlocked) { showToast('請先解鎖', 'error'); return; }
+    if (!confirm(`確定要刪除「${filename}」？\n\n刪除後無法復原，需要重新上傳。`)) return;
+    const btn = document.getElementById(`del-${docId}`);
+    if (btn) { btn.disabled = true; btn.textContent = '刪除中...'; }
+    try {
+      await fetch(`/kb/document/${docId}`, { method: 'DELETE' });
+      showToast(`✅ 已刪除 ${filename}`, 'success');
+      document.getElementById(`row-${docId}`)?.remove();
+      loadFiles(); // 重新載入統計
+    } catch (e) {
+      showToast('❌ 刪除失敗', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '刪除'; }
+    }
+  }
+
+  function showToast(msg, type = '') {
+    const t = document.getElementById('toast');
+    t.textContent = msg; t.className = `toast ${type} show`;
+    setTimeout(() => t.className = 'toast', 3500);
+  }
+
+  function escHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  loadFiles();
+</script>
+</body>
+</html>
