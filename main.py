@@ -2334,6 +2334,15 @@ async def kb_page_image(doc_id: str, page_num: int):
     except:
         raise HTTPException(status_code=404, detail="頁面圖片不存在")
 
+@app.get("/kb/files")
+async def kb_files_page():
+    with open("static/kb/files.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
+@app.get("/kb/files-data")
+async def kb_files_data():
+    return {"files": knowledge.list_files_detail()}
+
 @app.get("/kb/documents")
 async def kb_documents():
     return {"documents": knowledge.list_documents()}
