@@ -2310,6 +2310,17 @@ async def kb_home():
     with open("static/kb/index.html", "r", encoding="utf-8") as f:
         return HTMLResponse(f.read())
 
+@app.post("/kb/upload-table")
+async def kb_upload_table(file: UploadFile = File(...)):
+    """上傳表格圖片，用 Vision 直查模式"""
+    try:
+        file_bytes = await file.read()
+        result = knowledge.process_and_index_file(file.filename, file_bytes, as_table=True)
+        return {"success": True, **result,
+                "message": f"✅ 已登記為表格直查圖片，查詢時自動用 Vision 看圖回答"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"處理失敗：{str(e)}")
+
 @app.post("/kb/upload")
 async def kb_upload(file: UploadFile = File(...)):
     try:
