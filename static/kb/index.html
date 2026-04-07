@@ -185,7 +185,15 @@
     <div class="upload-zone locked" id="uploadZone">
       <input type="file" id="fileInput" multiple accept=".pdf,.pptx,.ppt,.docx,.doc,.jpg,.jpeg,.png,.gif,.webp" disabled>
       <div class="icon">📂</div>
-      <p>請先輸入密碼解鎖上傳<br><strong>PDF · PPT · Word · 圖片</strong></p>
+      <p>拖曳或點擊上傳<br><strong>PDF · PPT · Word · 圖片</strong></p>
+    </div>
+    <!-- 表格圖片直查上傳 -->
+    <div style="margin-top:10px;">
+      <div class="upload-zone locked" id="tableZone" style="padding:12px;border-color:#c4a97d;">
+        <input type="file" id="tableInput" accept=".jpg,.jpeg,.png,.gif,.webp" disabled>
+        <div class="icon" style="font-size:20px;">📊</div>
+        <p style="font-size:11px;">表格圖片直查上傳<br><strong>自動用 Vision 看圖回答</strong></p>
+      </div>
     </div>
     <div class="upload-progress" id="uploadProgress">
       <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
@@ -331,13 +339,17 @@
     const pw = document.getElementById('pwInput').value;
     const status = document.getElementById('pwStatus');
     const zone = document.getElementById('uploadZone');
+    const tableZone = document.getElementById('tableZone');
     const fileInput = document.getElementById('fileInput');
+    const tableInput = document.getElementById('tableInput');
     if (pw === UPLOAD_PASSWORD) {
       unlocked = true;
       status.textContent = '✅ 已解鎖，可以上傳文件';
       status.className = 'pw-status ok';
       zone.classList.remove('locked');
       fileInput.disabled = false;
+      tableZone.classList.remove('locked');
+      tableInput.disabled = false;
       document.getElementById('uploadZone').querySelector('p').innerHTML =
         '拖曳或點擊上傳<br><strong>PDF · PPT · Word · 圖片</strong>';
     } else {
@@ -365,6 +377,28 @@
     uploadFiles(e.dataTransfer.files);
   });
   fileInput.addEventListener('change', e => uploadFiles(e.target.files));
+
+  // 表格圖片直查上傳
+  document.getElementById('tableInput').addEventListener('change', async function(e) {
+    const file = e.target.files[0];
+    if (!file || !unlocked) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      showToast(`📊 上傳表格圖片中：${file.name}`, '');
+      const res = await fetch('/kb/upload-table', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`✅ ${file.name} — ${data.message}`, 'success');
+        loadDocuments();
+      } else {
+        showToast(`❌ 上傳失敗`, 'error');
+      }
+    } catch (err) {
+      showToast(`❌ 錯誤：${err.message}`, 'error');
+    }
+    e.target.value = '';
+  });
 
   async function uploadFiles(files) {
     if (!unlocked) { showToast('請先輸入密碼解鎖', 'error'); return; }
