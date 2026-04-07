@@ -14,9 +14,53 @@ BASE_DIR = Path("/data/knowledge")
 UPLOAD_DIR = BASE_DIR / "uploads"
 PAGES_DIR = BASE_DIR / "page_images"
 CHROMA_DIR = BASE_DIR / "chroma_db"
+TABLE_DIR = BASE_DIR / "table_images"   # 專門存表格圖片
 
-for d in [UPLOAD_DIR, PAGES_DIR, CHROMA_DIR]:
+for d in [UPLOAD_DIR, PAGES_DIR, CHROMA_DIR, TABLE_DIR]:
     d.mkdir(parents=True, exist_ok=True)
+
+# 表格圖片註冊表（doc_id → {filename, img_path}）
+import json as _json
+TABLE_INDEX_FILE = BASE_DIR / "table_index.json"
+
+def _load_table_index() -> dict:
+    if TABLE_INDEX_FILE.exists():
+        try:
+            return _json.loads(TABLE_INDEX_FILE.read_text(encoding="utf-8"))
+        except:
+            return {}
+    return {}
+
+def _save_table_index(index: dict):
+    TABLE_INDEX_FILE.write_text(_json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def register_table_image(doc_id: str, filename: str, img_path: Path):
+    """把圖片登記為表格圖片，查詢時直接用 Vision 看"""
+    index = _load_table_index()
+    index[doc_id] = {"filename": filename, "img_path": str(img_path)}
+    _save_table_index(index)
+    print(f"[KB] 已登記表格圖片：{filename}")
+
+def unregister_table_image(doc_id: str):
+    """刪除表格圖片登記"""
+    index = _load_table_index()
+    if doc_id in index:
+        del index[doc_id]
+        _save_table_index(index)
+
+def get_all_table_images() -> list[dict]:
+    """取得所有已登記的表格圖片"""
+    index = _load_table_index()
+    result = []
+    for doc_id, info in index.items():
+        img_path = Path(info["img_path"])
+        if img_path.exists():
+            result.append({
+                "doc_id": doc_id,
+                "filename": info["filename"],
+                "img_path": img_path
+            })
+    return result
 
 # ── ChromaDB ──
 chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
@@ -222,14 +266,45 @@ def _process_pdf_pages(pdf_path: Path, doc_id: str) -> list:
     return pages_data
 
 
-def process_and_index_file(filename: str, file_bytes: bytes) -> dict:
-    """上傳並處理檔案，存入向量資料庫"""
+def process_and_index_file(filename: str, file_bytes: bytes, as_table: bool = False) -> dict:
+    """
+    上傳並處理檔案，存入向量資料庫。
+    as_table=True 時：圖片不存向量資料庫，改用 Vision 直查模式。
+    """
     doc_id = str(uuid.uuid4())[:8]
     suffix = Path(filename).suffix.lower()
     saved_path = UPLOAD_DIR / f"{doc_id}{suffix}"
 
     with open(saved_path, "wb") as f:
         f.write(file_bytes)
+
+    # ── 表格圖片直查模式 ──
+    if as_table and suffix in [".jpg", ".jpeg", ".png", ".gif", ".webp"]:
+        # 複製到 table_images 資料夾
+        img_dest = TABLE_DIR / f"{doc_id}{suffix}"
+        import shutil
+        shutil.copy(saved_path, img_dest)
+        # 也存一份到 page_images 供預覽
+        preview_dest = PAGES_DIR / f"{doc_id}_page_0.png"
+        try:
+            Image.open(saved_path).save(str(preview_dest))
+        except:
+            pass
+        # 登記為表格圖片
+        register_table_image(doc_id, filename, img_dest)
+        # 同時也用 Vision 抽文字存進向量庫（雙保險）
+        try:
+            pages_data = process_image_file(saved_path)
+            for page_info in pages_data:
+                for chunk_idx, chunk in enumerate(chunk_text(page_info["text"])):
+                    collection.add(
+                        documents=[chunk],
+                        ids=[f"{doc_id}_p0_c{chunk_idx}"],
+                        metadatas=[{"doc_id": doc_id, "filename": filename, "page": 0, "chunk_idx": chunk_idx, "is_table_image": True}]
+                    )
+        except Exception as e:
+            print(f"[KB] 表格圖片 Vision 存庫失敗（不影響直查）：{e}")
+        return {"doc_id": doc_id, "filename": filename, "pages": 1, "chunks": 0, "mode": "table_direct"}
 
     pages_data = []
 
@@ -371,74 +446,106 @@ def expand_query_with_synonyms(question: str) -> str:
 
 
 def query_knowledge(question: str, top_k: int = 8) -> dict:
-    """問問題，從資料庫找答案"""
+    """問問題：同時用 RAG 搜文字 + Vision 直看表格圖片"""
     count = collection.count()
-    if count == 0:
+    table_images = get_all_table_images()
+
+    if count == 0 and not table_images:
         return {"answer": "資料庫中尚無任何文件，請先上傳。", "sources": []}
 
     expanded_question = expand_query_with_synonyms(question)
-
-    results = collection.query(
-        query_texts=[expanded_question],
-        n_results=min(top_k, count)
-    )
-
-    docs = results["documents"][0]
-    metas = results["metadatas"][0]
-
     context_parts = []
     sources = []
     seen = set()
+    message_content = []
 
-    for doc, meta in zip(docs, metas):
-        context_parts.append(f"【來源：{meta['filename']} 第{meta['page']+1}頁】\n{doc}")
-        key = f"{meta['doc_id']}_p{meta['page']}"
-        if key not in seen:
-            seen.add(key)
-            img_path = PAGES_DIR / f"{meta['doc_id']}_page_{meta['page']}.png"
-            sources.append({
-                "filename": meta["filename"],
-                "page": meta["page"] + 1,
-                "doc_id": meta["doc_id"],
-                "has_image": img_path.exists(),
-                "relevant_text": doc[:200]
+    # ── 第一部分：RAG 文字搜尋 ──
+    if count > 0:
+        results = collection.query(
+            query_texts=[expanded_question],
+            n_results=min(top_k, count)
+        )
+        docs = results["documents"][0]
+        metas = results["metadatas"][0]
+        for doc, meta in zip(docs, metas):
+            if meta.get("is_table_image"):
+                continue  # 表格圖片用直查，不重複
+            context_parts.append(f"【來源：{meta['filename']} 第{meta['page']+1}頁】\n{doc}")
+            key = f"{meta['doc_id']}_p{meta['page']}"
+            if key not in seen:
+                seen.add(key)
+                img_path = PAGES_DIR / f"{meta['doc_id']}_page_{meta['page']}.png"
+                sources.append({
+                    "filename": meta["filename"],
+                    "page": meta["page"] + 1,
+                    "doc_id": meta["doc_id"],
+                    "has_image": img_path.exists(),
+                    "relevant_text": doc[:200]
+                })
+
+    # ── 第二部分：表格圖片直查 ──
+    table_image_names = []
+    for tbl in table_images:
+        try:
+            with open(tbl["img_path"], "rb") as f:
+                img_data = base64.standard_b64encode(f.read()).decode("utf-8")
+            suffix = tbl["img_path"].suffix.lower()
+            media_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                         ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
+            media_type = media_map.get(suffix, "image/png")
+            message_content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": img_data}
             })
+            table_image_names.append(tbl["filename"])
+            sources.append({
+                "filename": f"📊 {tbl['filename']}（表格直查）",
+                "page": 1,
+                "doc_id": tbl["doc_id"],
+                "has_image": True,
+                "relevant_text": "【表格圖片直查模式】"
+            })
+            print(f"[KB] 附上表格圖片直查：{tbl['filename']}")
+        except Exception as e:
+            print(f"[KB] 讀取表格圖片失敗：{e}")
 
-    context = "\n\n---\n\n".join(context_parts)
-
+    # ── 組合 prompt ──
     system_prompt = """你是一個封閉式知識庫助手，專門服務台灣銀行財富管理業務。
 
 【核心規則】
-1. 只能根據提供的文件內容回答，絕對不能使用外部知識或自行推測
+1. 只能根據提供的文件內容和圖片回答，絕對不能使用外部知識或自行推測
 2. 找不到答案時，明確說「資料庫中無此資訊」
-3. 回答時必須標明資訊來自哪個文件的哪一頁
+3. 回答時標明資訊來自哪個文件
 
-【重要：客戶類型區分】
-文件中常出現多種客戶類型（高資產客戶、專業投資人、一般投資人等），回答時必須：
-- 先確認問題問的是哪一類客戶
-- 嚴格區分不同客戶類型的規定，絕對不可混用
-- 如果文件同時有多種客戶類型的說明，必須分別說明，不可張冠李戴
-- 例如：高資產客戶的規定，不能套用到專業投資人身上
+【客戶類型區分】
+嚴格區分不同客戶類型（高資產客戶、專業投資人、一般投資人）的規定，絕對不可混用。
+
+【表格查詢】
+如果有附上表格圖片，請直接從圖片逐格查找數值，確保正確，不可憑推測填寫。
 
 【回答格式】
-- 用繁體中文回答
-- 盡量詳細完整，不省略重要細節
-- 如有數字、條件、門檻，務必完整列出"""
+- 用繁體中文回答，數字、時間、條件務必完整列出"""
+
+    text_part = ""
+    if context_parts:
+        text_part = "【文字資料庫內容】\n\n" + "\n\n---\n\n".join(context_parts) + "\n\n"
+
+    table_part = ""
+    if table_image_names:
+        table_part = f"【表格圖片】以上圖片為：{', '.join(table_image_names)}，請直接從圖片查找答案。\n\n"
+
+    user_text = (
+        f"{text_part}{table_part}"
+        f"問題：{question}\n\n"
+        f"請直接根據以上資料回答，如有表格圖片請逐格核對後回答。"
+    )
+    message_content.append({"type": "text", "text": user_text})
 
     response = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=3000,
         system=system_prompt,
-        messages=[{
-            "role": "user",
-            "content": (
-                f"以下是資料庫中找到的相關內容：\n\n{context}\n\n"
-                f"問題：{question}\n\n"
-                f"請注意：回答前先判斷問題問的是哪類客戶，"
-                f"嚴格根據對應客戶類型的內容回答，不可混用不同客戶類型的規定。"
-                f"請詳細回答，不要省略重要細節。"
-            )
-        }]
+        messages=[{"role": "user", "content": message_content}]
     )
 
     return {"answer": response.content[0].text, "sources": sources}
@@ -520,6 +627,10 @@ def delete_document(doc_id: str):
             img_file.unlink()
         for f in UPLOAD_DIR.glob(f"{doc_id}.*"):
             f.unlink()
+        # 表格圖片也一起刪
+        for f in TABLE_DIR.glob(f"{doc_id}.*"):
+            f.unlink()
+        unregister_table_image(doc_id)
     except Exception as e:
         print(f"[KB] delete error: {e}")
         raise
