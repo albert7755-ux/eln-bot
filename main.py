@@ -1,4 +1,5 @@
 import knowledge
+import base64
 from fastapi import Form
 import os
 import re
@@ -2333,6 +2334,61 @@ async def kb_page_image(doc_id: str, page_num: int):
         return {"image_base64": img_data}
     except:
         raise HTTPException(status_code=404, detail="頁面圖片不存在")
+
+@app.post("/kb/image-to-table")
+async def kb_image_to_table(file: UploadFile = File(...)):
+    """上傳圖片，用 Vision 轉成 Markdown 表格"""
+    try:
+        file_bytes = await file.read()
+        suffix = Path(file.filename).suffix.lower()
+        media_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                     ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
+        media_type = media_map.get(suffix, "image/png")
+        img_data = base64.b64encode(file_bytes).decode("utf-8")
+
+        response = knowledge.claude_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=3000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_data}},
+                    {"type": "text", "text": (
+                        "請把這張圖片裡的所有內容完整轉換成純文字格式，規則如下：\n\n"
+                        "1. 如果有表格，用 Markdown 表格格式輸出：\n"
+                        "   | 欄位1 | 欄位2 | 欄位3 |\n"
+                        "   |------|------|------|\n"
+                        "   | 數值1 | 數值2 | 數值3 |\n"
+                        "   每一行每一格都要輸出，不能省略\n\n"
+                        "2. 如果有條列式文字，保持原本的條列結構\n"
+                        "3. 標題和小標題要保留\n"
+                        "4. 所有數字、時間、百分比、金額一個都不能少\n"
+                        "5. 不需要說明你在做什麼，直接輸出轉換後的文字\n\n"
+                        "直接輸出結果："
+                    )}
+                ]
+            }]
+        )
+        extracted_text = response.content[0].text
+        return {"success": True, "text": extracted_text, "filename": file.filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"轉換失敗：{str(e)}")
+
+@app.post("/kb/save-text")
+async def kb_save_text(request: Request):
+    """把純文字直接存入知識庫"""
+    try:
+        import base64 as b64
+        body = await request.json()
+        text = body.get("text", "").strip()
+        filename = body.get("filename", "手動輸入.txt")
+        if not text:
+            raise HTTPException(status_code=400, detail="文字不能為空")
+        file_bytes = text.encode("utf-8")
+        result = knowledge.process_and_index_file(filename, file_bytes)
+        return {"success": True, **result, "message": f"✅ 成功建立 {result['chunks']} 個索引"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"儲存失敗：{str(e)}")
 
 @app.get("/kb/files")
 async def kb_files_page():
