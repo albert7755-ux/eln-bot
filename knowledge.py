@@ -47,24 +47,28 @@ def pdf_to_page_images(pdf_path: Path, doc_id: str) -> list:
 
 
 def vision_read_page(img_path: Path) -> str:
-    """用 Claude Vision 讀取單一頁面圖片"""
+    """用 Claude Vision 讀取單一頁面圖片，強制逐字擷取所有文字"""
     with open(img_path, "rb") as f:
         img_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
     response = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=1500,
+        max_tokens=2000,
         messages=[{
             "role": "user",
             "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_data}},
                 {"type": "text", "text": (
-                    "請完整擷取並描述這張圖片的所有內容，包含：\n"
-                    "1. 所有文字內容（逐字擷取）\n"
-                    "2. 表格內容（保留數字和欄位名稱）\n"
-                    "3. 圖表說明（標題、數據、趨勢）\n"
-                    "4. 重點標記或強調的內容\n"
-                    "請用繁體中文回答，盡量完整不要省略。"
+                    "請把這張圖片裡的所有文字內容完整擷取出來，規則如下：\n\n"
+                    "1. 【文字】逐字照抄圖片中所有看得到的文字，一個字都不能省略\n"
+                    "2. 【表格】如果有表格，用以下格式輸出每一格的內容：\n"
+                    "   欄位名稱1 | 欄位名稱2 | 欄位名稱3\n"
+                    "   數值1 | 數值2 | 數值3\n"
+                    "   （每一行都要輸出，不能只說「表格列出了...」）\n"
+                    "3. 【數字】所有數字、百分比、時間、金額必須完整保留\n"
+                    "4. 【禁止】不可以只描述圖片外觀，例如不能說「表格以網格呈現」\n"
+                    "5. 【禁止】不可以省略任何內容，不可以說「等」或「...」\n\n"
+                    "直接輸出擷取的文字內容，不需要說明你在做什麼。"
                 )}
             ]
         }]
@@ -84,7 +88,7 @@ def extract_text_from_pdf(pdf_path: Path):
 
 
 def process_image_file(img_path: Path):
-    """獨立圖片檔案用 Claude Vision 描述"""
+    """獨立圖片檔案用 Claude Vision 逐字擷取所有文字"""
     suffix = img_path.suffix.lower()
     media_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                  ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
@@ -95,18 +99,22 @@ def process_image_file(img_path: Path):
 
     response = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=1500,
+        max_tokens=2000,
         messages=[{
             "role": "user",
             "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_data}},
                 {"type": "text", "text": (
-                    "請完整擷取並描述這張圖片的所有內容，包含：\n"
-                    "1. 所有文字內容（逐字擷取）\n"
-                    "2. 表格內容（保留數字和欄位名稱）\n"
-                    "3. 圖表說明（標題、數據、趨勢）\n"
-                    "4. 重點標記或強調的內容\n"
-                    "請用繁體中文回答，盡量完整不要省略。"
+                    "請把這張圖片裡的所有文字內容完整擷取出來，規則如下：\n\n"
+                    "1. 【文字】逐字照抄圖片中所有看得到的文字，一個字都不能省略\n"
+                    "2. 【表格】如果有表格，用以下格式輸出每一格的內容：\n"
+                    "   欄位名稱1 | 欄位名稱2 | 欄位名稱3\n"
+                    "   數值1 | 數值2 | 數值3\n"
+                    "   （每一行都要輸出，不能只說「表格列出了...」）\n"
+                    "3. 【數字】所有數字、百分比、時間、金額必須完整保留\n"
+                    "4. 【禁止】不可以只描述圖片外觀，例如不能說「表格以網格呈現」\n"
+                    "5. 【禁止】不可以省略任何內容，不可以說「等」或「...」\n\n"
+                    "直接輸出擷取的文字內容，不需要說明你在做什麼。"
                 )}
             ]
         }]
