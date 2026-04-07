@@ -241,7 +241,11 @@ def process_and_index_file(filename: str, file_bytes: bytes) -> dict:
         with open(saved_path, "r", encoding="utf-8") as f:
             text_content = f.read().strip()
         if text_content:
-            pages_data = [{"page": 0, "text": text_content}]
+            # 如果是表格（含有 | 符號）→ 整份不切割，保持完整結構
+            is_table = text_content.count("|") >= 4
+            if is_table:
+                print(f"[KB] 偵測到表格格式，整份保留不切割")
+            pages_data = [{"page": 0, "text": text_content, "is_table": is_table}]
 
     elif suffix in [".pptx", ".ppt", ".docx", ".doc"]:
         pdf_path = convert_to_pdf(saved_path)
@@ -263,9 +267,17 @@ def process_and_index_file(filename: str, file_bytes: bytes) -> dict:
     for page_info in pages_data:
         page_num = page_info["page"]
         text = page_info["text"]
+        is_table = page_info.get("is_table", False)
         if not text.strip():
             continue
-        for chunk_idx, chunk in enumerate(chunk_text(text)):
+
+        # 表格整份不切割，直接存成一個 chunk
+        if is_table:
+            chunks = [text]
+        else:
+            chunks = chunk_text(text)
+
+        for chunk_idx, chunk in enumerate(chunks):
             collection.add(
                 documents=[chunk],
                 ids=[f"{doc_id}_p{page_num}_c{chunk_idx}"],
