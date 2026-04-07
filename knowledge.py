@@ -114,8 +114,48 @@ def process_image_file(img_path: Path):
     return [{"page": 0, "text": response.content[0].text}]
 
 
+# 偵測這些關鍵字代表「比較型/對照型」內容，整頁不切割
+COMPARISON_KEYWORDS = [
+    "高資產", "專投", "專業投資人", "一般投資人",
+    "A類", "B類", "C類", "甲類", "乙類",
+    "比較", "對照", "差異", "區別", "vs", "VS",
+    "專業客戶", "一般客戶", "自然人", "法人",
+]
+
+def is_comparison_page(text: str) -> bool:
+    """判斷這頁是否為對照/比較表格，若是則不切割"""
+    count = sum(1 for kw in COMPARISON_KEYWORDS if kw in text)
+    return count >= 2  # 出現兩個以上關鍵字就視為比較頁
+
+
 def chunk_text(text: str, chunk_size: int = 400, overlap: int = 80) -> list:
-    """中文友善切割，chunk_size=400 平衡精準度與上下文"""
+    """
+    中文友善切割：
+    - 如果是比較型頁面（同時包含多種客戶類型）→ 整頁保留不切割
+    - 否則按字數切割，chunk_size=400 平衡精準度與上下文
+    """
+    # 比較型頁面：整頁作為一個 chunk，避免高資產/專投被切開混淆
+    if is_comparison_page(text):
+        print(f"[KB] 偵測到比較型頁面，整頁保留不切割（{len(text)} 字）")
+        # 如果整頁太長就切成兩半，但每半仍保留完整段落
+        if len(text) <= chunk_size * 3:
+            return [text] if len(text.strip()) > 10 else []
+        # 超長就以段落為單位切，每段仍要保留完整客戶類型區塊
+        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+        chunks = []
+        current = ""
+        for para in paragraphs:
+            if len(current) + len(para) <= chunk_size * 2:
+                current = current + para if not current else current + "\n" + para
+            else:
+                if current:
+                    chunks.append(current)
+                current = para
+        if current:
+            chunks.append(current)
+        return [c for c in chunks if len(c.strip()) > 10]
+
+    # 一般頁面：正常按字數切割
     paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
     chunks = []
     current = ""
@@ -339,11 +379,24 @@ def query_knowledge(question: str, top_k: int = 8) -> dict:
 
     context = "\n\n---\n\n".join(context_parts)
 
-    system_prompt = """你是一個封閉式知識庫助手。
-你只能根據使用者提供的文件內容來回答問題。
-如果提供的資料中找不到答案，請明確說「資料庫中無此資訊」。
-絕對不能使用任何外部知識或自行推測。
-請用繁體中文回答，盡量詳細完整，並標明資訊來自哪個文件的哪一頁。"""
+    system_prompt = """你是一個封閉式知識庫助手，專門服務台灣銀行財富管理業務。
+
+【核心規則】
+1. 只能根據提供的文件內容回答，絕對不能使用外部知識或自行推測
+2. 找不到答案時，明確說「資料庫中無此資訊」
+3. 回答時必須標明資訊來自哪個文件的哪一頁
+
+【重要：客戶類型區分】
+文件中常出現多種客戶類型（高資產客戶、專業投資人、一般投資人等），回答時必須：
+- 先確認問題問的是哪一類客戶
+- 嚴格區分不同客戶類型的規定，絕對不可混用
+- 如果文件同時有多種客戶類型的說明，必須分別說明，不可張冠李戴
+- 例如：高資產客戶的規定，不能套用到專業投資人身上
+
+【回答格式】
+- 用繁體中文回答
+- 盡量詳細完整，不省略重要細節
+- 如有數字、條件、門檻，務必完整列出"""
 
     response = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
@@ -351,7 +404,13 @@ def query_knowledge(question: str, top_k: int = 8) -> dict:
         system=system_prompt,
         messages=[{
             "role": "user",
-            "content": f"以下是資料庫中找到的相關內容：\n\n{context}\n\n問題：{question}\n\n請根據以上內容詳細回答，不要省略重要細節。"
+            "content": (
+                f"以下是資料庫中找到的相關內容：\n\n{context}\n\n"
+                f"問題：{question}\n\n"
+                f"請注意：回答前先判斷問題問的是哪類客戶，"
+                f"嚴格根據對應客戶類型的內容回答，不可混用不同客戶類型的規定。"
+                f"請詳細回答，不要省略重要細節。"
+            )
         }]
     )
 
