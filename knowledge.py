@@ -236,6 +236,13 @@ def process_and_index_file(filename: str, file_bytes: bytes) -> dict:
     if suffix == ".pdf":
         pages_data = _process_pdf_pages(saved_path, doc_id)
 
+    elif suffix == ".txt":
+        # 純文字直接讀取
+        with open(saved_path, "r", encoding="utf-8") as f:
+            text_content = f.read().strip()
+        if text_content:
+            pages_data = [{"page": 0, "text": text_content}]
+
     elif suffix in [".pptx", ".ppt", ".docx", ".doc"]:
         pdf_path = convert_to_pdf(saved_path)
         if pdf_path:
