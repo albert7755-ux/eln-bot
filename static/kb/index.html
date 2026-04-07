@@ -140,6 +140,46 @@
     <div class="pw-status" id="pwStatus">🔒 輸入密碼才能上傳文件</div>
   </div>
 
+  <!-- 圖片轉表格工具 -->
+  <div class="sidebar-section">
+    <h3 style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" onclick="toggleImgTool()">
+      🔄 圖片轉文字存入
+      <span id="imgToolIcon" style="font-size:14px;color:var(--text-muted);">▶</span>
+    </h3>
+    <div id="imgToolBody" style="display:none;margin-top:12px;">
+      <div class="upload-zone" id="imgToolZone" style="padding:14px;">
+        <input type="file" id="imgToolInput" accept=".jpg,.jpeg,.png,.gif,.webp">
+        <div class="icon" style="font-size:22px;">🖼️</div>
+        <p style="font-size:11px;">上傳圖片 → 自動轉文字<br><strong>表格/截圖/投影片</strong></p>
+      </div>
+      <div id="imgToolResult" style="display:none;margin-top:12px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;font-family:'Space Mono',monospace;">擷取結果（可編輯）</div>
+        <textarea id="imgToolText"
+          style="width:100%;min-height:120px;background:var(--surface2);border:1px solid var(--border);
+                 border-radius:8px;color:var(--text);font-size:12px;padding:10px;
+                 resize:vertical;outline:none;font-family:'Noto Sans TC',sans-serif;line-height:1.6;">
+        </textarea>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button onclick="saveExtractedText()"
+            style="flex:1;background:var(--accent);color:#1a1a1a;border:none;border-radius:8px;
+                   padding:8px;font-size:12px;font-weight:600;cursor:pointer;">
+            ✅ 存入知識庫
+          </button>
+          <button onclick="clearImgTool()"
+            style="background:none;border:1px solid var(--border);color:var(--text-muted);
+                   border-radius:8px;padding:8px 12px;font-size:12px;cursor:pointer;">
+            清除
+          </button>
+        </div>
+        <div id="imgToolFilename" style="font-size:10px;color:var(--text-muted);margin-top:6px;font-family:'Space Mono',monospace;"></div>
+      </div>
+      <div id="imgToolLoading" style="display:none;text-align:center;padding:16px;">
+        <div class="typing" style="display:inline-flex;"><span></span><span></span><span></span></div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">Vision 讀取中...</div>
+      </div>
+    </div>
+  </div>
+
   <div class="sidebar-section">
     <h3>上傳文件</h3>
     <div class="upload-zone locked" id="uploadZone">
@@ -192,6 +232,84 @@
 <div class="toast" id="toast"></div>
 
 <script>
+  function toggleImgTool() {
+    const body = document.getElementById('imgToolBody');
+    const icon = document.getElementById('imgToolIcon');
+    if (body.style.display === 'none') {
+      body.style.display = 'block'; icon.textContent = '▼';
+    } else {
+      body.style.display = 'none'; icon.textContent = '▶';
+    }
+  }
+
+  // 圖片轉表格
+  document.getElementById('imgToolInput').addEventListener('change', async function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const loading = document.getElementById('imgToolLoading');
+    const result = document.getElementById('imgToolResult');
+    const textarea = document.getElementById('imgToolText');
+    const filenameLabel = document.getElementById('imgToolFilename');
+
+    loading.style.display = 'block';
+    result.style.display = 'none';
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/kb/image-to-table', { method: 'POST', body: formData });
+      const data = await res.json();
+
+      if (data.success) {
+        textarea.value = data.text;
+        filenameLabel.textContent = `來源：${data.filename}`;
+        // 儲存原始檔名供後續使用
+        textarea.dataset.filename = data.filename.replace(/\.[^.]+$/, '') + '.txt';
+        result.style.display = 'block';
+      } else {
+        showToast('❌ 轉換失敗', 'error');
+      }
+    } catch (err) {
+      showToast(`❌ 錯誤：${err.message}`, 'error');
+    } finally {
+      loading.style.display = 'none';
+      e.target.value = '';
+    }
+  });
+
+  async function saveExtractedText() {
+    const textarea = document.getElementById('imgToolText');
+    const text = textarea.value.trim();
+    if (!text) { showToast('沒有內容可以儲存', 'error'); return; }
+
+    const filename = textarea.dataset.filename || '圖片轉文字.txt';
+
+    try {
+      const res = await fetch('/kb/save-text', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, filename })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`✅ ${filename} — ${data.message}`, 'success');
+        clearImgTool();
+        loadDocuments();
+      } else {
+        showToast('❌ 儲存失敗', 'error');
+      }
+    } catch (err) {
+      showToast(`❌ 錯誤：${err.message}`, 'error');
+    }
+  }
+
+  function clearImgTool() {
+    document.getElementById('imgToolText').value = '';
+    document.getElementById('imgToolResult').style.display = 'none';
+    document.getElementById('imgToolFilename').textContent = '';
+  }
+
   function toggleDocList() {
     const list = document.getElementById('docList');
     const icon = document.getElementById('docToggleIcon');
