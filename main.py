@@ -563,7 +563,26 @@ def get_chat_history(chat_key: str, limit: int = 10) -> list[dict]:
         print(f"get_chat_history error: {e}")
         return []
 
+def _get_memory_collection():
+    """取得對話記憶的 ChromaDB collection"""
+    try:
+        import chromadb
+        from chromadb.utils import embedding_functions
+        chroma_dir = Path("/data/knowledge/chroma_db")
+        chroma_dir.mkdir(parents=True, exist_ok=True)
+        client = chromadb.PersistentClient(path=str(chroma_dir))
+        ef = embedding_functions.DefaultEmbeddingFunction()
+        return client.get_or_create_collection(
+            name="chat_memory",
+            embedding_function=ef,
+            metadata={"hnsw:space": "cosine"}
+        )
+    except Exception as e:
+        print(f"[Memory] ChromaDB 初始化失敗：{e}")
+        return None
+
 def save_chat_history(chat_key: str, role: str, content: str):
+    # 1. 存進 PostgreSQL（保留最近 50 筆，用於短期上下文）
     try:
         with engine.begin() as conn:
             conn.execute(text("INSERT INTO chat_history (chat_key, role, content) VALUES (:k, :r, :c)"),
@@ -575,6 +594,21 @@ def save_chat_history(chat_key: str, role: str, content: str):
             )"""), {"k": chat_key})
     except Exception as e:
         print(f"save_chat_history error: {e}")
+    # 2. 同時存進 ChromaDB（長期語意記憶，不限筆數）
+    if role == "assistant" and content.strip():
+        try:
+            col = _get_memory_collection()
+            if col:
+                import uuid as _uuid
+                now_str = datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M")
+                mem_id = f"mem_{chat_key}_{_uuid.uuid4().hex[:8]}"
+                col.add(
+                    documents=[content[:2000]],
+                    ids=[mem_id],
+                    metadatas=[{"chat_key": chat_key, "role": role, "created_at": now_str}]
+                )
+        except Exception as e:
+            print(f"[Memory] 存入 ChromaDB 失敗：{e}")
 
 SPENDING_NL_KEYWORDS = ["消費明細", "花了多少", "這個月花", "上個月花", "消費分析", "帳單分析", "錢花到哪", "月度消費", "消費統計"]
 AUTO_FINANCE_KEYWORDS = ["財經", "市場", "美股", "台股", "債券", "殖利率", "基金", "匯率", "美元", "聯準會", "fed", "fomc", "通膨", "cpi", "pce", "非農", "失業率", "投資", "分析", "總經", "景氣", "eln", "結構型", "信用利差", "公司債"]
@@ -582,16 +616,55 @@ AUTO_FILE_KEYWORDS = ["pdf", "簡報", "圖片", "圖表", "文件", "檔案", "
 PDF_NL_KEYWORDS = ["pdf", "做成pdf", "生成pdf", "轉成pdf", "輸出pdf", "匯出pdf", "做成 pdf", "生成 pdf", "轉成 pdf", "輸出 pdf", "匯出 pdf", "做成報告", "生成報告", "轉成報告"]
 
 def _normalize_history_for_chat(chat_key: str) -> list[dict]:
-    history = get_chat_history(chat_key) if chat_key else []
+    """結合短期記憶（PostgreSQL最近10筆）+ 長期記憶（ChromaDB語意搜尋）"""
+    # 短期：最近 10 筆對話（保持連貫性）
+    short_term = get_chat_history(chat_key, limit=10) if chat_key else []
+
+    # 長期：從 ChromaDB 搜尋語意相關的歷史（最多補 5 筆）
+    long_term_text = ""
+    if chat_key:
+        try:
+            col = _get_memory_collection()
+            if col and col.count() > 0:
+                # 用最近的問題去搜尋相關歷史
+                recent_user = next((m["content"] for m in reversed(short_term) if m.get("role") == "user"), "")
+                if recent_user:
+                    results = col.query(
+                        query_texts=[recent_user],
+                        n_results=min(5, col.count()),
+                        where={"chat_key": chat_key}
+                    )
+                    docs = results["documents"][0] if results["documents"] else []
+                    metas = results["metadatas"][0] if results["metadatas"] else []
+                    # 過濾掉已在短期記憶中的內容
+                    short_contents = {m.get("content", "") for m in short_term}
+                    relevant = []
+                    for doc, meta in zip(docs, metas):
+                        clean = doc
+                        for prefix in ("[claude] ", "[gpt] ", "[gemini] ", "[claude-long] "):
+                            if clean.startswith(prefix):
+                                clean = clean[len(prefix):]
+                                break
+                        if clean not in short_contents and len(clean) > 20:
+                            relevant.append(f"[{meta.get('created_at','')}] {clean[:300]}")
+                    if relevant:
+                        long_term_text = "【以下是你過去相關的回應記錄】\n" + "\n---\n".join(relevant) + "\n【以上為歷史記錄，以下是近期對話】\n"
+        except Exception as e:
+            print(f"[Memory] 長期記憶搜尋失敗：{e}")
+
+    # 整理短期記憶格式
     cleaned = []
-    for item in history:
+    if long_term_text:
+        cleaned.append({"role": "user", "content": long_term_text})
+        cleaned.append({"role": "assistant", "content": "好的，我已記得這些歷史記錄，請繼續。"})
+    for item in short_term:
         role = item.get("role", "user")
         content = item.get("content", "")
         if not content:
             continue
         if role not in ("user", "assistant"):
             role = "user"
-        for prefix in ("[claude] ", "[gpt] ", "[gemini] "):
+        for prefix in ("[claude] ", "[gpt] ", "[gemini] ", "[claude-long] "):
             if content.startswith(prefix):
                 content = content[len(prefix):]
                 break
