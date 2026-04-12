@@ -4,6 +4,61 @@ import base64
 from pathlib import Path
 
 import anthropic
+import urllib.request as _urllib_request
+import json as _json_gemini
+
+# ── Claude（只用於 Vision 讀圖，因為 Gemini Vision 也支援）──
+claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+# ── Gemini（用於查詢回答，省 Anthropic token）──
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-2.0-flash"
+
+def gemini_chat(prompt: str, images: list = None) -> str:
+    """呼叫 Gemini API，支援文字+圖片"""
+    if not GEMINI_API_KEY:
+        raise ValueError("缺少 GEMINI_API_KEY 環境變數")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+
+    parts = []
+    # 加入圖片（如果有）
+    if images:
+        for img_info in images:
+            parts.append({
+                "inline_data": {
+                    "mime_type": img_info["media_type"],
+                    "data": img_info["data"]
+                }
+            })
+    # 加入文字
+    parts.append({"text": prompt})
+
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "maxOutputTokens": 3000,
+            "temperature": 0.1
+        }
+    }
+
+    req = _urllib_request.Request(
+        url,
+        data=_json_gemini.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    with _urllib_request.urlopen(req, timeout=60) as resp:
+        data = _json_gemini.loads(resp.read().decode("utf-8"))
+
+    return (
+        data.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [{}])[0]
+        .get("text", "")
+        .strip()
+    )
 import chromadb
 from chromadb.utils import embedding_functions
 import fitz  # PyMuPDF
@@ -535,20 +590,35 @@ def query_knowledge(question: str, top_k: int = 8) -> dict:
         table_part = f"【表格圖片】以上圖片為：{', '.join(table_image_names)}，請直接從圖片查找答案。\n\n"
 
     user_text = (
+        f"{system_prompt}\n\n"
         f"{text_part}{table_part}"
         f"問題：{question}\n\n"
         f"請直接根據以上資料回答，如有表格圖片請逐格核對後回答。"
     )
-    message_content.append({"type": "text", "text": user_text})
 
-    response = claude_client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=3000,
-        system=system_prompt,
-        messages=[{"role": "user", "content": message_content}]
-    )
+    # 組合圖片列表給 Gemini
+    gemini_images = []
+    for img_block in message_content:
+        if img_block.get("type") == "image":
+            src = img_block["source"]
+            gemini_images.append({
+                "media_type": src["media_type"],
+                "data": src["data"]
+            })
 
-    return {"answer": response.content[0].text, "sources": sources}
+    try:
+        answer = gemini_chat(user_text, gemini_images if gemini_images else None)
+    except Exception as e:
+        print(f"[KB] Gemini 失敗，改用 Claude：{e}")
+        # Gemini 失敗時 fallback 到 Claude
+        response = claude_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=3000,
+            messages=[{"role": "user", "content": message_content + [{"type": "text", "text": user_text}]}]
+        )
+        answer = response.content[0].text
+
+    return {"answer": answer, "sources": sources}
 
 
 def get_page_image_base64(doc_id: str, page_num: int) -> str:
