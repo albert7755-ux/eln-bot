@@ -31,3 +31,5 @@ chromadb
 pymupdf
 python-multipart
 google-generativeai
+beautifulsoup4
+gspread
