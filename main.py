@@ -1596,14 +1596,23 @@ def handle_text_message(event):
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text="📊 手動更新基金淨值中...\n15 檔基金約需 2 分鐘，完成後會通知你 ✅"
             ))
-            try:
-                import threading
-                t = threading.Thread(target=job_fund_nav_update, daemon=True)
-                t.start()
-            except Exception as e:
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                    text=f"❌ 啟動失敗：{str(e)[:100]}"
-                ))
+            def _run_fundnav():
+                try:
+                    print("[FUNDNAV] 開始執行...")
+                    job_fund_nav_update()
+                    print("[FUNDNAV] 執行完成")
+                except Exception as e:
+                    import traceback
+                    print(f"[FUNDNAV ERROR] {e}")
+                    print(traceback.format_exc())
+                    user_id = os.getenv("LINE_USER_ID", "")
+                    if user_id:
+                        line_bot_api.push_message(user_id, TextSendMessage(
+                            text=f"❌ /fundnav 執行失敗：{str(e)[:200]}"
+                        ))
+            import threading
+            t = threading.Thread(target=_run_fundnav, daemon=True)
+            t.start()
             return
 
         if cmd == "tracklog":
