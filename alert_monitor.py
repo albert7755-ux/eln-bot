@@ -1,9 +1,6 @@
 """
 alert_monitor.py
 價格警示監控系統
-- 每15分鐘由 Render Cron Job 執行
-- 檢查股價/匯率/ETF/指數 是否達到目標價、突破均線、或均線交叉
-- 符合條件則推播 LINE 通知
 """
 
 import os
@@ -17,9 +14,6 @@ from linebot.models import TextSendMessage
 
 TZ_TAIPEI = timezone(timedelta(hours=8))
 
-# ══════════════════════════════
-# 別名
-# ══════════════════════════════
 ALERT_TICKER_ALIAS = {
     "dxy": "DX-Y.NYB",
     "spx": "^GSPC",
@@ -32,6 +26,21 @@ ALERT_TICKER_ALIAS = {
     "gold": "GC=F",
     "silver": "SI=F",
     "oil": "CL=F",
+    "wti": "CL=F",
+    "copper": "HG=F",
+    "usdjpy": "JPY=X",
+    "jpy": "JPY=X",
+    "usd/jpy": "JPY=X",
+    "eurusd": "EURUSD=X",
+    "eur": "EURUSD=X",
+    "gbpusd": "GBPUSD=X",
+    "gbp": "GBPUSD=X",
+    "usdtwd": "TWD=X",
+    "twd": "TWD=X",
+    "usdcnh": "CNH=X",
+    "cnh": "CNH=X",
+    "usdkrw": "KRW=X",
+    "krw": "KRW=X",
 }
 
 def normalize_symbol(symbol: str) -> str:
@@ -41,10 +50,6 @@ def normalize_symbol(symbol: str) -> str:
     lowered = raw.lower()
     return ALERT_TICKER_ALIAS.get(lowered, raw).upper()
 
-
-# ══════════════════════════════
-# DB 連線
-# ══════════════════════════════
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
@@ -78,10 +83,6 @@ def init_db():
         conn.execute(text("ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS ma_short INT"))
         conn.execute(text("ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS ma_long INT"))
 
-
-# ══════════════════════════════
-# 行情 / 均線
-# ══════════════════════════════
 def get_history(symbol: str, days: int = 250) -> pd.DataFrame | None:
     try:
         ticker = yf.Ticker(symbol)
@@ -124,10 +125,6 @@ def get_prev_ma_from_data(data: pd.DataFrame, period: int) -> float | None:
     except Exception:
         return None
 
-
-# ══════════════════════════════
-# 取得所有未觸發的警示
-# ══════════════════════════════
 def get_active_alerts() -> list[dict]:
     with engine.begin() as conn:
         rows = conn.execute(text("""
@@ -140,7 +137,6 @@ def get_active_alerts() -> list[dict]:
           AND (triggered_at IS NULL OR triggered_at < NOW() - INTERVAL '1 day')
         ORDER BY created_at ASC
         """)).fetchall()
-
     return [
         {
             "id": r[0],
@@ -167,10 +163,6 @@ def mark_triggered(alert_id: int):
         WHERE id = :id
         """), {"id": alert_id})
 
-
-# ══════════════════════════════
-# 檢查條件
-# ══════════════════════════════
 def check_alert(alert: dict) -> tuple[bool, str]:
     symbol = alert["symbol"]
     alert_type = alert["alert_type"]
@@ -190,123 +182,57 @@ def check_alert(alert: dict) -> tuple[bool, str]:
 
     now_str = datetime.now(TZ_TAIPEI).strftime("%Y/%m/%d %H:%M")
 
-    # 價格警示
     if alert_type == "price":
         if condition == "above" and price >= target:
-            msg = (
-                f"🔔 價格警示觸發！\n"
-                f"標的：{symbol}\n"
-                f"條件：漲到 {target}\n"
-                f"現價：{price:.2f}\n"
-                f"時間：{now_str}"
-            )
+            msg = (f"🔔 價格警示觸發！\n標的：{symbol}\n條件：漲到 {target}\n現價：{price:.2f}\n時間：{now_str}")
             return True, msg
-
         if condition == "below" and price <= target:
-            msg = (
-                f"🔔 價格警示觸發！\n"
-                f"標的：{symbol}\n"
-                f"條件：跌到 {target}\n"
-                f"現價：{price:.2f}\n"
-                f"時間：{now_str}"
-            )
+            msg = (f"🔔 價格警示觸發！\n標的：{symbol}\n條件：跌到 {target}\n現價：{price:.2f}\n時間：{now_str}")
             return True, msg
 
-    # 價格 vs 均線
     elif alert_type == "ma":
         ma = get_ma_from_data(data, ma_period)
         if ma is None:
             return False, ""
-
         if condition == "below" and price < ma:
-            msg = (
-                f"📉 均線警示觸發！\n"
-                f"標的：{symbol}\n"
-                f"條件：跌破 MA{ma_period}\n"
-                f"現價：{price:.2f}\n"
-                f"MA{ma_period}：{ma:.2f}\n"
-                f"時間：{now_str}"
-            )
+            msg = (f"📉 均線警示觸發！\n標的：{symbol}\n條件：跌破 MA{ma_period}\n現價：{price:.2f}\nMA{ma_period}：{ma:.2f}\n時間：{now_str}")
             return True, msg
-
         if condition == "above" and price > ma:
-            msg = (
-                f"📈 均線警示觸發！\n"
-                f"標的：{symbol}\n"
-                f"條件：漲破 MA{ma_period}\n"
-                f"現價：{price:.2f}\n"
-                f"MA{ma_period}：{ma:.2f}\n"
-                f"時間：{now_str}"
-            )
+            msg = (f"📈 均線警示觸發！\n標的：{symbol}\n條件：漲破 MA{ma_period}\n現價：{price:.2f}\nMA{ma_period}：{ma:.2f}\n時間：{now_str}")
             return True, msg
 
-    # 均線交叉
     elif alert_type == "ma_cross":
         if not ma_short or not ma_long:
             return False, ""
-
         short_now = get_ma_from_data(data, ma_short)
         short_prev = get_prev_ma_from_data(data, ma_short)
         long_now = get_ma_from_data(data, ma_long)
         long_prev = get_prev_ma_from_data(data, ma_long)
-
         if None in (short_now, short_prev, long_now, long_prev):
             return False, ""
-
-        # cross = 黃金交叉，短天期上穿長天期
-        if condition == "cross":
-            if short_prev <= long_prev and short_now > long_now:
-                msg = (
-                    f"🚀 均線黃金交叉！\n"
-                    f"標的：{symbol}\n"
-                    f"條件：MA{ma_short} 上穿 MA{ma_long}\n"
-                    f"現價：{price:.2f}\n"
-                    f"MA{ma_short}：{short_now:.2f}\n"
-                    f"MA{ma_long}：{long_now:.2f}\n"
-                    f"時間：{now_str}"
-                )
-                return True, msg
-
-        # under = 死亡交叉，短天期下穿長天期
-        if condition == "under":
-            if short_prev >= long_prev and short_now < long_now:
-                msg = (
-                    f"⚠️ 均線死亡交叉！\n"
-                    f"標的：{symbol}\n"
-                    f"條件：MA{ma_short} 下穿 MA{ma_long}\n"
-                    f"現價：{price:.2f}\n"
-                    f"MA{ma_short}：{short_now:.2f}\n"
-                    f"MA{ma_long}：{long_now:.2f}\n"
-                    f"時間：{now_str}"
-                )
-                return True, msg
+        if condition == "cross" and short_prev <= long_prev and short_now > long_now:
+            msg = (f"🚀 均線黃金交叉！\n標的：{symbol}\n條件：MA{ma_short} 上穿 MA{ma_long}\n現價：{price:.2f}\nMA{ma_short}：{short_now:.2f}\nMA{ma_long}：{long_now:.2f}\n時間：{now_str}")
+            return True, msg
+        if condition == "under" and short_prev >= long_prev and short_now < long_now:
+            msg = (f"⚠️ 均線死亡交叉！\n標的：{symbol}\n條件：MA{ma_short} 下穿 MA{ma_long}\n現價：{price:.2f}\nMA{ma_short}：{short_now:.2f}\nMA{ma_long}：{long_now:.2f}\n時間：{now_str}")
+            return True, msg
 
     return False, ""
 
-
-# ══════════════════════════════
-# 推播通知
-# ══════════════════════════════
 def send_notification(chat_key: str, message: str):
     token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
     if not token:
         print("Missing LINE_CHANNEL_ACCESS_TOKEN")
         return
-
     api = LineBotApi(token)
     target_id = chat_key.split(":", 1)[1] if ":" in chat_key else chat_key
     api.push_message(target_id, TextSendMessage(text=message))
 
-
-# ══════════════════════════════
-# 主流程
-# ══════════════════════════════
 def main():
     print(f"[{datetime.now(TZ_TAIPEI).strftime('%Y/%m/%d %H:%M')}] Alert monitor starting...")
     init_db()
     alerts = get_active_alerts()
     print(f"Active alerts: {len(alerts)}")
-
     for alert in alerts:
         try:
             triggered, message = check_alert(alert)
@@ -316,9 +242,7 @@ def main():
                 mark_triggered(alert["id"])
         except Exception as e:
             print(f"Error checking alert {alert['id']}: {e}")
-
     print("Done!")
-
 
 if __name__ == "__main__":
     main()
