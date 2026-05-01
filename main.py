@@ -1099,6 +1099,7 @@ def handle_text_message(event):
                 sent, failed = 0, 0
                 for row in targets:
                     try:
+                        print(f"[SEND DEBUG] token starts: {ELN_GROUP_ACCESS_TOKEN[:10]}, target: {row.target_id}")
                         eln_group_bot_api.push_message(row.target_id, TextSendMessage(text=row.msg[:4900]))
                         sent += 1
                     except Exception as e:
