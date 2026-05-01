@@ -532,9 +532,10 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
             if group_status_short:
                 group_summary_lines.append(f"● {row['ID']}: {group_status_short}")
-            line_ids = [x.strip() for x in re.split(r"[;,，]", str(row.get("Line_ID", ""))) if x.strip()]
+            line_ids = [x.strip() for x in re.split(r"[;,，、]", str(row.get("Line_ID", ""))) if x.strip()]
             mat_date_str = row["MaturityDate"].strftime("%Y-%m-%d") if pd.notna(row["MaturityDate"]) else "-"
             asset_detail_str = "\n".join([v for _, v in detail_cols.items()]) + "\n"
+            print(f"[DEBUG MSG] ID={row['ID']} asset_detail_str len={len(asset_detail_str)} detail_cols keys={list(detail_cols.keys())}")
             common_msg_body = (
                 f"Hi {row['Name']} 您好，\n"
                 f"您的結構型商品 {row['ID']} ({row['Product_Type']}) 最新狀態：\n\n"
