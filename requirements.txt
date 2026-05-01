@@ -28,7 +28,7 @@ apscheduler
 pydub
 supabase
 chromadb
-pymupdf
+pymupdf==1.25.5
 python-multipart
 google-generativeai
 beautifulsoup4
