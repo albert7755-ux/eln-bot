@@ -316,7 +316,11 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             product_status = "Running"
             early_redemption_date = None
             if row["IssueDate"] <= today_ts:
-                backtest_data = history_data[(history_data.index >= row["IssueDate"]) & (history_data.index <= today_ts)]
+                # 加上最終評價日煞車，避免已到期商品繼續比對（殭屍KO防護）
+                max_backtest_date = today_ts
+                if pd.notna(row["ValuationDate"]) and row["ValuationDate"] < today_ts:
+                    max_backtest_date = row["ValuationDate"]
+                backtest_data = history_data[(history_data.index >= row["IssueDate"]) & (history_data.index <= max_backtest_date)]
                 if not backtest_data.empty:
                     for date, prices in backtest_data.iterrows():
                         if product_status == "Early Redemption":
