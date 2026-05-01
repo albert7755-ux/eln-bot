@@ -19,37 +19,18 @@ import pytz
 import urllib.request
 import urllib.error
 from openai import OpenAI
+import base64 as _base64
+
 # --- Alert ticker aliases ---
 ALERT_TICKER_ALIAS = {
-    # 指數
-    "dxy": "DX-Y.NYB",
-    "spx": "^GSPC",
-    "sp500": "^GSPC",
-    "ndx": "^NDX",
-    "nasdaq100": "^NDX",
-    "sox": "^SOX",
-    "vix": "^VIX",
-    "ust10y": "^TNX",
-    # 大宗商品
-    "gold": "GC=F",
-    "silver": "SI=F",
-    "oil": "CL=F",
-    "wti": "CL=F",
-    "copper": "HG=F",
-    # 外匯（yfinance 格式）
-    "usdjpy": "JPY=X",
-    "jpy": "JPY=X",
-    "eurusd": "EURUSD=X",
-    "eur": "EURUSD=X",
-    "gbpusd": "GBPUSD=X",
-    "gbp": "GBPUSD=X",
-    "usdtwd": "TWD=X",
-    "twd": "TWD=X",
-    "usdcnh": "CNH=X",
-    "cnh": "CNH=X",
-    "usdkrw": "KRW=X",
-    "krw": "KRW=X",
+    "dxy": "DX-Y.NYB", "spx": "^GSPC", "sp500": "^GSPC", "ndx": "^NDX",
+    "nasdaq100": "^NDX", "sox": "^SOX", "vix": "^VIX", "ust10y": "^TNX",
+    "gold": "GC=F", "silver": "SI=F", "oil": "CL=F", "wti": "CL=F", "copper": "HG=F",
+    "usdjpy": "JPY=X", "jpy": "JPY=X", "eurusd": "EURUSD=X", "eur": "EURUSD=X",
+    "gbpusd": "GBPUSD=X", "gbp": "GBPUSD=X", "usdtwd": "TWD=X", "twd": "TWD=X",
+    "usdcnh": "CNH=X", "cnh": "CNH=X", "usdkrw": "KRW=X", "krw": "KRW=X",
 }
+
 # ==============================
 # ENV
 # ==============================
@@ -69,24 +50,28 @@ if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
 elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
-# 龍蝦主Bot
+
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# ── ELN Auto-Tracking 群組 Bot（第二個 handler）──
 ELN_GROUP_CHANNEL_SECRET = os.getenv("AGENT_LINE_CHANNEL_SECRET", "")
 ELN_GROUP_ACCESS_TOKEN = os.getenv("AGENT_LINE_CHANNEL_ACCESS_TOKEN", "")
 eln_group_bot_api = LineBotApi(ELN_GROUP_ACCESS_TOKEN) if ELN_GROUP_ACCESS_TOKEN else None
 eln_group_handler = WebhookHandler(ELN_GROUP_CHANNEL_SECRET) if ELN_GROUP_CHANNEL_SECRET else None
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
 app = FastAPI()
+from articles import router as articles_router
+app.include_router(articles_router)
+
 VERSION = "eln-autotracking-db-v3-2026-03-05"
 TZ_TAIPEI = timezone(timedelta(hours=8))
+
 # ==============================
 # DB
 # ==============================
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
 def init_db():
     with engine.begin() as conn:
         conn.execute(text("""
@@ -142,6 +127,24 @@ def init_db():
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         """))
+        # ── 文章庫 ──
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS articles (
+            id BIGSERIAL PRIMARY KEY,
+            title TEXT,
+            content TEXT,
+            summary TEXT,
+            source_type TEXT DEFAULT 'text',
+            image_url TEXT,
+            is_read BOOLEAN DEFAULT FALSE,
+            category TEXT DEFAULT 'other',
+            location_name TEXT,
+            lat FLOAT,
+            lng FLOAT,
+            show_on_map BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """))
         for col, typedef in [
             ("invest_mode", "TEXT NOT NULL DEFAULT ''"),
             ("invest_image", "BYTEA"),
@@ -150,7 +153,9 @@ def init_db():
                 conn.execute(text(f"ALTER TABLE eln_session ADD COLUMN IF NOT EXISTS {col} {typedef}"))
             except Exception:
                 pass
+
 init_db()
+
 def db_set_await(chat_key: str, await_file: bool):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -159,6 +164,7 @@ def db_set_await(chat_key: str, await_file: bool):
         ON CONFLICT (chat_key) DO UPDATE
         SET await_file=:a, updated_at=NOW()
         """), {"k": chat_key, "a": bool(await_file)})
+
 def db_is_await(chat_key: str) -> bool:
     with engine.begin() as conn:
         row = conn.execute(
@@ -166,6 +172,7 @@ def db_is_await(chat_key: str) -> bool:
             {"k": chat_key}
         ).fetchone()
     return bool(row and row[0])
+
 def db_invest_set(chat_key: str, mode: str, image: bytes = None):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -174,6 +181,7 @@ def db_invest_set(chat_key: str, mode: str, image: bytes = None):
         ON CONFLICT (chat_key) DO UPDATE
         SET invest_mode=:m, invest_image=COALESCE(:img, eln_session.invest_image), updated_at=NOW()
         """), {"k": chat_key, "m": mode, "img": image})
+
 def db_invest_get(chat_key: str):
     with engine.begin() as conn:
         row = conn.execute(
@@ -183,6 +191,7 @@ def db_invest_get(chat_key: str):
     if row:
         return row[0] or "", bytes(row[1]) if row[1] else None
     return "", None
+
 def db_set_transcript_cache(chat_key: str, transcript: str, summary: str):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -191,21 +200,25 @@ def db_set_transcript_cache(chat_key: str, transcript: str, summary: str):
         ON CONFLICT (chat_key) DO UPDATE
         SET transcript=:t, summary=:s, updated_at=NOW()
         """), {"k": chat_key, "t": transcript[:200000], "s": summary[:50000]})
+
 def db_get_transcript_cache(chat_key: str):
     with engine.begin() as conn:
         row = conn.execute(text("SELECT transcript, summary FROM transcript_cache WHERE chat_key=:k"), {"k": chat_key}).fetchone()
     if row:
         return {"transcript": row[0] or "", "summary": row[1] or ""}
     return None
+
 def db_clear_transcript_cache(chat_key: str):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM transcript_cache WHERE chat_key=:k"), {"k": chat_key})
+
 def db_save_meeting_transcript(chat_key: str, file_name: str, transcript: str, summary: str):
     with engine.begin() as conn:
         conn.execute(text("""
         INSERT INTO meeting_transcripts(chat_key, file_name, transcript, summary, created_at)
         VALUES (:k, :f, :t, :s, NOW())
         """), {"k": chat_key, "f": file_name, "t": transcript[:500000], "s": summary[:100000]})
+
 def db_get_latest_meeting_transcript(chat_key: str):
     with engine.begin() as conn:
         row = conn.execute(text("""
@@ -218,6 +231,7 @@ def db_get_latest_meeting_transcript(chat_key: str):
     if not row:
         return None
     return {"transcript": row[0] or "", "summary": row[1] or "", "file_name": row[2] or "", "created_at": row[3]}
+
 def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_map: dict[str, str], agent_name_map: dict[str, str] = {}):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -239,6 +253,7 @@ def db_save_result(chat_key: str, summary: str, top5_lines: list[str], detail_ma
             INSERT INTO eln_detail(chat_key, bond_id, detail, agent_name, updated_at)
             VALUES (:k, :b, :d, :a, NOW())
             """), {"k": chat_key, "b": bond_id, "d": detail, "a": agent})
+
 def db_get_report(chat_key: str) -> str | None:
     with engine.begin() as conn:
         row = conn.execute(
@@ -246,8 +261,8 @@ def db_get_report(chat_key: str) -> str | None:
             {"k": chat_key}
         ).fetchone()
     return row[0] if row else None
+
 def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str, str]]:
-    """回傳 (bond_id, agent_name, detail) 三個欄位"""
     with engine.begin() as conn:
         rows = conn.execute(text("""
         SELECT bond_id, COALESCE(agent_name, '-'), COALESCE(detail, '')
@@ -259,17 +274,11 @@ def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str, str]]
     return [(r[0], r[1], r[2]) for r in rows] if rows else []
 
 def bond_status_tag(detail: str) -> str:
-    """
-    根據 detail 文字判斷整張商品狀態，回傳標記。
-    狀態文字在兩條 ---------------- 之間。
-    """
-    # 擷取狀態區段（兩條分隔線之間）
     import re as _re
     status_block = ""
     m = _re.search(r"-{4,}\n(.*?)\n-{4,}", detail, _re.S)
     if m:
         status_block = m.group(1).strip()
-    # 判斷順序：提前KO > 到期 > 其他
     if "提前出場" in status_block or "🎉" in status_block:
         return " ✅提前KO"
     if "到期獲利" in status_block:
@@ -281,6 +290,7 @@ def bond_status_tag(detail: str) -> str:
     if "到期" in status_block:
         return " 🏁到期"
     return ""
+
 def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
     if not text:
         return
@@ -312,14 +322,13 @@ def push_long_message(bot_api, target_id: str, text: str, max_len: int = 4800):
             safe_chunks.append(chunk)
     for chunk in safe_chunks:
         bot_api.push_message(target_id, TextSendMessage(text=chunk))
+
 def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, list[str]]:
     q_norm = query.strip().upper()
     if not q_norm:
         return None, None, []
     with engine.begin() as conn:
-        rows = conn.execute(text("""
-        SELECT bond_id FROM eln_detail WHERE chat_key=:k
-        """), {"k": chat_key}).fetchall()
+        rows = conn.execute(text("SELECT bond_id FROM eln_detail WHERE chat_key=:k"), {"k": chat_key}).fetchall()
     keys = [r[0] for r in rows] if rows else []
     if not keys:
         return None, None, []
@@ -327,26 +336,24 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
     if q_norm in norm_map:
         real = norm_map[q_norm]
         with engine.begin() as conn:
-            row = conn.execute(text("""
-            SELECT detail FROM eln_detail WHERE chat_key=:k AND bond_id=:b
-            """), {"k": chat_key, "b": real}).fetchone()
+            row = conn.execute(text("SELECT detail FROM eln_detail WHERE chat_key=:k AND bond_id=:b"), {"k": chat_key, "b": real}).fetchone()
         return real, (row[0] if row else None), []
     hits = [k for k in keys if q_norm in k.strip().upper()]
     if len(hits) == 1:
         real = hits[0]
         with engine.begin() as conn:
-            row = conn.execute(text("""
-            SELECT detail FROM eln_detail WHERE chat_key=:k AND bond_id=:b
-            """), {"k": chat_key, "b": real}).fetchone()
+            row = conn.execute(text("SELECT detail FROM eln_detail WHERE chat_key=:k AND bond_id=:b"), {"k": chat_key, "b": real}).fetchone()
         return real, (row[0] if row else None), []
     if len(hits) > 1:
         return None, None, hits[:20]
     return None, None, keys[:20]
+
 # ==============================
 # Optional: store default push target
 # ==============================
 BASE_DIR = Path("/tmp")
 TARGET_FILE = BASE_DIR / "targets.json"
+
 def _read_json(path: Path, default):
     if path.exists():
         try:
@@ -354,21 +361,27 @@ def _read_json(path: Path, default):
         except Exception:
             return default
     return default
+
 def _write_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
 def load_targets():
     return _read_json(TARGET_FILE, {})
+
 def save_targets(data: dict):
     _write_json(TARGET_FILE, data)
+
 # ==============================
 # Health check
 # ==============================
 @app.get("/")
 def root():
     return {"status": "ok", "service": "eln-bot", "webhook": "/callback"}
+
 @app.get("/whoami")
 def whoami():
     return {"service": "eln-bot", "version": VERSION}
+
 # ==============================
 # Webhook endpoint
 # ==============================
@@ -383,7 +396,6 @@ async def callback(request: Request):
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-# 用 threading.local 記錄當前使用哪個 bot_api
 import threading
 _current_bot_api = threading.local()
 
@@ -489,6 +501,7 @@ async def callback2(request: Request):
     except Exception as e:
         print("[callback2 ERR]", e)
     return "OK"
+
 # ==============================
 # Chat key
 # ==============================
@@ -498,6 +511,7 @@ def chat_key_of(event) -> str:
     if event.source.type == "room":
         return f"room:{event.source.room_id}"
     return f"user:{event.source.user_id}"
+
 # ==============================
 # Adapter: core -> (summary, top5, detail_map)
 # ==============================
@@ -551,8 +565,9 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
     if top5_lines:
         summary += "\n\n【前5筆摘要】\n" + "\n".join(top5_lines)
     return summary, top5_lines, detail_map, agent_name_map
+
 # ==============================
-# AI fallback (Claude)
+# AI
 # ==============================
 SYSTEM_PROMPT = (
     "你是「龍蝦」，一位專屬於 Albert 的智慧型 LINE 助理。\n"
@@ -590,6 +605,7 @@ SYSTEM_PROMPT = (
     "• 數字、百分比、金額要具體，不要模糊帶過\n"
     "• 回答長度要足夠，高資產客戶的問題不能給太簡短的答案\n"
 )
+
 def get_chat_history(chat_key: str, limit: int = 10) -> list[dict]:
     try:
         with engine.begin() as conn:
@@ -603,6 +619,7 @@ def get_chat_history(chat_key: str, limit: int = 10) -> list[dict]:
     except Exception as e:
         print(f"get_chat_history error: {e}")
         return []
+
 def save_chat_history(chat_key: str, role: str, content: str):
     try:
         with engine.begin() as conn:
@@ -623,11 +640,11 @@ def save_chat_history(chat_key: str, role: str, content: str):
             """), {"k": chat_key})
     except Exception as e:
         print(f"save_chat_history error: {e}")
+
 SPENDING_NL_KEYWORDS = [
     "消費明細", "花了多少", "這個月花", "上個月花", "消費分析",
     "帳單分析", "錢花到哪", "月度消費", "消費統計"
 ]
-
 AUTO_FINANCE_KEYWORDS = [
     "財經", "市場", "美股", "台股", "債券", "殖利率", "基金", "匯率", "美元",
     "聯準會", "fed", "fomc", "通膨", "cpi", "pce", "非農", "失業率",
@@ -641,6 +658,7 @@ PDF_NL_KEYWORDS = [
     "做成 pdf", "生成 pdf", "轉成 pdf", "輸出 pdf", "匯出 pdf",
     "做成報告", "生成報告", "轉成報告"
 ]
+
 def _normalize_history_for_chat(chat_key: str) -> list[dict]:
     history = get_chat_history(chat_key) if chat_key else []
     cleaned = []
@@ -659,6 +677,7 @@ def _normalize_history_for_chat(chat_key: str) -> list[dict]:
             content = content[len("[gemini] "):]
         cleaned.append({"role": role, "content": content})
     return cleaned
+
 def ai_claude(user_text: str, chat_key: str = "") -> str:
     history = _normalize_history_for_chat(chat_key)
     messages = history + [{"role": "user", "content": user_text}]
@@ -673,6 +692,7 @@ def ai_claude(user_text: str, chat_key: str = "") -> str:
         save_chat_history(chat_key, "user", user_text)
         save_chat_history(chat_key, "assistant", f"[claude] {reply}")
     return reply
+
 def ai_claude_long(user_text: str, chat_key: str = "") -> str:
     history = _normalize_history_for_chat(chat_key)
     messages = history + [{"role": "user", "content": user_text}]
@@ -687,6 +707,7 @@ def ai_claude_long(user_text: str, chat_key: str = "") -> str:
         save_chat_history(chat_key, "user", user_text)
         save_chat_history(chat_key, "assistant", f"[claude-long] {reply}")
     return reply
+
 def ai_chatgpt(user_text: str, chat_key: str = "") -> str:
     if not openai_client:
         return ai_claude(user_text, chat_key)
@@ -703,6 +724,7 @@ def ai_chatgpt(user_text: str, chat_key: str = "") -> str:
         save_chat_history(chat_key, "user", user_text)
         save_chat_history(chat_key, "assistant", f"[gpt] {reply}")
     return reply
+
 def ai_gemini(user_text: str, chat_key: str = "") -> str:
     if not GEMINI_API_KEY:
         return ai_claude(user_text, chat_key)
@@ -714,15 +736,7 @@ def ai_gemini(user_text: str, chat_key: str = "") -> str:
         f"使用者最新問題：\n{user_text}"
     )
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt}
-                ]
-            }
-        ]
-    }
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -751,6 +765,7 @@ def ai_gemini(user_text: str, chat_key: str = "") -> str:
     except Exception as e:
         print(f"[Gemini Error] {e}")
         return ai_claude(user_text, chat_key)
+
 def ai_router(user_text: str, chat_key: str = "", forced_model: str = "") -> str:
     text_l = (user_text or "").lower().strip()
     if forced_model == "claude":
@@ -764,6 +779,7 @@ def ai_router(user_text: str, chat_key: str = "", forced_model: str = "") -> str
     if any(k in text_l for k in AUTO_FILE_KEYWORDS):
         return ai_gemini(user_text, chat_key)
     return ai_chatgpt(user_text, chat_key)
+
 def classify_report_topic(user_text: str) -> str:
     text_l = (user_text or "").lower()
     macro_keywords = [
@@ -787,6 +803,7 @@ def classify_report_topic(user_text: str) -> str:
     if any(k in text_l for k in product_keywords):
         return "product"
     return "general"
+
 def build_macro_prompt(user_text: str) -> str:
     return f"""
 你是一位頂級總經與跨資產策略研究員，服務對象為高資產客戶、機構投資人與銀行投顧團隊。
@@ -812,6 +829,7 @@ def build_macro_prompt(user_text: str) -> str:
 • 禁止 Markdown 符號，例如 #、*、-、---
 • 直接輸出完整報告正文
 """
+
 def build_equity_prompt(user_text: str) -> str:
     return f"""
 你是一位資深產業與股票研究員，請根據以下主題撰寫一份可直接輸出成 PDF 的繁體中文深度研究報告。
@@ -836,6 +854,7 @@ def build_equity_prompt(user_text: str) -> str:
 • 禁止 Markdown 符號
 • 直接輸出完整報告正文
 """
+
 def build_product_prompt(user_text: str) -> str:
     return f"""
 你是一位銀行財富管理研究員，請根據以下主題撰寫一份可直接輸出成 PDF 的繁體中文深度研究報告。
@@ -860,6 +879,7 @@ def build_product_prompt(user_text: str) -> str:
 • 禁止 Markdown 符號
 • 直接輸出完整報告正文
 """
+
 def build_general_prompt(user_text: str) -> str:
     return f"""
 你是一位資深投資研究員，請根據以下主題撰寫一份可直接輸出成 PDF 的繁體中文深度研究報告。
@@ -881,6 +901,7 @@ def build_general_prompt(user_text: str) -> str:
 • 禁止 Markdown 符號
 • 直接輸出完整報告正文
 """
+
 def build_pdf_report_content(user_text: str, chat_key: str = "") -> str:
     topic_type = classify_report_topic(user_text)
     if topic_type == "macro":
@@ -892,6 +913,7 @@ def build_pdf_report_content(user_text: str, chat_key: str = "") -> str:
     else:
         prompt = build_general_prompt(user_text)
     return ai_claude_long(prompt, chat_key)
+
 def build_transcript_summary(transcript: str, chat_key: str = "") -> str:
     prompt = f"""
 你是一位專業會議紀錄助理。請將以下逐字稿整理為繁體中文重點摘要。
@@ -906,6 +928,7 @@ def build_transcript_summary(transcript: str, chat_key: str = "") -> str:
 {transcript}
 """
     return ai_claude(prompt, chat_key)
+
 def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = "") -> str:
     prompt = f"""
 你是一位專業研究助理，請把以下會議逐字稿與摘要整理成可直接輸出為 PDF 的繁體中文正式會議報告。
@@ -927,6 +950,166 @@ def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = 
 {transcript[:120000]}
 """
     return ai_claude_long(prompt, chat_key)
+
+# ==============================
+# 文章儲存功能
+# ==============================
+def geocode_location(location_name: str) -> tuple[float, float] | tuple[None, None]:
+    api_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    if not api_key or not location_name:
+        return None, None
+    try:
+        import urllib.parse
+        query = urllib.parse.quote(location_name)
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?address={query}&key={api_key}&language=zh-TW"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("status") == "OK" and data.get("results"):
+            loc = data["results"][0]["geometry"]["location"]
+            return float(loc["lat"]), float(loc["lng"])
+    except Exception as e:
+        print(f"[Geocode] 失敗：{e}")
+    return None, None
+
+def _parse_claude_article_response(resp_text: str) -> dict:
+    result = {"title": "", "summary": "", "category": "other", "location_name": ""}
+    lines = resp_text.splitlines()
+    summary_lines = []
+    in_summary = False
+    for line in lines:
+        line = line.strip()
+        if line.startswith("標題："):
+            result["title"] = line.replace("標題：", "").strip()
+        elif line.startswith("分類："):
+            cat = line.replace("分類：", "").strip().lower()
+            cat_map = {
+                "finance": "finance", "財經": "finance", "投資": "finance",
+                "food": "food", "美食": "food", "餐廳": "food", "小吃": "food",
+                "travel": "travel", "旅遊": "travel", "景點": "travel", "觀光": "travel",
+                "shopping": "shopping", "購物": "shopping",
+                "other": "other", "其他": "other",
+            }
+            result["category"] = cat_map.get(cat, "other")
+        elif line.startswith("地點："):
+            result["location_name"] = line.replace("地點：", "").strip()
+            if result["location_name"] == "無":
+                result["location_name"] = ""
+        elif line.startswith("重點："):
+            in_summary = True
+        elif in_summary and line:
+            summary_lines.append(line)
+    result["summary"] = result["title"] + "\n重點：\n" + "\n".join(summary_lines) if summary_lines else resp_text
+    return result
+
+ARTICLE_PROMPT_SUFFIX = """
+格式如下（請嚴格照此格式，每行一個欄位）：
+標題：xxx
+分類：finance 或 food 或 travel 或 shopping 或 other
+地點：地點名稱（若有任何店名、景點、地名、城市、國家請填入，例如「四國自動車博物館」「鼎泰豐信義店」「東京淺草」「桃園」；若完全沒有地點資訊才填「無」）
+重點：
+• xxx
+• xxx
+• xxx
+
+注意：
+- 只要圖片或內容有提到任何地名、店名、景點名稱，一律填入地點欄位
+- 日本、韓國、歐洲等海外地點也要填，不要填「無」
+- 分類判斷：博物館/景點/旅遊=travel，餐廳/小吃/咖啡=food，投資/市場/財經=finance，購物/商品=shopping
+"""
+
+def save_article_text(ck: str, content: str) -> str:
+    prompt = f"請用繁體中文為以下內容產生摘要，並判斷分類與地點。\n{ARTICLE_PROMPT_SUFFIX}\n內容：\n{content[:3000]}"
+    import time
+    resp_obj = None
+    for attempt in range(3):
+        try:
+            resp_obj = claude_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=600,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            break
+        except Exception as e:
+            if "529" in str(e) or "overloaded" in str(e).lower():
+                if attempt < 2:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+            raise e
+    parsed = _parse_claude_article_response((resp_obj.content[0].text or "").strip())
+    title = parsed["title"] or content[:30]
+    summary = parsed["summary"]
+    category = parsed["category"]
+    location_name = parsed["location_name"]
+    source_type = "url" if content.startswith("http") else "text"
+    lat, lng = geocode_location(location_name) if location_name else (None, None)
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO articles (title, content, summary, source_type, category, location_name, lat, lng, is_read, show_on_map)
+        VALUES (:t, :c, :s, :st, :cat, :loc, :lat, :lng, FALSE, TRUE)
+        """), {"t": title, "c": content[:5000], "s": summary, "st": source_type,
+               "cat": category, "loc": location_name, "lat": lat, "lng": lng})
+    return summary
+
+def save_article_image(image_data: bytes, message_id: str) -> str:
+    image_b64 = _base64.b64encode(image_data).decode("utf-8")
+    import time
+    resp_obj = None
+    for attempt in range(3):
+        try:
+            resp_obj = claude_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=600,
+                messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
+                    {"type": "text", "text": f"請用繁體中文描述這張圖片的內容並產生摘要，並判斷分類與地點。\n{ARTICLE_PROMPT_SUFFIX}"}
+                ]}]
+            )
+            break
+        except Exception as e:
+            if "529" in str(e) or "overloaded" in str(e).lower():
+                if attempt < 2:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+            raise e
+    parsed = _parse_claude_article_response((resp_obj.content[0].text or "").strip())
+    title = parsed["title"] or "圖片文章"
+    summary = parsed["summary"]
+    category = parsed["category"]
+    location_name = parsed["location_name"]
+    lat, lng = geocode_location(location_name) if location_name else (None, None)
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO articles (title, content, summary, source_type, image_url, category, location_name, lat, lng, is_read, show_on_map)
+        VALUES (:t, :c, :s, 'image', :img, :cat, :loc, :lat, :lng, FALSE, TRUE)
+        """), {"t": title, "c": "（圖片）", "s": summary,
+               "img": f"line_image_{message_id}",
+               "cat": category, "loc": location_name, "lat": lat, "lng": lng})
+    return summary
+
+def get_unread_articles(limit: int = 15) -> list:
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+        SELECT id, title, source_type, created_at FROM articles
+        WHERE is_read = FALSE ORDER BY created_at DESC LIMIT :n
+        """), {"n": limit}).fetchall()
+    return rows
+
+def mark_article_read(article_id: int):
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE articles SET is_read = TRUE WHERE id = :i"), {"i": article_id})
+
+def get_article_detail(article_id: int):
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+        SELECT id, title, content, summary, source_type, is_read, created_at
+        FROM articles WHERE id = :i
+        """), {"i": article_id}).fetchone()
+    return row
+
+# ==============================
+# Message handlers
+# ==============================
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     _bot_api = getattr(_current_bot_api, "api", None) or line_bot_api
@@ -945,6 +1128,7 @@ def handle_text_message(event):
         parts = text_raw.split(" ", 1)
         if is_group and not tl.startswith("/"):
             return
+
         if cmd in ("help", "?", "指令", "幫助"):
             help_arg = parts[1].strip().lower() if len(parts) > 1 else ""
             if is_group:
@@ -956,79 +1140,64 @@ def handle_text_message(event):
             else:
                 if help_arg in ("alert", "警示"):
                     msg = (
-                        "🔔 Alert 指令說明\n"
-                        "─────────────────\n"
-                        "/alert add <標的> <價格> above/below\n"
-                        "/alert add <標的> above/below <價格>\n"
-                        "/alert add <標的> ma20 above/below\n"
-                        "/alert add <標的> ma5 cross ma20\n"
-                        "/alert add <標的> ma5 under ma20\n"
-                        "/alert list\n"
-                        "/alert del <編號>\n"
-                        "─────────────────\n"
-                        "別名：dxy / spx / ndx / sox / vix / ust10y / gold / silver / oil\n"
-                        "範例：\n"
-                        "/alert add dxy below 100\n"
-                        "/alert add ust10y above 45\n"
-                        "/alert add NVDA ma20 above\n"
-                        "/alert add NVDA ma5 cross ma20"
+                        "🔔 Alert 指令說明\n─────────────────\n"
+                        "/alert add <標的> <價格> above/below\n/alert add <標的> above/below <價格>\n"
+                        "/alert add <標的> ma20 above/below\n/alert add <標的> ma5 cross ma20\n"
+                        "/alert add <標的> ma5 under ma20\n/alert list\n/alert del <編號>\n"
+                        "─────────────────\n別名：dxy / spx / ndx / sox / vix / ust10y / gold / silver / oil\n"
+                        "範例：\n/alert add dxy below 100\n/alert add ust10y above 45\n"
+                        "/alert add NVDA ma20 above\n/alert add NVDA ma5 cross ma20"
                     )
                 elif help_arg in ("eln",):
                     msg = (
-                        "📊 ELN 指令說明\n"
-                        "─────────────────\n"
-                        "/calc — 上傳 Excel 計算並保存\n"
-                        "/list — 列出所有可查商品代號\n"
-                        "/detail <代號> — 查詢單筆 KO/KI/狀態\n"
-                        "/eln upload — 上傳 Excel 並同步到 Supabase\n"
-                        "/eln run — 立即重跑最新 ELN\n"
-                        "/eln history — 查看歷史 Excel\n"
-                        "/eln result — 查看最近結果\n"
-                        "/runnow — 手動執行追蹤\n"
-                        "/tracklog — 查看最近排程紀錄\n"
-                        "/end YYYYMM — 查詢指定月份到期商品（例：/end 202604）\n"
+                        "📊 ELN 指令說明\n─────────────────\n"
+                        "/calc — 上傳 Excel 計算並保存\n/list — 列出所有可查商品代號\n"
+                        "/detail <代號> — 查詢單筆 KO/KI/狀態\n/eln upload — 上傳 Excel 並同步到 Supabase\n"
+                        "/eln run — 立即重跑最新 ELN\n/eln history — 查看歷史 Excel\n"
+                        "/eln result — 查看最近結果\n/runnow — 手動執行追蹤\n"
+                        "/tracklog — 查看最近排程紀錄\n/end YYYYMM — 查詢指定月份到期商品\n"
                         "/chart 商品代號 — 產生走勢圖+防守線（KO/KI/Strike）"
                     )
                 elif help_arg in ("report", "pdf", "報告", "簡報"):
                     msg = (
-                        "📑 報告 / PDF 指令說明\n"
+                        "📑 報告 / PDF 指令說明\n─────────────────\n"
+                        "/report <主題>\n/report <主題> brief/client/academic/hybrid\n"
+                        "/report <主題> custom <說明>\n/pdf market <內容>\n/pdf make <內容>\n"
+                        "自然語言也可直接說：\n請幫我做一份 XX 的 pdf"
+                    )
+                elif help_arg in ("save", "文章", "儲存"):
+                    msg = (
+                        "📚 文章儲存指令說明\n─────────────────\n"
+                        "/save <文字或網址> — 儲存文章並自動摘要\n"
+                        "/unread — 查看未讀文章清單\n"
+                        "/read <編號> — 標記文章為已讀\n"
+                        "/article <編號> — 查看文章摘要內容\n"
+                        "/del <編號> — 刪除文章\n"
+                        "/web — 開啟文章庫網頁\n"
                         "─────────────────\n"
-                        "/report <主題>\n"
-                        "/report <主題> brief/client/academic/hybrid\n"
-                        "/report <主題> custom <說明>\n"
-                        "/pdf market <內容>\n"
-                        "/pdf make <內容>\n"
-                        "自然語言也可直接說：\n"
-                        "請幫我做一份 XX 的 pdf"
+                        "直接傳圖片給龍蝦 → 自動儲存並分析\n"
+                        "範例：\n/save https://...\n/save 這篇文章說..."
                     )
                 else:
                     msg = (
-                        "🦞 龍蝦指令清單\n"
-                        "─────────────────\n"
-                        "📊 ELN\n"
-                        "/calc  /list  /detail\n"
+                        "🦞 龍蝦指令清單\n─────────────────\n"
+                        "📊 ELN\n/calc  /list  /detail\n"
                         "/eln upload  /eln run  /eln history  /eln result\n"
-                        "/runnow  /tracklog  /end\n"
-                        "─────────────────\n"
-                        "📰 財經\n"
-                        "/daily  /daily cache  /market\n"
-                        "─────────────────\n"
-                        "📑 報告\n"
-                        "/report  /pdf\n"
-                        "─────────────────\n"
-                        "🔔 警示\n"
-                        "/alert add  /alert list  /alert del\n"
-                        "輸入 /help alert 看完整範例\n"
-                        "─────────────────\n"
-                        "📧 其他\n"
-                        "/mail  /invest  /forget  /spending\n"
-                        "上傳錄音 → 自動逐字稿 / 摘要\n"
-                        "上傳檔案 → 自動分析\n"
-                        "─────────────────\n"
-                        "進階說明：/help alert、/help eln、/help report"
+                        "/runnow  /tracklog  /end\n─────────────────\n"
+                        "📰 財經\n/daily  /daily cache  /market\n─────────────────\n"
+                        "📑 報告\n/report  /pdf\n─────────────────\n"
+                        "🔔 警示\n/alert add  /alert list  /alert del\n"
+                        "輸入 /help alert 看完整範例\n─────────────────\n"
+                        "📚 文章庫\n/save  /unread  /read  /article  /del  /web\n"
+                        "直接傳圖片 → 自動儲存分析\n"
+                        "輸入 /help save 看完整說明\n─────────────────\n"
+                        "📧 其他\n/mail  /invest  /forget  /spending\n"
+                        "上傳錄音 → 自動逐字稿 / 摘要\n上傳檔案 → 自動分析\n─────────────────\n"
+                        "進階說明：/help alert、/help eln、/help report、/help save"
                     )
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
             return
+
         transcript_cache = db_get_transcript_cache(ck)
         if transcript_cache:
             if any(x in tl for x in ["不用", "不用了", "先不用", "取消", "不用做"]):
@@ -1050,9 +1219,9 @@ def handle_text_message(event):
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ PDF 生成失敗：{str(e)[:250]}"))
                 return
+
         if cmd in ("send", "skip"):
             arg = parts[1].strip().lower() if len(parts) > 1 else ""
-            # /send list 優先處理
             if arg == "list":
                 with engine.begin() as conn:
                     rows = conn.execute(text(
@@ -1068,11 +1237,8 @@ def handle_text_message(event):
                     lines.append("\n/send all 全部發送　/skip all 全部略過")
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n\n".join(lines)))
                 return
-
             if not arg:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="請指定編號或 all\n範例：/send 1　/skip 2　/send all"
-                ))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請指定編號或 all\n範例：/send 1　/skip 2　/send all"))
                 return
             with engine.begin() as conn:
                 rows = conn.execute(text(
@@ -1091,9 +1257,7 @@ def handle_text_message(event):
                         raise ValueError
                     targets = [rows[idx]]
                 except ValueError:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text=f"編號不正確，請輸入 1～{len(rows)} 或 all"
-                    ))
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"編號不正確，請輸入 1～{len(rows)} 或 all"))
                     return
             if cmd == "send":
                 sent, failed = 0, 0
@@ -1116,22 +1280,16 @@ def handle_text_message(event):
                         conn.execute(text("DELETE FROM eln_pending_notifications WHERE id=:i"), {"i": row.id})
                 result_text = f"⏭️ 已略過 {len(targets)} 筆"
             with engine.begin() as conn:
-                remaining = conn.execute(text(
-                    "SELECT COUNT(*) FROM eln_pending_notifications WHERE chat_key=:k"
-                ), {"k": ck}).scalar()
-            if remaining > 0:
-                result_text += f"\n\n還有 {remaining} 筆待處理，打 /send list 查看"
-            else:
-                result_text += "\n\n✅ 所有通知已處理完畢"
+                remaining = conn.execute(text("SELECT COUNT(*) FROM eln_pending_notifications WHERE chat_key=:k"), {"k": ck}).scalar()
+            result_text += f"\n\n還有 {remaining} 筆待處理，打 /send list 查看" if remaining > 0 else "\n\n✅ 所有通知已處理完畢"
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=result_text))
             return
 
         if cmd == "invest":
             db_invest_set(ck, "await_image")
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="📰 請上傳新聞截圖\n\n收到圖片後，我會請你補上投資理由和標的。"
-            ))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📰 請上傳新聞截圖\n\n收到圖片後，我會請你補上投資理由和標的。"))
             return
+
         invest_mode, invest_image = db_invest_get(ck)
         if invest_mode == "await_reason" and invest_image:
             raw = text_raw.strip()
@@ -1153,20 +1311,14 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"生成失敗：{str(e)[:200]}"))
             return
-        # ── DAILY REPORT ──────────────────────────────────────────
+
         if cmd.startswith("daily"):
             parts = text_raw.split(" ", 1)
             use_cache = len(parts) > 1 and parts[1].strip().lower() == "cache"
             if use_cache:
                 try:
-                    from sqlalchemy import create_engine, text as sa_text
-                    db_url = DATABASE_URL
-                    eng = create_engine(db_url, pool_pre_ping=True)
-                    with eng.begin() as conn:
-                        row = conn.execute(sa_text("""
-                        SELECT report_text FROM daily_report_cache
-                        ORDER BY created_at DESC LIMIT 1
-                        """)).fetchone()
+                    with engine.begin() as conn:
+                        row = conn.execute(text("SELECT report_text FROM daily_report_cache ORDER BY created_at DESC LIMIT 1")).fetchone()
                     if row:
                         _bot_api.reply_message(event.reply_token, TextSendMessage(text=row[0][:4900]))
                     else:
@@ -1185,25 +1337,22 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"日報產生失敗: {e}"))
             return
-        # ──────────────────────────────────────────────────────────
+
         if cmd == "settarget":
             targets = load_targets()
             if event.source.type == "group":
                 targets["default"] = event.source.group_id
                 targets["default_type"] = "group"
-                save_targets(targets)
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="已設定此群組為預設推播對象"))
             elif event.source.type == "room":
                 targets["default"] = event.source.room_id
                 targets["default_type"] = "room"
-                save_targets(targets)
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="已設定此聊天室為預設推播對象"))
             else:
                 targets["default"] = event.source.user_id
                 targets["default_type"] = "user"
-                save_targets(targets)
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="已設定您為預設推播對象"))
+            save_targets(targets)
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="已設定為預設推播對象"))
             return
+
         if cmd == "eln":
             sub_parts = text_raw.split()
             sub = sub_parts[1].lower() if len(sub_parts) > 1 else ""
@@ -1242,6 +1391,7 @@ def handle_text_message(event):
                     return
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
                 return
+
         if cmd == "list":
             from collections import defaultdict
             list_parts = text_raw.split(" ", 1)
@@ -1250,12 +1400,10 @@ def handle_text_message(event):
             if not bonds:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無已保存結果。請先 /calc 上傳 Excel。"))
                 return
-            # 建立 bond_id -> (detail, status_tag) 對照
             detail_map = {}
             for bond_id, agent_raw, detail in bonds:
                 detail_map[bond_id] = bond_status_tag(detail)
             if name_filter:
-                # 按姓名查詢模式
                 matched = []
                 seen = set()
                 for bond_id, agent_raw, detail in bonds:
@@ -1271,7 +1419,6 @@ def handle_text_message(event):
                     lines.append(f"   • {b}{tag}")
                 full_text = "\n".join(lines)
             else:
-                # 全部模式，按理專分組
                 grouped = defaultdict(list)
                 for bond_id, agent_raw, detail in bonds:
                     agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()]
@@ -1300,6 +1447,7 @@ def handle_text_message(event):
             for chunk in chunks[1:]:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=chunk))
             return
+
         if cmd.startswith("calc") or cmd.startswith("clac"):
             parts = raw_cmd.split(" ", 1)
             if len(parts) > 1 and parts[1].strip():
@@ -1317,6 +1465,7 @@ def handle_text_message(event):
             db_set_await(ck, True)
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="收到！請直接把 Excel 檔案傳給我（用 LINE 的『檔案』上傳），我會計算並保存結果。"))
             return
+
         if cmd == "report" and len(raw_cmd.strip().split()) == 1:
             summary = db_get_report(ck)
             if not summary:
@@ -1324,17 +1473,16 @@ def handle_text_message(event):
                 return
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=summary[:4900]))
             return
+
         if cmd.startswith("market"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="請輸入新聞內容和推薦標的\n\n格式範例:\n/market 美股反彈，高盛喊買。\n\n推薦標的: PIMCO收益增長、駿利平衡基金"
-                ))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入新聞內容和推薦標的"))
                 return
-            news_text = parts[1].strip()
-            content = generate_market_content(news_text)
+            content = generate_market_content(parts[1].strip())
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=content[:4900]))
             return
+
         if (not tl.startswith("/pdf")) and any(k in tl for k in PDF_NL_KEYWORDS):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="📄 正在整理內容並生成研究報告 PDF，請稍候..."))
             try:
@@ -1345,6 +1493,7 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ PDF 生成失敗：{str(e)[:250]}"))
             return
+
         if cmd.startswith("pdf"):
             from pdf_generator import create_and_upload_pdf
             parts = text_raw.split(" ", 2)
@@ -1364,9 +1513,7 @@ def handle_text_message(event):
             if sub == "make":
                 content_text = parts[2].strip() if len(parts) > 2 else ""
                 if not content_text:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text="請在指令後面直接輸入內容\n\n範例：\n/pdf make 美伊戰爭後的重建行情研究報告"
-                    ))
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="請在指令後面直接輸入內容\n\n範例：\n/pdf make 美伊戰爭後的重建行情研究報告"))
                     return
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="整理內容並產生研究報告 PDF 中，請稍候..."))
                 try:
@@ -1376,10 +1523,9 @@ def handle_text_message(event):
                 except Exception as e:
                     _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"PDF 產生失敗: {e}"))
                 return
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="PDF 指令用法：\n/pdf market <內容> → 市場觀點 PDF\n/pdf make <內容> → 研究報告 PDF"
-            ))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="PDF 指令用法：\n/pdf market <內容> → 市場觀點 PDF\n/pdf make <內容> → 研究報告 PDF"))
             return
+
         if cmd.startswith("report"):
             parts = text_raw.split(" ")
             style_codes = {"ib", "brief", "client", "academic", "hybrid", "custom"}
@@ -1392,9 +1538,7 @@ def handle_text_message(event):
                 custom_prompt = " ".join(parts[custom_idx+1:]).strip()
                 style = "custom"
                 if not custom_prompt:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text="自訂風格請在 custom 後面加上說明！\n\n範例：\n/report 台積電展望 custom 請用輕鬆幽默的風格，適合分享給非專業投資人"
-                    ))
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="自訂風格請在 custom 後面加上說明！"))
                     return
             elif len(parts) > 2 and parts[-1].lower() in style_codes:
                 style = parts[-1].lower()
@@ -1402,22 +1546,17 @@ def handle_text_message(event):
             else:
                 topic = " ".join(parts[1:]).strip()
             if not topic:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="請輸入報告主題\n\n風格選擇（加在主題後面）：\n預設 → 投資銀行\nbrief → 簡報摘要\nclient → 客戶推播\nacademic → 學術研究\nhybrid → 投銀+研究混合\ncustom <說明> → 自訂風格\n\n範例：\n/report 聯準會降息對債市影響\n/report 聯準會降息對債市影響 client\n/report 台積電展望 custom 請用輕鬆幽默的風格，適合分享給非專業投資人"
-                ))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入報告主題\n範例：/report 聯準會降息對債市影響"))
                 return
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text=f"📊 正在研究「{topic}」\n風格：{style_names.get(style,'投資銀行')}\n\n搜尋資料 → 整理分析 → 生成PDF\n請稍候約60至90秒..."
-            ))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📊 正在研究「{topic}」\n風格：{style_names.get(style,'投資銀行')}\n\n請稍候約60至90秒..."))
             try:
                 from report_generator import generate_research_report
                 link = generate_research_report(topic, ck.split(":", 1)[1], style=style, custom_prompt=custom_prompt)
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                    text=f"📑 研究報告已完成！\n\n主題：{topic}\n風格：{style_names.get(style,'投資銀行')}\n\n{link}"
-                ))
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📑 研究報告已完成！\n\n主題：{topic}\n風格：{style_names.get(style,'投資銀行')}\n\n{link}"))
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"報告生成失敗：{e}"))
             return
+
         if cmd.startswith("alert"):
             parts = text_raw.split(" ")
             sub = parts[1].strip().lower() if len(parts) > 1 else ""
@@ -1425,9 +1564,7 @@ def handle_text_message(event):
                 with engine.begin() as conn:
                     rows = conn.execute(text("""
                     SELECT id, symbol, alert_type, condition, target_value, ma_period
-                    FROM price_alerts
-                    WHERE chat_key=:k AND deleted=FALSE
-                    ORDER BY id ASC
+                    FROM price_alerts WHERE chat_key=:k AND deleted=FALSE ORDER BY id ASC
                     """), {"k": ck}).fetchall()
                 if not rows:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有任何警示設定。\n\n新增範例：\n/alert add AAPL 200 above\n/alert add AAPL ma20 below"))
@@ -1437,10 +1574,7 @@ def handle_text_message(event):
                     rid, sym, atype, cond, tval, maper = r
                     cond_str = "漲到" if cond == "above" else "跌到"
                     cross_str = "漲破" if cond == "above" else "跌破"
-                    if atype == "price":
-                        msg += f"#{rid} {sym} {cond_str} {tval}\n"
-                    else:
-                        msg += f"#{rid} {sym} {cross_str} MA{maper}\n"
+                    msg += f"#{rid} {sym} {cond_str if atype == 'price' else cross_str} {tval if atype == 'price' else f'MA{maper}'}\n"
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg.strip()))
                 return
             if sub == "del":
@@ -1448,9 +1582,7 @@ def handle_text_message(event):
                     with engine.begin() as conn:
                         rows = conn.execute(text("""
                         SELECT id, symbol, alert_type, condition, target_value, ma_period, trigger_count
-                        FROM price_alerts
-                        WHERE chat_key=:k AND deleted=FALSE
-                        ORDER BY id ASC
+                        FROM price_alerts WHERE chat_key=:k AND deleted=FALSE ORDER BY id ASC
                         """), {"k": ck}).fetchall()
                     if not rows:
                         _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有任何警示設定。"))
@@ -1458,13 +1590,8 @@ def handle_text_message(event):
                     msg = "請輸入要刪除的編號：\n\n"
                     for r in rows:
                         rid, sym, atype, cond, tval, maper, tcount = r
-                        cond_str = "漲到" if cond == "above" else "跌到"
-                        cross_str = "漲破" if cond == "above" else "跌破"
                         remain = 2 - (tcount or 0)
-                        if atype == "price":
-                            msg += f"#{rid} {sym} {cond_str} {tval}（剩餘{remain}次）\n"
-                        else:
-                            msg += f"#{rid} {sym} {cross_str} MA{maper}（剩餘{remain}次）\n"
+                        msg += f"#{rid} {sym} {'漲到' if cond == 'above' else '跌到'} {tval if atype == 'price' else f'MA{maper}'}（剩餘{remain}次）\n"
                     msg += "\n輸入：/alert del <編號>"
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg.strip()))
                     return
@@ -1478,9 +1605,7 @@ def handle_text_message(event):
                 return
             if sub == "add":
                 if len(parts) < 5:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text="格式說明：\n\n價格警示：\n/alert add NVDA 190 above\n/alert add NVDA above 190\n/alert add dxy below 100\n/alert add ust10y above 45\n\n價格 vs 均線：\n/alert add NVDA ma20 above\n/alert add 2330.TW ma60 below\n\n均線交叉：\n/alert add NVDA ma5 cross ma20\n/alert add NVDA ma5 under ma20"
-                    ))
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="格式說明：\n/alert add NVDA 190 above\n/alert add NVDA ma20 above\n/alert add NVDA ma5 cross ma20"))
                     return
                 raw_symbol = parts[2]
                 symbol = ALERT_TICKER_ALIAS.get(raw_symbol.lower(), raw_symbol).upper()
@@ -1492,55 +1617,42 @@ def handle_text_message(event):
                         ma_short = int(p3[2:])
                         ma_long = int(p5[2:])
                         with engine.begin() as conn:
-                            conn.execute(text("""
-                            INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, ma_short, ma_long)
-                            VALUES (:k, :s, 'ma_cross', :c, :ms, :ml)
-                            """), {"k": ck, "s": symbol, "c": p4, "ms": ma_short, "ml": ma_long})
+                            conn.execute(text("INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, ma_short, ma_long) VALUES (:k, :s, 'ma_cross', :c, :ms, :ml)"),
+                                         {"k": ck, "s": symbol, "c": p4, "ms": ma_short, "ml": ma_long})
                         label = "黃金交叉" if p4 == "cross" else "死亡交叉"
-                        _bot_api.reply_message(event.reply_token, TextSendMessage(
-                            text=f"✅ 均線交叉警示已設定！\n標的：{symbol}\n條件：MA{ma_short} {label} MA{ma_long}\n\n當條件成立時龍蝦會通知你 🔔"
-                        ))
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 均線交叉警示已設定！\n標的：{symbol}\n條件：MA{ma_short} {label} MA{ma_long} 🔔"))
                         return
                     if p3.startswith("ma") and p4 in ("above", "below"):
                         ma_period = int(p3[2:])
                         with engine.begin() as conn:
-                            conn.execute(text("""
-                            INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, ma_period)
-                            VALUES (:k, :s, 'ma', :c, :m)
-                            """), {"k": ck, "s": symbol, "c": p4, "m": ma_period})
+                            conn.execute(text("INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, ma_period) VALUES (:k, :s, 'ma', :c, :m)"),
+                                         {"k": ck, "s": symbol, "c": p4, "m": ma_period})
                         cross = "漲破" if p4 == "above" else "跌破"
-                        _bot_api.reply_message(event.reply_token, TextSendMessage(
-                            text=f"✅ 均線警示已設定！\n標的：{symbol}\n條件：{cross} MA{ma_period}\n\n當條件成立時龍蝦會通知你 🔔"
-                        ))
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 均線警示已設定！\n標的：{symbol}\n條件：{cross} MA{ma_period} 🔔"))
                         return
                     if p3 in ("above", "below"):
-                        direction = p3
-                        value_str = p4
+                        direction, value_str = p3, p4
                     elif p4 in ("above", "below"):
-                        value_str = p3
-                        direction = p4
+                        value_str, direction = p3, p4
                     else:
-                        _bot_api.reply_message(event.reply_token, TextSendMessage(
-                            text="方向請輸入 above 或 below，或使用 ma / 均線交叉格式\n\n例：\n/alert add NVDA above 190\n/alert add NVDA ma20 above\n/alert add NVDA ma5 cross ma20"
-                        ))
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(text="方向請輸入 above 或 below"))
                         return
                     target = float(value_str)
                     with engine.begin() as conn:
-                        conn.execute(text("""
-                        INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, target_value)
-                        VALUES (:k, :s, 'price', :c, :t)
-                        """), {"k": ck, "s": symbol, "c": direction, "t": target})
+                        conn.execute(text("INSERT INTO price_alerts(chat_key, symbol, alert_type, condition, target_value) VALUES (:k, :s, 'price', :c, :t)"),
+                                     {"k": ck, "s": symbol, "c": direction, "t": target})
                     cond_str = "漲到" if direction == "above" else "跌到"
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text=f"✅ 價格警示已設定！\n標的：{symbol}\n條件：{cond_str} {target}\n\n當條件成立時龍蝦會通知你 🔔"
-                    ))
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 價格警示已設定！\n標的：{symbol}\n條件：{cond_str} {target} 🔔"))
                 except Exception as e:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"設定失敗：{e}"))
                 return
             _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="價格警示指令：\n/alert add <標的> <價格> <above/below>\n/alert add <標的> <above/below> <價格>\n/alert add <標的> ma20 <above/below>\n/alert add <標的> ma5 cross ma20\n/alert add <標的> ma5 under ma20\n/alert list → 查看清單\n/alert del <編號> → 刪除\n\n別名：dxy / spx / ndx / sox / vix / ust10y / gold / silver / oil\n\n範例：\n/alert add dxy below 100\n/alert add ust10y above 45\n/alert add NVDA ma20 above\n/alert add NVDA ma5 cross ma20"
+                text="價格警示指令：\n/alert add <標的> <價格> <above/below>\n/alert add <標的> ma20 <above/below>\n"
+                     "/alert add <標的> ma5 cross ma20\n/alert list → 查看清單\n/alert del <編號> → 刪除\n\n"
+                     "別名：dxy / spx / ndx / sox / vix / ust10y / gold / silver / oil"
             ))
             return
+
         if cmd == "news pdf" or cmd == "news":
             from news_fetcher import generate_news_report
             from pdf_generator import create_and_upload_pdf
@@ -1552,33 +1664,24 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"新聞抓取失敗: {e}"))
             return
+
         if cmd.startswith("chart"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="請輸入商品代號\n例：/chart WMGS25100246"
-                ))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入商品代號\n例：/chart WMGS25100246"))
                 return
             bond_id = parts[1].strip().upper()
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text=f"📊 正在產生 {bond_id} 走勢圖，請稍候..."
-            ))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📊 正在產生 {bond_id} 走勢圖，請稍候..."))
             try:
                 from eln_chart import generate_eln_chart
                 url = generate_eln_chart(bond_id, engine)
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                    text=f"📊 {bond_id} 防守線走勢圖\n\n🟢 綠線 = KO價\n🔴 紅線 = KI價\n🔵 藍線 = Strike\n\n{url}"
-                ))
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📊 {bond_id} 防守線走勢圖\n\n🟢 綠線 = KO價\n🔴 紅線 = KI價\n🔵 藍線 = Strike\n\n{url}"))
             except Exception as e:
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
-                    text=f"圖表產生失敗：{str(e)[:200]}"
-                ))
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"圖表產生失敗：{str(e)[:200]}"))
             return
 
         if cmd.startswith("spending"):
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="💳 正在分析你的消費明細，請稍候約30秒..."
-            ))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="💳 正在分析你的消費明細，請稍候約30秒..."))
             try:
                 from spending_analyzer import get_monthly_spending_report
                 report = get_monthly_spending_report(days=31)
@@ -1598,31 +1701,18 @@ def handle_text_message(event):
                 return
             year = query_month[:4]
             month = query_month[4:]
-            # 從 eln_detail 搜尋 detail 欄位包含該年月的商品
             with engine.begin() as conn:
-                rows = conn.execute(text("""
-                SELECT bond_id, agent_name, detail FROM eln_detail
-                WHERE chat_key=:k
-                ORDER BY agent_name ASC, bond_id ASC
-                """), {"k": ck}).fetchall()
+                rows = conn.execute(text("SELECT bond_id, agent_name, detail FROM eln_detail WHERE chat_key=:k ORDER BY agent_name ASC, bond_id ASC"), {"k": ck}).fetchall()
             if not rows:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無資料。"))
                 return
-            matched = []
             search_str = f"{year}-{month}"
-            for bond_id, agent_name, detail in rows:
-                # 搜尋 detail 裡的最終評價日欄位
-                if f"最終評價日: {search_str}" in detail:
-                    tag = bond_status_tag(detail)
-                    matched.append((bond_id, agent_name or "-", tag))
+            matched = [(bond_id, agent_name or "-", bond_status_tag(detail)) for bond_id, agent_name, detail in rows if f"最終評價日: {search_str}" in detail]
             if not matched:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到 {year}/{month} 到期的商品。"))
                 return
-            lines = [f"📅 {year}/{month} 到期商品（共 {len(matched)} 筆）：\n"]
-            for bond_id, agent_name, tag in matched:
-                lines.append(f"   • {bond_id} [{agent_name}]{tag}")
-            full_text = "\n".join(lines)
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text=full_text[:4900]))
+            lines = [f"📅 {year}/{month} 到期商品（共 {len(matched)} 筆）：\n"] + [f"   • {bond_id} [{agent_name}]{tag}" for bond_id, agent_name, tag in matched]
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900]))
             return
 
         if cmd.startswith("detail"):
@@ -1630,8 +1720,7 @@ def handle_text_message(event):
             if len(parts) < 2 or not parts[1].strip():
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入：/detail 商品代號（例：/detail U123）"))
                 return
-            query = parts[1].strip()
-            matched_id, detail, candidates = db_find_detail(ck, query)
+            matched_id, detail, candidates = db_find_detail(ck, parts[1].strip())
             if detail:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=detail[:4900]))
                 return
@@ -1641,6 +1730,7 @@ def handle_text_message(event):
                 return
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="查不到該代號或目前沒有已保存結果。請先 /calc 上傳 Excel。"))
             return
+
         if cmd.startswith("mail"):
             parts = text_raw.split(" ", 1)
             sub = parts[1].strip().lower() if len(parts) > 1 else ""
@@ -1662,67 +1752,7 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=f"郵件讀取失敗：{e}"))
             return
-        if cmd.startswith("analysis"):
-            parts = text_raw.split(" ", 1)
-            arg = parts[1].strip() if len(parts) > 1 else ""
-            if not arg:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="📊 完整三面向分析指令：\n\n/analysis NVDA — 技術+基本面+消息面\n/analysis 2330 — 台積電完整分析\n/analysis AAPL 3 — 指定月數（預設6個月）\n\n包含：K線/RSI/成交量/EPS趨勢/營收成長/最新新聞情緒分析"
-                ))
-                return
-            arg_parts = arg.split()
-            symbol = arg_parts[0]
-            months = 6
-            if len(arg_parts) > 1 and arg_parts[1].isdigit():
-                months = min(max(int(arg_parts[1]), 1), 12)
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📊 正在進行 {symbol.upper()} 完整三面向分析，請稍候約20秒..."))
-            try:
-                from stock_analyzer import full_analysis
-                from pdf_generator import upload_to_drive
-                img_bytes, summary = full_analysis(symbol, months=months)
-                tmp_path = f"/tmp/analysis_{symbol}_{months}.png"
-                with open(tmp_path, "wb") as f:
-                    f.write(img_bytes)
-                link = upload_to_drive(tmp_path, f"{symbol.upper()} Full Analysis {months}M.png")
-                os.remove(tmp_path)
-                msg = f"📊 {symbol.upper()} 完整分析 (近{months}個月)\n\n{summary}\n\n🔗 圖表：{link}"
-                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=msg[:4900]))
-            except Exception as e:
-                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=f"分析失敗：{str(e)[:200]}"))
-            return
-        if cmd.startswith("tech"):
-            parts = text_raw.split(" ", 1)
-            arg = parts[1].strip() if len(parts) > 1 else ""
-            if not arg:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="📊 技術分析指令：\n\n/tech mag7 — Magnificent Seven 比較分析\n/tech AAPL — 單一股票分析 (美股)\n/tech 2330 — 單一股票分析 (台股)\n/tech AAPL 3 — 指定月數（預設6個月）\n\n範例：\n/tech mag7\n/tech NVDA\n/tech 2330 3"
-                ))
-                return
-            arg_parts = arg.split()
-            symbol = arg_parts[0]
-            months = 6
-            if len(arg_parts) > 1 and arg_parts[1].isdigit():
-                months = min(max(int(arg_parts[1]), 1), 12)
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📊 正在分析 {symbol.upper()}，請稍候約15秒..."))
-            try:
-                from tech_analyzer import analyze_single, analyze_mag7
-                from pdf_generator import upload_to_drive
-                if symbol.lower() == "mag7":
-                    img_bytes, summary = analyze_mag7(months=months)
-                    title = f"Magnificent Seven 技術分析 (近{months}個月)"
-                else:
-                    img_bytes, summary = analyze_single(symbol, months=months)
-                    title = f"{symbol.upper()} 技術分析 (近{months}個月)"
-                tmp_path = f"/tmp/tech_{symbol}_{months}.png"
-                with open(tmp_path, "wb") as f:
-                    f.write(img_bytes)
-                link = upload_to_drive(tmp_path, f"{title}.png")
-                os.remove(tmp_path)
-                msg = f"📊 {title}\n\n{summary}\n\n🔗 圖表連結：{link}"
-                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=msg[:4900]))
-            except Exception as e:
-                _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=f"技術分析失敗：{str(e)[:200]}"))
-            return
+
         if cmd == "runnow":
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="🔄 手動觸發 ELN 追蹤中，請稍候約30秒..."))
             try:
@@ -1734,14 +1764,10 @@ def handle_text_message(event):
                 write_job_log("ELN追蹤(手動)", "error", str(e))
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 執行失敗：{str(e)[:300]}"))
             return
+
         if cmd == "tracklog":
             with engine.begin() as conn:
-                rows = conn.execute(text("""
-                    SELECT job_name, status, message, executed_at
-                    FROM eln_job_log
-                    ORDER BY executed_at DESC
-                    LIMIT 20
-                """)).fetchall()
+                rows = conn.execute(text("SELECT job_name, status, message, executed_at FROM eln_job_log ORDER BY executed_at DESC LIMIT 20")).fetchall()
             if not rows:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有執行記錄。"))
                 return
@@ -1754,6 +1780,7 @@ def handle_text_message(event):
                 lines.append(f"{icon} {tw_time} {r[0]}{msg}")
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900]))
             return
+
         if cmd in ("claude", "gpt", "gemini"):
             forced_prompt = text_raw.split(" ", 1)[1].strip() if " " in text_raw else ""
             if not forced_prompt:
@@ -1763,6 +1790,84 @@ def handle_text_message(event):
             reply = ai_router(forced_prompt, chat_key=ck, forced_model=cmd)
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🦞 龍蝦（{model_map[cmd]}）\n\n{reply[:4700]}"))
             return
+
+        # ── 文章儲存指令 ──────────────────────────────────────────
+        if cmd == "save":
+            content = text_raw[len("/save"):].strip()
+            if not content:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請在 /save 後面加上文字或網址\n\n範例：\n/save https://...\n/save 這篇文章說..."))
+                return
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📥 儲存中，正在產生摘要..."))
+            try:
+                summary = save_article_text(ck, content)
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 已儲存！\n\n{summary}"))
+            except Exception as e:
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 儲存失敗：{str(e)[:200]}"))
+            return
+
+        if cmd == "unread":
+            rows = get_unread_articles(limit=15)
+            if not rows:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 目前沒有未讀文章！"))
+                return
+            icon_map = {"url": "🔗", "image": "🖼️", "text": "📝"}
+            lines = [f"📚 未讀文章（共 {len(rows)} 篇）：\n"]
+            for row in rows:
+                icon = icon_map.get(row[2], "📄")
+                dt = row[3].astimezone(TZ_TAIPEI_PYTZ).strftime("%m/%d")
+                lines.append(f"{icon} #{row[0]} {(row[1] or '無標題')[:28]}  ({dt})")
+            lines.append("\n輸入 /article <編號> 看摘要\n輸入 /read <編號> 標記已讀")
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900]))
+            return
+
+        if cmd == "article":
+            parts2 = text_raw.split(" ", 1)
+            if len(parts2) < 2 or not parts2[1].strip().isdigit():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入文章編號\n例：/article 3"))
+                return
+            article_id = int(parts2[1].strip())
+            row = get_article_detail(article_id)
+            if not row:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到文章 #{article_id}"))
+                return
+            source_label = {"url": "🔗 網址", "image": "🖼️ 圖片", "text": "📝 文字"}.get(row[4], "📄")
+            status = "✅ 已讀" if row[5] else "📌 未讀"
+            dt = row[6].astimezone(TZ_TAIPEI_PYTZ).strftime("%Y/%m/%d %H:%M")
+            msg = f"📄 文章 #{row[0]}\n標題：{row[1] or '無標題'}\n類型：{source_label}　{status}\n儲存時間：{dt}\n───────────\n{row[3] or '無摘要'}"
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg[:4900]))
+            return
+
+        if cmd == "read":
+            parts2 = text_raw.split(" ", 1)
+            if len(parts2) < 2 or not parts2[1].strip().isdigit():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入文章編號\n例：/read 3"))
+                return
+            try:
+                mark_article_read(int(parts2[1].strip()))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 文章 #{parts2[1].strip()} 已標記為已讀！"))
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 失敗：{str(e)[:200]}"))
+            return
+
+        if cmd == "del":
+            parts2 = text_raw.split(" ", 1)
+            if len(parts2) < 2 or not parts2[1].strip().isdigit():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入文章編號\n例：/del 3"))
+                return
+            article_id = int(parts2[1].strip())
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("DELETE FROM articles WHERE id = :i"), {"i": article_id})
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🗑️ 文章 #{article_id} 已刪除！"))
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 刪除失敗：{str(e)[:200]}"))
+            return
+
+        if cmd == "web":
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📚 龍蝦文章庫\n\nhttps://eln-bot.onrender.com/articles"))
+            return
+        # ──────────────────────────────────────────────────────────
+
         if cmd == "forget":
             try:
                 with engine.begin() as conn:
@@ -1771,11 +1876,9 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"清除失敗：{e}"))
             return
-        # 自然語言消費分析觸發
+
         if any(k in text_raw for k in SPENDING_NL_KEYWORDS):
-            _bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="💳 收到！正在幫你分析消費明細，請稍候約30秒..."
-            ))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="💳 收到！正在幫你分析消費明細，請稍候約30秒..."))
             try:
                 from spending_analyzer import get_monthly_spending_report
                 report = get_monthly_spending_report(days=31)
@@ -1793,11 +1896,13 @@ def handle_text_message(event):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="我收到訊息但處理時出錯了。你可以先輸入 /help。"))
         except Exception:
             pass
+
 # ==============================
 # File message handler
 # ==============================
 UPLOAD_DIR = Path("/tmp/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 def extract_text_from_file(file_path: str, filename: str) -> str:
     ext = Path(filename).suffix.lower()
     text = ""
@@ -1834,17 +1939,15 @@ def extract_text_from_file(file_path: str, filename: str) -> str:
         print(f"Extract error: {e}")
         text = ""
     return text.strip()
+
 def analyze_file_with_claude(text: str, filename: str) -> str:
     ext = Path(filename).suffix.lower()
     type_map = {".pdf": "PDF文件", ".docx": "Word文件", ".pptx": "PowerPoint簡報", ".xlsx": "Excel試算表", ".xls": "Excel試算表"}
     file_type = type_map.get(ext, "文件")
     prompt = (
-        f"我收到一份{file_type}，內容如下:\n\n"
-        f"{text[:6000]}\n\n"
-        "請幫我:\n"
-        "1. 用2-3句話說明這份文件的主題與目的\n"
-        "2. 條列出5-8個最重要的重點\n"
-        "3. 如果有數據或結論，特別標示出來\n"
+        f"我收到一份{file_type}，內容如下:\n\n{text[:6000]}\n\n"
+        "請幫我:\n1. 用2-3句話說明這份文件的主題與目的\n"
+        "2. 條列出5-8個最重要的重點\n3. 如果有數據或結論，特別標示出來\n"
         "4. 最後一句話說明這份文件的主要價值或建議行動\n\n"
         "格式規定: 不使用 Markdown 符號（禁止 ## ** --- 等），標題用 emoji，條列用 •"
     )
@@ -1854,24 +1957,21 @@ def analyze_file_with_claude(text: str, filename: str) -> str:
         messages=[{"role": "user", "content": prompt}]
     )
     return (resp.content[0].text or "").strip()
+
 def analyze_image_with_claude(image_data: bytes, media_type: str) -> str:
-    import base64
-    image_b64 = base64.b64encode(image_data).decode("utf-8")
+    image_b64 = _base64.b64encode(image_data).decode("utf-8")
     resp = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1500,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
-                {"type": "text", "text": "請分析這張圖片，幫我:\n1. 說明圖片的主要內容\n2. 如果有文字或數據，擷取重要資訊\n3. 條列出重點\n格式規定: 不使用 Markdown 符號，標題用 emoji，條列用 •"}
-            ]
-        }]
+        messages=[{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+            {"type": "text", "text": "請分析這張圖片，幫我:\n1. 說明圖片的主要內容\n2. 如果有文字或數據，擷取重要資訊\n3. 條列出重點\n格式規定: 不使用 Markdown 符號，標題用 emoji，條列用 •"}
+        ]}]
     )
     return (resp.content[0].text or "").strip()
+
 def generate_invest_post(image_data: bytes, reason: str, targets: str) -> str:
-    import base64
-    image_b64 = base64.b64encode(image_data).decode("utf-8")
+    image_b64 = _base64.b64encode(image_data).decode("utf-8")
     user_input = ""
     if reason:
         user_input += f"投資理由：{reason}\n"
@@ -1880,33 +1980,20 @@ def generate_invest_post(image_data: bytes, reason: str, targets: str) -> str:
     prompt = f"""你是一位台灣私人銀行的投資輔銷人員，正在為高資產客戶撰寫 LINE 群組推播文。
 根據上方的新聞截圖，結合以下我提供的投資觀點，生成兩個版本的推播文：
 {user_input}
-【規格要求】
-- 每個版本 100-250 字
-- 繁體中文
-- 不使用 Markdown（不用 ** # 等符號）
-- 用 emoji 當標題和分段符號
-- 結尾附上建議標的
-【版本一：專業版】
-適合傳給高資產客戶，語氣專業簡練，強調市場邏輯和風險意識。
-【版本二：輕鬆版】
-適合一般投資群組，語氣親切，用比喻讓人容易理解，帶點觀點但不失專業。
-格式：
-===專業版===
-（內容）
-===輕鬆版===
-（內容）"""
+【規格要求】- 每個版本 100-250 字 - 繁體中文 - 不使用 Markdown - 用 emoji 當標題和分段符號 - 結尾附上建議標的
+【版本一：專業版】適合傳給高資產客戶，語氣專業簡練，強調市場邏輯和風險意識。
+【版本二：輕鬆版】適合一般投資群組，語氣親切，用比喻讓人容易理解，帶點觀點但不失專業。
+格式：===專業版===（內容）===輕鬆版===（內容）"""
     resp = claude_client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1500,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
-                {"type": "text", "text": prompt}
-            ]
-        }]
+        messages=[{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
+            {"type": "text", "text": prompt}
+        ]}]
     )
     return (resp.content[0].text or "").strip()
+
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file_message(event):
     _bot_api = getattr(_current_bot_api, "api", None) or line_bot_api
@@ -1976,6 +2063,7 @@ def handle_file_message(event):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="檔案處理時出錯了，請稍後再試。"))
         except Exception:
             pass
+
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
     _bot_api = getattr(_current_bot_api, "api", None) or line_bot_api
@@ -1987,6 +2075,7 @@ def handle_image_message(event):
         image_data = b""
         for chunk in content.iter_content():
             image_data += chunk
+
         invest_mode, _ = db_invest_get(ck)
         if invest_mode == "await_image":
             db_invest_set(ck, "await_reason", image=image_data)
@@ -1994,9 +2083,18 @@ def handle_image_message(event):
                 text="✅ 收到截圖！\n\n請輸入你的投資理由和標的：\n\n理由：（你認為能投資的原因）\n標的：（股票/ETF代號）"
             ))
             return
-        _bot_api.reply_message(event.reply_token, TextSendMessage(text="收到圖片！正在分析，請稍候..."))
-        analysis = analyze_image_with_claude(image_data, "image/jpeg")
-        _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=analysis[:4900]))
+
+        # 自動儲存到文章庫
+        _bot_api.reply_message(event.reply_token, TextSendMessage(text="🖼️ 收到圖片！正在分析並儲存到文章庫..."))
+        try:
+            summary = save_article_image(image_data, str(message_id))
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(
+                text=f"✅ 圖片已儲存到文章庫！\n\n{summary}\n\n打 /unread 可以查看所有未讀文章"
+            ))
+        except Exception as e:
+            print(f"[IMAGE SAVE ERROR] {e}")
+            analysis = analyze_image_with_claude(image_data, "image/jpeg")
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=analysis[:4900]))
     except Exception as e:
         print("[ERROR] handle_image_message:", e)
         print(_traceback.format_exc())
@@ -2004,6 +2102,7 @@ def handle_image_message(event):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片處理時出錯了，請稍後再試。"))
         except Exception:
             pass
+
 def transcribe_audio(audio_data: bytes, filename: str = "audio.m4a") -> str:
     import tempfile
     if not openai_client:
@@ -2034,6 +2133,7 @@ def transcribe_audio(audio_data: bytes, filename: str = "audio.m4a") -> str:
                 language="zh"
             )
         return resp.text.strip()
+
 @handler.add(MessageEvent, message=AudioMessage)
 def handle_audio_message(event, _override_bot_api=None):
     _bot_api = _override_bot_api or line_bot_api
@@ -2059,9 +2159,9 @@ def handle_audio_message(event, _override_bot_api=None):
             _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 語音處理失敗：{str(e)[:200]}"))
         except Exception:
             pass
+
 # ==============================
 # ELN Auto-Tracking 群組專用 handler
-# 只處理 /list 和 /detail，資料來自龍蝦的 personal chat_key
 # ==============================
 ELN_PERSONAL_CHAT_KEY = f"user:{os.getenv('LINE_USER_ID', '')}"
 
@@ -2071,13 +2171,9 @@ def handle_eln_group_message(event):
         text_raw = (event.message.text or "").strip()
         tl = text_raw.lower().strip()
         print(f"[ELN-GROUP] {repr(text_raw)}")
-
-        # 只處理 /list 和 /detail，其他靜音
         if not (tl.startswith("/list") or tl.startswith("/detail")):
             return
-
-        ck = ELN_PERSONAL_CHAT_KEY  # 固定用龍蝦的資料
-
+        ck = ELN_PERSONAL_CHAT_KEY
         if tl.startswith("/list"):
             from collections import defaultdict
             list_parts = text_raw.split(" ", 1)
@@ -2086,9 +2182,7 @@ def handle_eln_group_message(event):
             if not bonds:
                 eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無資料。"))
                 return
-            detail_map_status = {}
-            for bond_id, agent_raw, detail in bonds:
-                detail_map_status[bond_id] = bond_status_tag(detail)
+            detail_map_status = {bond_id: bond_status_tag(detail) for bond_id, _, detail in bonds}
             if name_filter:
                 matched = []
                 seen = set()
@@ -2100,24 +2194,19 @@ def handle_eln_group_message(event):
                 if not matched:
                     eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到「{name_filter}」的持倉。"))
                     return
-                lines = [f"👤 {name_filter} 的持倉（共 {len(matched)} 筆）：\n"]
-                for b, tag in matched:
-                    lines.append(f"   • {b}{tag}")
+                lines = [f"👤 {name_filter} 的持倉（共 {len(matched)} 筆）：\n"] + [f"   • {b}{tag}" for b, tag in matched]
                 full_text = "\n".join(lines)
             else:
                 grouped = defaultdict(list)
                 for bond_id, agent_raw, detail in bonds:
-                    agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()]
-                    if not agents:
-                        agents = ["未指定"]
+                    agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()] or ["未指定"]
                     for agent in agents:
                         if bond_id not in [b for b, _ in grouped[agent]]:
                             grouped[agent].append((bond_id, detail_map_status.get(bond_id, "")))
                 lines = [f"📋 全部商品（共 {len(set(b for b,_,_ in bonds))} 筆，按理專排列）：\n"]
                 for agent, bond_list in sorted(grouped.items()):
                     lines.append(f"👤 {agent}（{len(bond_list)} 筆）")
-                    for b, tag in bond_list:
-                        lines.append(f"   • {b}{tag}")
+                    lines += [f"   • {b}{tag}" for b, tag in bond_list]
                 full_text = "\n".join(lines)
             chunks = []
             current = ""
@@ -2133,14 +2222,12 @@ def handle_eln_group_message(event):
             for chunk in chunks[1:]:
                 eln_group_bot_api.push_message(event.source.user_id, TextSendMessage(text=chunk))
             return
-
         if tl.startswith("/detail"):
             parts = text_raw.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
                 eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入：/detail 商品代號"))
                 return
-            query = parts[1].strip()
-            matched_id, detail, candidates = db_find_detail(ck, query)
+            matched_id, detail, candidates = db_find_detail(ck, parts[1].strip())
             if detail:
                 eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text=detail[:4900]))
                 return
@@ -2157,6 +2244,7 @@ def handle_eln_group_message(event):
 # 內建排程
 # ==============================
 TZ_TAIPEI_PYTZ = pytz.timezone("Asia/Taipei")
+
 def job_daily_report():
     now = datetime.now(TZ_TAIPEI_PYTZ)
     if now.weekday() >= 5:
@@ -2173,6 +2261,7 @@ def job_daily_report():
     except Exception as e:
         print(f"[Scheduler] 財經日報失敗: {e}")
         write_job_log("財經日報", "error", str(e))
+
 def job_alert_monitor():
     print(f"[Scheduler] 執行價格警示監控 {datetime.now(TZ_TAIPEI_PYTZ).strftime('%H:%M')}")
     try:
@@ -2180,6 +2269,7 @@ def job_alert_monitor():
         alert_main()
     except Exception as e:
         print(f"[Scheduler] 價格警示失敗: {e}")
+
 def job_mail_monitor():
     print(f"[Scheduler] 執行郵件監控 {datetime.now(TZ_TAIPEI_PYTZ).strftime('%H:%M')}")
     try:
@@ -2187,6 +2277,26 @@ def job_mail_monitor():
         mail_main()
     except Exception as e:
         print(f"[Scheduler] 郵件監控失敗: {e}")
+
+def job_article_reminder():
+    """每週一早上提醒未讀文章數量"""
+    try:
+        rows = get_unread_articles(limit=100)
+        if not rows:
+            write_job_log("未讀提醒", "skipped", "沒有未讀文章")
+            return
+        targets = load_targets()
+        target_id = targets.get("default", "")
+        if not target_id:
+            write_job_log("未讀提醒", "skipped", "沒有設定推播對象")
+            return
+        msg = f"📚 本週提醒：你有 {len(rows)} 篇文章還沒看！\n\n打 /unread 查看清單\n打 /web 開啟文章庫"
+        line_bot_api.push_message(target_id, TextSendMessage(text=msg))
+        write_job_log("未讀提醒", "success", f"共{len(rows)}篇未讀")
+    except Exception as e:
+        print(f"[Scheduler] 未讀提醒失敗: {e}")
+        write_job_log("未讀提醒", "error", str(e))
+
 def write_job_log(job_name: str, status: str, message: str = ""):
     try:
         with engine.begin() as conn:
@@ -2196,8 +2306,8 @@ def write_job_log(job_name: str, status: str, message: str = ""):
             """), {"j": job_name, "s": status, "m": message[:1000]})
     except Exception as e:
         print(f"[LOG] 寫入失敗: {e}")
+
 def job_spending_report():
-    """每月最後一天自動發送消費明細"""
     now = datetime.now(TZ_TAIPEI_PYTZ)
     import calendar
     last_day = calendar.monthrange(now.year, now.month)[1]
@@ -2231,6 +2341,7 @@ def job_auto_tracking():
     except Exception as e:
         print(f"[Scheduler] ELN 追蹤失敗: {e}")
         write_job_log("ELN追蹤", "error", str(e))
+
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
     scheduler.add_job(
@@ -2258,7 +2369,13 @@ def start_scheduler():
         IntervalTrigger(minutes=15, start_date=datetime.now(TZ_TAIPEI_PYTZ).replace(second=0, microsecond=0) + timedelta(minutes=5)),
         id="mail_monitor", name="郵件監控"
     )
+    scheduler.add_job(
+        job_article_reminder,
+        CronTrigger(day_of_week="mon", hour=8, minute=30, timezone=TZ_TAIPEI_PYTZ),
+        id="article_reminder", name="未讀文章提醒"
+    )
     scheduler.start()
     print("[Scheduler] 排程啟動完成 ✅")
     return scheduler
+
 _scheduler = start_scheduler()
