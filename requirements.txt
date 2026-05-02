@@ -23,11 +23,11 @@ Pillow==11.2.1
 google-cloud-speech==2.32.0
 google-cloud-storage==2.19.0
 matplotlib==3.10.1
-numpy==2.2.5
+numpy==1.26.4
 apscheduler==3.11.0
 pydub==0.25.1
 supabase==2.15.2
-chromadb==0.4.24
+chromadb==0.5.23
 pymupdf==1.25.5
 python-multipart==0.0.20
 google-generativeai==0.8.3
