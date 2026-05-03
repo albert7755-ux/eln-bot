@@ -403,6 +403,7 @@ async def callback2(request: Request):
             tl = txt.lower()
             rtoken = ev.get("replyToken", "")
             uid = ev.get("source", {}).get("userId", "")
+            print(f"[ELN-G USER] uid={uid} msg={repr(txt)}")
             if not (tl.startswith("/list") or tl.startswith("/detail") or tl.startswith("/end")):
                 continue
             print("[ELN-G]", repr(txt))
@@ -1099,7 +1100,6 @@ def handle_text_message(event):
                 sent, failed = 0, 0
                 for row in targets:
                     try:
-                        print(f"[SEND DEBUG] token starts: {ELN_GROUP_ACCESS_TOKEN[:10]}, target: {row.target_id}")
                         line_bot_api.push_message(row.target_id, TextSendMessage(text=row.msg[:4900]))
                         sent += 1
                     except Exception as e:
