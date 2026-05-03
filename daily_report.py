@@ -216,45 +216,86 @@ def build_final_report(data: dict) -> str:
 # 生圖功能
 # ==============================
 def generate_dalle_image(report_text: str) -> str | None:
-    """用 DALL-E 3 根據日報內容生成圖片，回傳圖片 URL"""
+    """用 gpt-image-1 根據日報內容生成資訊圖，回傳圖片 bytes"""
     if not OPENAI_API_KEY:
         print("[Image] 缺少 OPENAI_API_KEY，跳過生圖")
         return None
     try:
         from openai import OpenAI
+        import base64
         client = OpenAI(api_key=OPENAI_API_KEY)
 
-        # 先用 GPT 把日報濃縮成生圖 prompt
-        summary_resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            max_tokens=200,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "根據以下財經日報內容，用英文寫一段 DALL-E 圖片生成 prompt（50字以內）。\n"
-                    "風格：專業財經雜誌封面，現代感，有數字、圖表、城市金融中心元素。\n"
-                    "不要出現任何文字或數字在圖片中。\n\n"
-                    f"日報內容：\n{report_text[:800]}"
-                )
-            }]
-        )
-        image_prompt = summary_resp.choices[0].message.content.strip()
-        print(f"[Image] DALL-E prompt: {image_prompt}")
+        tw_tz = pytz.timezone("Asia/Taipei")
+        today = datetime.now(tw_tz)
+        date_str = today.strftime("%Y/%m/%d")
 
-        # 生成圖片
+        # 從日報萃取重點
+        lines = report_text.split("\n")
+        key_points = []
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith("【") and len(line) > 10:
+                key_points.append(line)
+            if len(key_points) >= 8:
+                break
+
+        points_text = "\n".join(f"• {p}" for p in key_points)
+
+        prompt = f"""請製作一張專業的財經資訊圖，格式如下：
+
+標題：{date_str} 財經日報
+
+內容重點：
+{points_text}
+
+設計要求：
+- 深藍色或深色背景，金色/白色文字
+- 左上角放日期和標題
+- 用清楚的區塊分隔各重點
+- 每個重點前加適合的 emoji
+- 底部加上「內部教育訓練資料，請勿外流」
+- 整體風格像彭博終端機或專業財經雜誌
+- 繁體中文
+"""
+
+        print(f"[Image] gpt-image-1 生圖中...")
         image_resp = client.images.generate(
-            model="dall-e-3",
-            prompt=image_prompt,
-            size="1792x1024",
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1024x1536",
             quality="standard",
             n=1
         )
+        # gpt-image-1 回傳 base64
+        image_b64 = image_resp.data[0].b64_json
+        if image_b64:
+            print("[Image] gpt-image-1 生圖成功")
+            return f"data:image/png;base64,{image_b64}"
+        # 或者回傳 URL
         image_url = image_resp.data[0].url
-        print(f"[Image] DALL-E generated: {image_url[:60]}...")
-        return image_url
-    except Exception as e:
-        print(f"[Image] DALL-E 生圖失敗: {e}")
+        if image_url:
+            print(f"[Image] gpt-image-1 URL: {image_url[:60]}...")
+            return image_url
         return None
+    except Exception as e:
+        print(f"[Image] gpt-image-1 失敗，改用 DALL-E 3: {e}")
+        # fallback 到 DALL-E 3
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            image_resp = client.images.generate(
+                model="dall-e-3",
+                prompt=f"Professional financial news infographic for {datetime.now(pytz.timezone('Asia/Taipei')).strftime('%Y/%m/%d')}, dark blue background, gold and white text, Bloomberg terminal style, showing market data charts",
+                size="1792x1024",
+                quality="standard",
+                n=1
+            )
+            url = image_resp.data[0].url
+            print(f"[Image] DALL-E 3 fallback: {url[:60]}...")
+            return url
+        except Exception as e2:
+            print(f"[Image] DALL-E 3 也失敗: {e2}")
+            return None
 
 
 def upload_to_cloudinary(image_url: str) -> str | None:
@@ -275,8 +316,10 @@ def upload_to_cloudinary(image_url: str) -> str | None:
         ).hexdigest()
 
         upload_url = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/image/upload"
+        # 支援 base64 格式
+        file_data = image_url  # 可以是 URL 或 base64 data URI
         response = requests.post(upload_url, data={
-            "file": image_url,
+            "file": file_data,
             "timestamp": timestamp,
             "api_key": CLOUDINARY_API_KEY,
             "signature": signature,
