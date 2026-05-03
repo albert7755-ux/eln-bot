@@ -928,6 +928,172 @@ def build_transcript_pdf_content(transcript: str, summary: str, chat_key: str = 
 {transcript[:120000]}
 """
     return ai_claude_long(prompt, chat_key)
+
+# ==============================
+# 文章儲存功能
+# ==============================
+def geocode_location(location_name: str) -> tuple[float, float] | tuple[None, None]:
+    api_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    if not api_key or not location_name:
+        return None, None
+    try:
+        import urllib.parse
+        query = urllib.parse.quote(location_name)
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?address={query}&key={api_key}&language=zh-TW"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("status") == "OK" and data.get("results"):
+            loc = data["results"][0]["geometry"]["location"]
+            return float(loc["lat"]), float(loc["lng"])
+    except Exception as e:
+        print(f"[Geocode] 失敗：{e}")
+    return None, None
+
+def _parse_claude_article_response(text: str) -> dict:
+    result = {"title": "", "summary": "", "category": "other", "location_name": ""}
+    lines = text.splitlines()
+    summary_lines = []
+    in_summary = False
+    for line in lines:
+        line = line.strip()
+        if line.startswith("標題："):
+            result["title"] = line.replace("標題：", "").strip()
+        elif line.startswith("分類："):
+            cat = line.replace("分類：", "").strip().lower()
+            cat_map = {
+                "finance": "finance", "財經": "finance", "投資": "finance",
+                "food": "food", "美食": "food", "餐廳": "food", "小吃": "food",
+                "travel": "travel", "旅遊": "travel", "景點": "travel", "觀光": "travel",
+                "shopping": "shopping", "購物": "shopping",
+                "other": "other", "其他": "other",
+            }
+            result["category"] = cat_map.get(cat, "other")
+        elif line.startswith("地點："):
+            result["location_name"] = line.replace("地點：", "").strip()
+            if result["location_name"] == "無":
+                result["location_name"] = ""
+        elif line.startswith("重點："):
+            in_summary = True
+        elif in_summary and line:
+            summary_lines.append(line)
+    result["summary"] = result["title"] + "\n重點：\n" + "\n".join(summary_lines) if summary_lines else text
+    return result
+
+ARTICLE_PROMPT_SUFFIX = """
+格式如下（請嚴格照此格式，每行一個欄位）：
+標題：xxx
+分類：finance 或 food 或 travel 或 shopping 或 other
+地點：地點名稱（若有任何店名、景點、地名、城市、國家請填入，例如「四國自動車博物館」「鼎泰豐信義店」「東京淺草」「桃園」；若完全沒有地點資訊才填「無」）
+重點：
+• xxx
+• xxx
+• xxx
+
+注意：
+- 只要圖片或內容有提到任何地名、店名、景點名稱，一律填入地點欄位
+- 日本、韓國、歐洲等海外地點也要填，不要填「無」
+- 分類判斷：博物館/景點/旅遊=travel，餐廳/小吃/咖啡=food，投資/市場/財經=finance，購物/商品=shopping
+"""
+
+def save_article_text(ck: str, content: str) -> str:
+    prompt = f"請用繁體中文為以下內容產生摘要，並判斷分類與地點。\n{ARTICLE_PROMPT_SUFFIX}\n內容：\n{content[:3000]}"
+    import time
+    for attempt in range(3):
+        try:
+            resp = claude_client.messages.create(
+                model="claude-sonnet-4-20250514", max_tokens=600,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            break
+        except Exception as e:
+            if "529" in str(e) or "overloaded" in str(e).lower():
+                if attempt < 2:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+            raise e
+    parsed = _parse_claude_article_response((resp.content[0].text or "").strip())
+    title = parsed["title"] or content[:30]
+    summary = parsed["summary"]
+    category = parsed["category"]
+    location_name = parsed["location_name"]
+    source_type = "url" if content.startswith("http") else "text"
+    lat, lng = geocode_location(location_name) if location_name else (None, None)
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO articles (title, content, summary, source_type, category, location_name, lat, lng, is_read, show_on_map)
+        VALUES (:t, :c, :s, :st, :cat, :loc, :lat, :lng, FALSE, TRUE)
+        """), {"t": title, "c": content[:5000], "s": summary, "st": source_type, "cat": category, "loc": location_name, "lat": lat, "lng": lng})
+    return summary
+
+def save_article_image(image_data: bytes, message_id: str) -> str:
+    image_b64 = _base64.b64encode(image_data).decode("utf-8")
+    import time
+    for attempt in range(3):
+        try:
+            resp = claude_client.messages.create(
+                model="claude-sonnet-4-20250514", max_tokens=600,
+                messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
+                    {"type": "text", "text": f"請用繁體中文描述這張圖片的內容並產生摘要，並判斷分類與地點。\n{ARTICLE_PROMPT_SUFFIX}"}
+                ]}]
+            )
+            break
+        except Exception as e:
+            if "529" in str(e) or "overloaded" in str(e).lower():
+                if attempt < 2:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+            raise e
+    parsed = _parse_claude_article_response((resp.content[0].text or "").strip())
+    title = parsed["title"] or "圖片文章"
+    summary = parsed["summary"]
+    category = parsed["category"]
+    location_name = parsed["location_name"]
+    lat, lng = geocode_location(location_name) if location_name else (None, None)
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO articles (title, content, summary, source_type, image_url, category, location_name, lat, lng, is_read, show_on_map)
+        VALUES (:t, :c, :s, 'image', :img, :cat, :loc, :lat, :lng, FALSE, TRUE)
+        """), {"t": title, "c": "（圖片）", "s": summary, "img": f"line_image_{message_id}", "cat": category, "loc": location_name, "lat": lat, "lng": lng})
+    return summary
+
+def get_unread_articles(limit: int = 15) -> list:
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+        SELECT id, title, source_type, created_at FROM articles
+        WHERE is_read = FALSE ORDER BY created_at DESC LIMIT :n
+        """), {"n": limit}).fetchall()
+    return rows
+
+def mark_article_read(article_id: int):
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE articles SET is_read = TRUE WHERE id = :i"), {"i": article_id})
+
+def get_article_detail(article_id: int):
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+        SELECT id, title, content, summary, source_type, is_read, created_at
+        FROM articles WHERE id = :i
+        """), {"i": article_id}).fetchone()
+    return row
+
+ARTICLE_PROMPT_SUFFIX = """
+格式如下（請嚴格照此格式，每行一個欄位）：
+標題：xxx
+分類：finance 或 food 或 travel 或 shopping 或 other
+地點：地點名稱（若有任何店名、景點、地名、城市、國家請填入，例如「四國自動車博物館」「鼎泰豐信義店」「東京淺草」「桃園」；若完全沒有地點資訊才填「無」）
+重點：
+• xxx
+• xxx
+• xxx
+
+注意：
+- 只要圖片或內容有提到任何地名、店名、景點名稱，一律填入地點欄位
+- 日本、韓國、歐洲等海外地點也要填，不要填「無」
+- 分類判斷：博物館/景點/旅遊=travel，餐廳/小吃/咖啡=food，投資/市場/財經=finance，購物/商品=shopping
+"""
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     _bot_api = getattr(_current_bot_api, "api", None) or line_bot_api
@@ -1641,6 +1807,122 @@ def handle_text_message(event):
                 return
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="查不到該代號或目前沒有已保存結果。請先 /calc 上傳 Excel。"))
             return
+        if cmd == "kb":
+            parts = text_raw.split(" ", 1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            if arg.lower() in ("上傳", "upload"):
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                    INSERT INTO eln_session(chat_key, await_file, invest_mode, updated_at)
+                    VALUES (:k, TRUE, 'kb_upload', NOW())
+                    ON CONFLICT (chat_key) DO UPDATE SET await_file=TRUE, invest_mode='kb_upload', updated_at=NOW()
+                    """), {"k": ck})
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📚 請直接傳送檔案給我\n\n支援格式：PDF、PPT、Word、圖片\n\n傳完後會自動存入知識庫 ✅"))
+                return
+            if arg.lower() in ("清單", "list", "列表"):
+                try:
+                    docs = knowledge.list_documents()
+                    if not docs:
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(text="📚 知識庫目前沒有任何文件。"))
+                        return
+                    icons = {"pdf": "📄", "pptx": "📊", "ppt": "📊", "docx": "📝", "doc": "📝"}
+                    lines = [f"📚 知識庫文件（共 {len(docs)} 份）\n"]
+                    for d in docs:
+                        ext = d["filename"].split(".")[-1].lower()
+                        icon = icons.get(ext, "📎")
+                        lines.append(f"{icon} {d['filename']}（{d['page_count']} 頁）")
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900]))
+                except Exception as e:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 讀取清單失敗：{str(e)[:200]}"))
+                return
+            if not arg:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📚 知識庫指令\n─────────────────\n/kb <問題> → 查詢知識庫\n/kb上傳 → 上傳檔案到知識庫\n/kb清單 → 查看已上傳文件\n─────────────────\n範例：\n/kb PIMCO收益基金的投資策略\n/kb ELN的KO條件是什麼"))
+                return
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📚 查詢知識庫中，請稍候..."))
+            try:
+                result = knowledge.query_knowledge(arg)
+                answer = result.get("answer", "查無結果")
+                sources = result.get("sources", [])
+                src_text = ""
+                if sources:
+                    src_text = "\n\n📍 來源：" + "、".join([f"{s['filename']} 第{s['page']}頁" for s in sources[:3]])
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📚 知識庫\n\n{answer[:4500]}{src_text}"))
+            except Exception as e:
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 查詢失敗：{str(e)[:200]}"))
+            return
+
+        # ── 文章儲存指令 ──────────────────────────────────────────
+        if cmd == "save":
+            content = text_raw[len("/save"):].strip()
+            if not content:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請在 /save 後面加上文字或網址\n\n範例：\n/save https://...\n/save 這篇文章說..."))
+                return
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📥 儲存中，正在產生摘要..."))
+            try:
+                summary = save_article_text(ck, content)
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"✅ 已儲存！\n\n{summary}"))
+            except Exception as e:
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 儲存失敗：{str(e)[:200]}"))
+            return
+
+        if cmd == "unread":
+            rows = get_unread_articles(limit=15)
+            if not rows:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 目前沒有未讀文章！"))
+                return
+            icon_map = {"url": "🔗", "image": "🖼️", "text": "📝"}
+            lines = [f"📚 未讀文章（共 {len(rows)} 篇）：\n"]
+            for row in rows:
+                icon = icon_map.get(row[2], "📄")
+                dt = row[3].astimezone(TZ_TAIPEI_PYTZ).strftime("%m/%d")
+                lines.append(f"{icon} #{row[0]} {(row[1] or '無標題')[:28]}  ({dt})")
+            lines.append("\n輸入 /article <編號> 看摘要\n輸入 /read <編號> 標記已讀")
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900]))
+            return
+
+        if cmd == "article":
+            parts2 = text_raw.split(" ", 1)
+            if len(parts2) < 2 or not parts2[1].strip().isdigit():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入文章編號\n例：/article 3"))
+                return
+            article_id = int(parts2[1].strip())
+            row = get_article_detail(article_id)
+            if not row:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到文章 #{article_id}"))
+                return
+            source_label = {"url": "🔗 網址", "image": "🖼️ 圖片", "text": "📝 文字"}.get(row[4], "📄")
+            status = "✅ 已讀" if row[5] else "📌 未讀"
+            dt = row[6].astimezone(TZ_TAIPEI_PYTZ).strftime("%Y/%m/%d %H:%M")
+            msg = f"📄 文章 #{row[0]}\n標題：{row[1] or '無標題'}\n類型：{source_label}　{status}\n儲存時間：{dt}\n───────────\n{row[3] or '無摘要'}"
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg[:4900]))
+            return
+
+        if cmd == "read":
+            parts2 = text_raw.split(" ", 1)
+            if len(parts2) < 2 or not parts2[1].strip().isdigit():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入文章編號\n例：/read 3"))
+                return
+            try:
+                mark_article_read(int(parts2[1].strip()))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 文章 #{parts2[1].strip()} 已標記為已讀！"))
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 失敗：{str(e)[:200]}"))
+            return
+
+        if cmd == "del":
+            parts2 = text_raw.split(" ", 1)
+            if len(parts2) < 2 or not parts2[1].strip().isdigit():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入文章編號\n例：/del 3"))
+                return
+            article_id = int(parts2[1].strip())
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("DELETE FROM articles WHERE id = :i"), {"i": article_id})
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🗑️ 文章 #{article_id} 已刪除！"))
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 刪除失敗：{str(e)[:200]}"))
+            return
+
         if cmd.startswith("mail"):
             parts = text_raw.split(" ", 1)
             sub = parts[1].strip().lower() if len(parts) > 1 else ""
