@@ -265,11 +265,11 @@ def upload_to_cloudinary(image_url: str) -> str | None:
     try:
         import hashlib
         import time
-        import base64
 
         timestamp = str(int(time.time()))
-        # 建立簽名
-        params_to_sign = f"timestamp={timestamp}"
+        folder = "daily_report"
+        # 簽名字串必須按字母順序排列參數
+        params_to_sign = f"folder={folder}&timestamp={timestamp}"
         signature = hashlib.sha1(
             f"{params_to_sign}{CLOUDINARY_API_SECRET}".encode()
         ).hexdigest()
@@ -280,7 +280,7 @@ def upload_to_cloudinary(image_url: str) -> str | None:
             "timestamp": timestamp,
             "api_key": CLOUDINARY_API_KEY,
             "signature": signature,
-            "folder": "daily_report",
+            "folder": folder,
         })
         if response.status_code == 200:
             data = response.json()
