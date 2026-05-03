@@ -12,12 +12,8 @@ def generate_market_content(user_text: str) -> str:
     weekday_map = ["週一","週二","週三","週四","週五","週六","週日"]
     today_str = f"{today.strftime('%Y年%m月%d日')}({weekday_map[today.weekday()]})"
 
-    # ── 解析新聞內容與標的 ──
-    # 格式：新聞內容（可多行）+ 空行 + 標的（每行一個）
     parts = user_text.strip().split("\n\n")
     news_content = parts[0].strip()
-
-    # 空行後的每一行都是標的
     raw_targets = []
     if len(parts) > 1:
         for block in parts[1:]:
@@ -25,7 +21,6 @@ def generate_market_content(user_text: str) -> str:
                 line = line.strip()
                 if line:
                     raw_targets.append(line)
-
     targets_str = "、".join(raw_targets) if raw_targets else ""
     targets_list = "\n".join([f"• {t}" for t in raw_targets]) if raw_targets else "（用戶未指定標的，請只寫方向建議，不要自行推薦具體標的）"
 
@@ -52,10 +47,13 @@ def generate_market_content(user_text: str) -> str:
         "若某策略方向沒有對應標的，只寫方向建議文字，不列任何標的名稱。\n\n"
         "關於 DCI（Dual Currency Investment）：固收策略可視情況帶入 DCI 說明，\n"
         "強調增強收益、靈活換匯、資金效率高，適合有換匯需求的客戶。\n\n"
+        "【避險配置規則】\n"
+        "避險配置請根據當日市場主題靈活發揮，不要每次都固定寫黃金。\n"
+        "可以是：美元現金、短天期債、防禦型股票、低波動ETF、貨幣市場基金等，視情境選擇最貼切的。\n\n"
         "結尾金句：每次根據當日市場主題創作一句全新投資金句，正向有力，後加符合情境 emoji。\n\n"
         "輸出格式必須完全如下：\n\n"
         f"📊 市場觀點｜{today_str}\n\n"
-        "📝 [一段正向開場白，2-3句，聚焦機會而非風險]\n\n"
+        "📝 [一句話開場白，點出今日市場核心主題，簡潔有力]\n\n"
         "🔥 關鍵消息\n\n"
         "🔹 [事件1標題]\n"
         "[具體數據 + 正向評語]\n\n"
@@ -71,7 +69,7 @@ def generate_market_content(user_text: str) -> str:
         "📈 固定收益策略\n"
         "[方向說明，含DCI介紹]\n"
         "[若有對應標的，列出：▶ 標的名稱]\n\n"
-        "🥇 避險配置：[一句觀點]\n\n"
+        "🛡️ 避險配置：[根據當日情境靈活發揮，一句觀點]\n\n"
         "[今日投資金句 + emoji]"
     )
 
