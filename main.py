@@ -1350,7 +1350,11 @@ def handle_text_message(event):
                 save_report_to_db(report)
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=report[:4900]))
                 if image_url:
-                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"📊 今日市場摘要圖\n{image_url}"))
+                    from linebot.models import ImageSendMessage
+                    _bot_api.push_message(ck.split(":", 1)[1], ImageSendMessage(
+                        original_content_url=image_url,
+                        preview_image_url=image_url
+                    ))
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"日報產生失敗: {e}"))
             return
