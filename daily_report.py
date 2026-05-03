@@ -385,7 +385,17 @@ def generate_report():
     """回傳 (report_text, image_url, weekly_calendar) 三個值"""
     market_data = get_market_data()
     report = build_final_report(market_data)
-    return report, None, None
+
+    # 生圖
+    image_url = None
+    try:
+        dalle_url = generate_dalle_image(report)
+        if dalle_url:
+            image_url = upload_to_cloudinary(dalle_url)
+    except Exception as e:
+        print(f"[Image] generate_report 生圖失敗: {e}")
+
+    return report, image_url, None
 
 
 def main():
