@@ -381,9 +381,11 @@ def send_line_message(text):
         print(f"LINE push failed: {response.status_code} {response.text}")
 
 
-def generate_report() -> str:
+def generate_report():
+    """回傳 (report_text, image_url, weekly_calendar) 三個值"""
     market_data = get_market_data()
-    return build_final_report(market_data)
+    report = build_final_report(market_data)
+    return report, None, None
 
 
 def main():
