@@ -407,7 +407,7 @@ async def callback2(request: Request):
             rtoken = ev.get("replyToken", "")
             uid = ev.get("source", {}).get("userId", "")
             print(f"[ELN-G USER] uid={uid} msg={repr(txt)}")
-            if not (tl.startswith("/list") or tl.startswith("/detail") or tl.startswith("/end")):
+            if not (tl.startswith("/list") or tl.startswith("/detail")):
                 continue
             print("[ELN-G]", repr(txt))
             from linebot.models import TextSendMessage as TSM
