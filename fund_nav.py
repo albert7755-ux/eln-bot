@@ -1,29 +1,28 @@
 """
-fund_nav.py — 基金淨值更新模組
-供 main.py import 使用，也可獨立執行
+基金淨值更新腳本（MoneyDJ 版）- Render 版
+從 MoneyDJ 抓取最新淨值，寫入 Google Drive fund-data 試算表
 """
 
 import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+from bs4 import BeautifulSoup
 import time
 import os
 import json
-import re
 import gspread
-from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import Request
 from datetime import datetime
 
-try:
-    from requests.packages.urllib3.exceptions import InsecureRequestWarning
-    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-except:
-    pass
+# ==========================================
+# 設定區
+# ==========================================
 
-# ==========================================
-# 設定
-# ==========================================
 FOLDER_ID = "1i1-zUzLNnuwo2NVWijubvBICLbladZQO"
+
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
+LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
 FUND_DB = {
     "F00001DRQQ_FO": {"moneydj": "pima4",   "name": "PIMCO收益增長"},
@@ -46,123 +45,143 @@ FUND_DB = {
 }
 
 # ==========================================
-# Google 連線（支援環境變數 & credentials.json）
+# Google Drive 連線（從環境變數讀取）
 # ==========================================
-def _get_creds(scopes):
-    """優先用環境變數，其次用本機 credentials.json"""
-    creds_json = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if creds_json:
-        return Credentials.from_service_account_info(json.loads(creds_json), scopes=scopes)
-    creds_path = os.path.join(os.path.dirname(__file__), "credentials.json")
-    return Credentials.from_service_account_file(creds_path, scopes=scopes)
 
 def get_client():
-    creds = _get_creds([
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+    if not creds_json:
+        raise RuntimeError("缺少 GOOGLE_CREDENTIALS_JSON 環境變數")
+    creds_info = json.loads(creds_json)
+    scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive.readonly"
-    ])
+    ]
+    creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
     return gspread.authorize(creds)
 
 def get_all_sheets(folder_id):
-    creds = _get_creds(["https://www.googleapis.com/auth/drive.readonly"])
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+    if not creds_json:
+        raise RuntimeError("缺少 GOOGLE_CREDENTIALS_JSON 環境變數")
+    creds_info = json.loads(creds_json)
+    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+    creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
     creds.refresh(Request())
     headers = {"Authorization": f"Bearer {creds.token}"}
     params = {
         "q": f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
-        "fields": "files(id, name)", "pageSize": 200,
+        "fields": "files(id, name)",
+        "pageSize": 200,
     }
-    resp = requests.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
+    resp = requests.get("https://www.googleapis.com/drive/v3/files",
+                        headers=headers, params=params)
     return {f["name"]: f["id"] for f in resp.json().get("files", [])}
 
 # ==========================================
-# MoneyDJ 抓取
+# MoneyDJ 抓取淨值
 # ==========================================
-def fetch_nav_history(moneydj_ticker):
+
+def fetch_nav_history_from_moneydj(moneydj_ticker):
     urls = [
         f"https://www.moneydj.com/funddj/ya/yp010001.djhtm?a={moneydj_ticker}",
         f"https://www.moneydj.com/funddj/ya/yp010000.djhtm?a={moneydj_ticker}",
     ]
-    hdrs = {
+    headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "zh-TW,zh;q=0.9",
         "Referer": "https://www.moneydj.com/funddj/"
     }
+
+    import re
     from datetime import date
     today = date.today()
-    cur_year = today.year
+    current_year = today.year
 
     for url in urls:
         try:
-            resp = requests.get(url, headers=hdrs, timeout=20, verify=False)
+            resp = requests.get(url, headers=headers, timeout=20, verify=False)
             resp.encoding = "big5"
             soup = BeautifulSoup(resp.text, "html.parser")
             nav_dict = {}
-            for table in soup.find_all("table"):
-                for row in table.find_all("tr"):
-                    texts = [c.get_text(strip=True) for c in row.find_all("td")]
-                    if len(texts) < 2:
+
+            tables = soup.find_all("table")
+            for table in tables:
+                rows = table.find_all("tr")
+                for row in rows:
+                    cells = row.find_all("td")
+                    if len(cells) < 2:
                         continue
-                    # 模式一：YYYY/MM/DD
-                    for i, t in enumerate(texts):
-                        if re.match(r"20\d\d/\d{2}/\d{2}$", t):
-                            d = t.replace("/", "-")
+                    texts = [c.get_text(strip=True) for c in cells]
+
+                    for i, text in enumerate(texts):
+                        if re.match(r"20\d\d/\d{2}/\d{2}$", text):
+                            nav_date = text.replace("/", "-")
                             for j in range(i+1, min(i+4, len(texts))):
                                 try:
-                                    v = float(texts[j].replace(",", ""))
-                                    if 0.5 < v < 100000:
-                                        nav_dict[d] = v
+                                    val = float(texts[j].replace(",", ""))
+                                    if 0.5 < val < 100000:
+                                        nav_dict[nav_date] = val
                                         break
                                 except:
                                     continue
-                    # 模式二：MM/DD
+
                     i = 0
                     while i < len(texts) - 1:
-                        t = texts[i]
-                        if re.match(r"^\d{2}/\d{2}$", t):
-                            mo, dy = int(t[:2]), int(t[3:])
-                            yr = cur_year if mo <= today.month else cur_year - 1
-                            d = f"{yr}-{mo:02d}-{dy:02d}"
+                        text = texts[i]
+                        if re.match(r"^\d{2}/\d{2}$", text):
+                            month = int(text[:2])
+                            day   = int(text[3:])
+                            year  = current_year if month <= today.month else current_year - 1
+                            nav_date = f"{year}-{month:02d}-{day:02d}"
                             try:
-                                v = float(texts[i+1].replace(",", ""))
-                                if 0.5 < v < 100000:
-                                    nav_dict[d] = v
+                                val = float(texts[i+1].replace(",", ""))
+                                if 0.5 < val < 100000:
+                                    nav_dict[nav_date] = val
                             except:
                                 pass
                         i += 1
+
             if nav_dict:
                 return nav_dict
+
         except Exception as e:
             print(f"    {url} 失敗：{e}")
             continue
+
     return {}
 
 # ==========================================
-# 主要更新函式（供 main.py 呼叫）
+# 主程式
 # ==========================================
-def run_fund_nav_update(line_push_fn=None):
-    """
-    更新所有基金淨值到 Google Drive
-    line_push_fn: 可選，傳入 LINE 推播函式 fn(user_id, message)
-    回傳: (updated筆數, skipped檔數, failed檔數)
-    """
-    print(f"📅 基金淨值更新開始：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    client = get_client()
-    all_sheets = get_all_sheets(FOLDER_ID)
+def main():
+    print(f"📅 執行時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📂 資料來源：MoneyDJ\n")
+
+    try:
+        client = get_client()
+        all_sheets = get_all_sheets(FOLDER_ID)
+    except Exception as e:
+        msg = f"❌ Google Drive 連線失敗：{e}"
+        print(msg)
+        notify_line(0, 0, len(FUND_DB), error=msg)
+        return
 
     updated = 0
     skipped = 0
-    failed_list = []
+    failed  = 0
 
     for sheet_name, info in FUND_DB.items():
-        fund_name = info["name"]
+        fund_name      = info["name"]
         moneydj_ticker = info["moneydj"]
+
         print(f"📊 {fund_name}（{sheet_name}）")
 
         sheet_id = all_sheets.get(sheet_name)
         if not sheet_id:
             print(f"  ⚠️  找不到試算表，跳過")
-            failed_list.append(fund_name)
+            failed += 1
             continue
 
         try:
@@ -182,21 +201,22 @@ def run_fund_nav_update(line_push_fn=None):
             print(f"  📋 最後日期：{last_date}，已有 {len(existing_dates)} 筆")
 
             time.sleep(2)
-            nav_dict = fetch_nav_history(moneydj_ticker)
+            nav_dict = fetch_nav_history_from_moneydj(moneydj_ticker)
 
             if not nav_dict:
                 print(f"  ❌ 無法取得淨值")
-                failed_list.append(fund_name)
+                failed += 1
                 continue
 
             print(f"  🌐 MoneyDJ 抓到 {len(nav_dict)} 筆（{min(nav_dict.keys())} ～ {max(nav_dict.keys())}）")
 
             new_rows = sorted([
-                [d, nav_dict[d]] for d in nav_dict if d not in existing_dates
+                [d, nav_dict[d]] for d in nav_dict
+                if d not in existing_dates
             ])
 
             if not new_rows:
-                print(f"  ✅ 已是最新")
+                print(f"  ✅ 已是最新，無需更新")
                 skipped += 1
                 continue
 
@@ -212,56 +232,60 @@ def run_fund_nav_update(line_push_fn=None):
                 time.sleep(30)
             else:
                 print(f"  ❌ 錯誤：{e}")
-            failed_list.append(fund_name)
+            failed += 1
 
-    failed = len(failed_list)
-    print(f"\n✅ 新增：{updated} 筆 | ⏭️ 已是最新：{skipped} 檔 | ❌ 失敗：{failed} 檔")
+        print()
 
-    # LINE 推播
-    ts = datetime.now().strftime('%m/%d %H:%M')
-    msg_lines = [
-        f"📊 基金淨值更新完成 {ts}",
-        f"✅ 新增：{updated} 筆",
-        f"⏭️ 已是最新：{skipped} 檔",
-    ]
-    if failed_list:
-        msg_lines.append(f"❌ 失敗：{', '.join(failed_list)}")
-    msg = "\n".join(msg_lines)
+    print("=" * 50)
+    print(f"✅ 成功新增：{updated} 筆")
+    print(f"⏭️  已是最新：{skipped} 檔")
+    print(f"❌ 失敗：{failed} 檔")
+    print("=" * 50)
 
-    if line_push_fn:
-        try:
-            user_id = os.getenv("LINE_USER_ID", "")
-            if user_id:
-                line_push_fn(user_id, msg)
-        except Exception as e:
-            print(f"⚠️ LINE 推播失敗：{e}")
-
+    notify_line(updated, skipped, failed)
     return updated, skipped, failed
 
-# ==========================================
-# 本機獨立執行（保留 LINE 推播）
-# ==========================================
-if __name__ == "__main__":
-    def _local_line_push(user_id, msg):
-        import urllib.request
-        config_path = os.path.join(os.path.dirname(__file__), "line_config.json")
-        if not os.path.exists(config_path):
-            print("⚠️ 找不到 line_config.json，跳過推播")
-            return
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        token = cfg.get("token", "")
-        uid = cfg.get("user_id", user_id)
-        if not token:
-            return
-        data = json.dumps({"to": uid, "messages": [{"type": "text", "text": msg}]}).encode("utf-8")
-        req = urllib.request.Request(
+
+def notify_line(updated: int, skipped: int, failed: int, error: str = ""):
+    """推播結果到 LINE"""
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
+        print("⚠️  缺少 LINE 設定，跳過推播")
+        return
+    try:
+        ts = datetime.now().strftime('%m/%d %H:%M')
+        if error:
+            msg = f"📊 基金淨值更新失敗 {ts}\n{error}"
+        else:
+            lines = [
+                f"📊 基金淨值更新完成 {ts}",
+                f"✅ 新增：{updated} 筆",
+                f"⏭️ 已是最新：{skipped} 檔",
+            ]
+            if failed > 0:
+                lines.append(f"❌ 失敗：{failed} 檔")
+            msg = "\n".join(lines)
+
+        import urllib.request as _req
+        data = json.dumps({
+            "to": LINE_USER_ID,
+            "messages": [{"type": "text", "text": msg}]
+        }).encode("utf-8")
+
+        req = _req.Request(
             "https://api.line.me/v2/bot/message/push",
             data=data,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+            },
             method="POST"
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            print(f"📱 LINE 推播：{resp.status}")
+        with _req.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                print("📱 已推播結果到 LINE！")
+    except Exception as e:
+        print(f"⚠️  LINE 推播錯誤：{e}")
 
-    run_fund_nav_update(line_push_fn=_local_line_push)
+
+if __name__ == "__main__":
+    main()
