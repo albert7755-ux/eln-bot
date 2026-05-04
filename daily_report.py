@@ -438,12 +438,6 @@ def main():
     send_line_message(report)
     print("Daily report done!")
 
-    # 生圖並推播
-    try:
-        generate_and_send_image(report)
-    except Exception as e:
-        print(f"[Image] 生圖流程失敗: {e}")
-
     # 新聞 PDF
     try:
         print("Fetching news and generating PDF...")
