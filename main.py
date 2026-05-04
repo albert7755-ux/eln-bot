@@ -2012,6 +2012,25 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":",1)[1], TextSendMessage(text=f"技術分析失敗：{str(e)[:200]}"))
             return
+        if cmd == "fundnav":
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="📊 正在更新基金淨值，約需 2-3 分鐘，完成後會通知你..."
+            ))
+            try:
+                from update_fund_nav_moneydj import main as fund_nav_main
+                import threading
+                def run_fund_nav():
+                    try:
+                        fund_nav_main()
+                        write_job_log("基金淨值更新(手動)", "success", "手動觸發完成")
+                    except Exception as e:
+                        write_job_log("基金淨值更新(手動)", "error", str(e))
+                        line_bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 基金淨值更新失敗：{str(e)[:200]}"))
+                threading.Thread(target=run_fund_nav, daemon=True).start()
+            except Exception as e:
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 啟動失敗：{str(e)[:200]}"))
+            return
+
         if cmd == "runnow":
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="🔄 手動觸發 ELN 追蹤中，請稍候約30秒..."))
             try:
@@ -2485,6 +2504,28 @@ def write_job_log(job_name: str, status: str, message: str = ""):
             """), {"j": job_name, "s": status, "m": message[:1000]})
     except Exception as e:
         print(f"[LOG] 寫入失敗: {e}")
+def job_fund_nav_update():
+    """每天早上 09:30 更新基金淨值"""
+    now = datetime.now(TZ_TAIPEI_PYTZ)
+    if now.weekday() >= 5:
+        print("[Scheduler] 週末跳過基金淨值更新")
+        write_job_log("基金淨值更新", "skipped", "週末跳過")
+        return
+    print(f"[Scheduler] 開始基金淨值更新 {now.strftime('%Y-%m-%d %H:%M')}")
+    write_job_log("基金淨值更新", "started", now.strftime('%Y-%m-%d %H:%M'))
+    try:
+        from update_fund_nav_moneydj import main as fund_nav_main
+        result = fund_nav_main()
+        if result:
+            updated, skipped, failed = result
+            write_job_log("基金淨值更新", "success", f"新增{updated}筆，已是最新{skipped}檔，失敗{failed}檔")
+        else:
+            write_job_log("基金淨值更新", "success", "完成")
+    except Exception as e:
+        print(f"[Scheduler] 基金淨值更新失敗: {e}")
+        write_job_log("基金淨值更新", "error", str(e))
+
+
 def job_spending_report():
     """每月最後一天自動發送消費明細"""
     now = datetime.now(TZ_TAIPEI_PYTZ)
@@ -2541,6 +2582,11 @@ def start_scheduler():
         job_spending_report,
         CronTrigger(hour=9, minute=0, timezone=TZ_TAIPEI_PYTZ),
         id="spending_report", name="月度消費明細"
+    )
+    scheduler.add_job(
+        job_fund_nav_update,
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone=TZ_TAIPEI_PYTZ),
+        id="fund_nav_update", name="基金淨值更新"
     )
     scheduler.add_job(
         job_mail_monitor,
