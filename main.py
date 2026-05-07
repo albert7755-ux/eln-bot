@@ -2570,7 +2570,7 @@ def start_scheduler():
     )
     scheduler.add_job(
         job_auto_tracking,
-        CronTrigger(day_of_week="mon-fri", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ),
+        CronTrigger(day_of_week="mon-fri", hour=6, minute=0, timezone=TZ_TAIPEI_PYTZ),
         id="auto_tracking", name="ELN自動追蹤"
     )
     scheduler.add_job(
