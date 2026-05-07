@@ -5,8 +5,10 @@ import re
 import traceback
 from dateutil.relativedelta import relativedelta
 from typing import Dict, Any, List, Tuple
+import pytz
+
 # =========================
-# Helpers (from your script)
+# Helpers
 # =========================
 def clean_ticker_symbol(ticker):
     if pd.isna(ticker):
@@ -20,6 +22,7 @@ def clean_ticker_symbol(ticker):
     if t.endswith(" HK"):
         return t.replace(" HK", ".HK")
     return t
+
 def parse_ko_settings(ko_price_val):
     s = str(ko_price_val).strip()
     initial_ko = 100.0
@@ -33,6 +36,7 @@ def parse_ko_settings(ko_price_val):
     if step_match:
         step_rate = float(step_match.group(1))
     return initial_ko, step_rate
+
 def parse_nc_months(ko_type_val):
     s = str(ko_type_val).upper().strip()
     if pd.isna(ko_type_val) or s == "" or s == "NAN":
@@ -43,9 +47,11 @@ def parse_nc_months(ko_type_val):
     if "DAILY" in s:
         return 1
     return 1
+
 def is_period_end_check(ko_type_val):
     s = str(ko_type_val).upper().strip()
     return "PERIOD END" in s or "MONTHLY" in s
+
 def calculate_maturity(row, issue_date_col, tenure_col):
     if 'MaturityDate' in row and pd.notna(row['MaturityDate']):
         return row['MaturityDate']
@@ -68,6 +74,7 @@ def calculate_maturity(row, issue_date_col, tenure_col):
     except:
         pass
     return pd.NaT
+
 def clean_percentage(val):
     if pd.isna(val) or str(val).strip() == "":
         return None
@@ -77,6 +84,7 @@ def clean_percentage(val):
         return float(s)
     except:
         return None
+
 def clean_name_str(val):
     if pd.isna(val):
         return "貴賓"
@@ -84,8 +92,8 @@ def clean_name_str(val):
     if s.lower() == 'nan' or s == "":
         return "貴賓"
     return s
+
 def find_col_index(columns, include_keywords, exclude_keywords=None):
-    import re as _re
     for idx, col_name in enumerate(columns):
         col_str = str(col_name).strip().lower()
         col_str = col_str.replace("\n","").replace("\r","").replace("（","").replace("）","").replace("(","").replace(")","").replace("/","").replace("%","").replace(" ","").replace("　","").replace("*","").replace("＊","")
@@ -95,6 +103,7 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
         if any(inc in col_str for inc in include_keywords):
             return idx, col_name
     return None, None
+
 def _read_input_file(file_path: str) -> pd.DataFrame:
     try:
         df = pd.read_excel(file_path, sheet_name=0, header=0, engine='openpyxl')
@@ -104,6 +113,7 @@ def _read_input_file(file_path: str) -> pd.DataFrame:
     if len(df) > 0 and df.iloc[0].astype(str).str.contains("進場價").any():
         df = df.iloc[1:].reset_index(drop=True)
     return df
+
 def _ensure_history_df(history_close, tickers: List[str]) -> pd.DataFrame:
     if isinstance(history_close, pd.Series):
         t = tickers[0] if tickers else "T1"
@@ -111,6 +121,55 @@ def _ensure_history_df(history_close, tickers: List[str]) -> pd.DataFrame:
     if isinstance(history_close, pd.DataFrame):
         return history_close
     raise ValueError("history_close format not supported")
+
+
+def get_safe_data_cutoff() -> pd.Timestamp:
+    """
+    取得「安全的數據截止日期」：
+    - 只用已確認收盤的數據（美東時間昨天或更早）
+    - 如果現在是台北時間 05:00 以前（美股尚未或剛收盤），用前天數據
+    - 如果現在是台北時間 05:00 以後（美股已確認收盤），用昨天數據
+    
+    規則：
+    台北時間 = 美東時間 + 12 或 13 小時（夏令）
+    美股收盤：美東 16:00 = 台北 04:00（夏令）/ 05:00（冬令）
+    yfinance 更新需要約 30-60 分鐘
+    
+    保守策略：台北時間 05:30 以後才信任昨天的收盤數據
+    """
+    TZ_TAIPEI = pytz.timezone("Asia/Taipei")
+    now_taipei = datetime.now(TZ_TAIPEI)
+    
+    # 如果台北時間還沒到 05:30，昨天的美股收盤數據可能還沒完全更新
+    # 用前一個交易日的數據（即前天）
+    if now_taipei.hour < 5 or (now_taipei.hour == 5 and now_taipei.minute < 30):
+        # 用前天作為截止（確保是已收盤的數據）
+        cutoff = pd.Timestamp(now_taipei.date()) - timedelta(days=2)
+        print(f"[DEBUG] 台北時間 {now_taipei.strftime('%H:%M')}，美股數據可能未完全更新，截止日期用前天: {cutoff.date()}")
+    else:
+        # 台北時間 05:30 以後，昨天的收盤數據已確認
+        cutoff = pd.Timestamp(now_taipei.date()) - timedelta(days=1)
+        print(f"[DEBUG] 台北時間 {now_taipei.strftime('%H:%M')}，使用昨天收盤數據，截止日期: {cutoff.date()}")
+    
+    return cutoff
+
+
+def is_us_market_open() -> bool:
+    """判斷現在是否在美股交易時間（台北時間 22:30 到隔天 05:00）"""
+    TZ_TAIPEI = pytz.timezone("Asia/Taipei")
+    now_taipei = datetime.now(TZ_TAIPEI)
+    hour = now_taipei.hour
+    minute = now_taipei.minute
+    # 台北時間 22:30 到隔天 05:00 = 美股交易時間
+    if hour > 22 or (hour == 22 and minute >= 30):
+        return True
+    if hour < 5:
+        return True
+    if hour == 5 and minute < 0:
+        return True
+    return False
+
+
 # =========================
 # Core entry
 # =========================
@@ -118,9 +177,16 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     real_today = datetime.now()
     today_ts = pd.Timestamp(real_today)
     lookback_date = today_ts - timedelta(days=lookback_days)
+
+    # ── 關鍵修正：取得安全的數據截止日期 ──
+    # 只用已確認收盤的數據，避免盤中價格或當天未收盤的數據
+    safe_cutoff = get_safe_data_cutoff()
+    print(f"[DEBUG] 安全數據截止日: {safe_cutoff.date()}（台北今天: {today_ts.date()}）")
+
     df = _read_input_file(file_path)
     print(f"[DEBUG] 讀取完成，共 {len(df)} 行，欄位：{list(df.columns)}")
     cols = df.columns.tolist()
+
     id_idx, _ = find_col_index(cols, ["債券", "代號", "id", "商品代號"]) or (0, "")
     type_idx, _ = find_col_index(cols, ["商品類型", "producttype", "type"], exclude_keywords=["ko", "ki"])
     strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約"])
@@ -129,7 +195,6 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     ki_idx, _ = find_col_index(cols, ["ki", "下檔"], exclude_keywords=["ko", "type"])
     ki_type_idx, _ = find_col_index(cols, ["ki類型", "kitype"])
     coupon_idx, _ = find_col_index(cols, ["收益率", "coupon", "年化", "紅利"], exclude_keywords=["ko", "ki", "uf"])
-    # 若抓不到，直接搜尋欄位名稱含「收益」
     if coupon_idx is None:
         for idx, col_name in enumerate(cols):
             if "收益" in str(col_name):
@@ -143,9 +208,12 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     tenure_idx, _ = find_col_index(cols, ["天期", "term", "tenure"])
     name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
     line_id_idx, _ = find_col_index(cols, ["line_id", "lineid", "lineuserid", "uid", "lind"])
+
     print(f"[DEBUG] 欄位對應: id={id_idx}, type={type_idx}, ko={ko_idx}, ki={ki_idx}, t1={t1_idx}, issue={issue_date_idx}")
+
     if t1_idx is None:
         raise ValueError("❌ 無法辨識「標的1」欄位，請檢查 Excel 表頭。")
+
     clean_df = pd.DataFrame()
     clean_df["ID"] = df.iloc[:, id_idx]
     clean_df["Name"] = df.iloc[:, name_idx].apply(clean_name_str) if name_idx is not None else "貴賓"
@@ -159,22 +227,26 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
         clean_df["MaturityDate"] = pd.NaT
     clean_df["ValuationDate"] = pd.to_datetime(df.iloc[:, final_date_idx], errors="coerce") if final_date_idx is not None else pd.NaT
     clean_df["TenureStr"] = df.iloc[:, tenure_idx] if tenure_idx is not None else ""
+
     for idx, row in clean_df.iterrows():
         if pd.isna(row["MaturityDate"]):
             calc_date = calculate_maturity(row, "IssueDate", "TenureStr")
             clean_df.at[idx, "MaturityDate"] = calc_date
             if pd.isna(row["ValuationDate"]):
                 clean_df.at[idx, "ValuationDate"] = calc_date
+
     if ko_idx is None:
         raise ValueError("❌ 找不到 KO 欄位，請檢查表頭（ko/提前）。")
     if ki_idx is None:
         raise ValueError("❌ 找不到 KI 欄位，請檢查表頭（ki/下檔）。")
+
     clean_df["KO_Initial"], clean_df["KO_Step"] = zip(*df.iloc[:, ko_idx].apply(parse_ko_settings))
     clean_df["KI_Pct"] = df.iloc[:, ki_idx].apply(clean_percentage)
     clean_df["Strike_Pct"] = df.iloc[:, strike_idx].apply(clean_percentage) if strike_idx is not None else 100.0
     clean_df["Coupon_Pct"] = df.iloc[:, coupon_idx].apply(clean_percentage) if coupon_idx is not None else None
     clean_df["KO_Type"] = df.iloc[:, ko_type_idx] if ko_type_idx is not None else "NC1"
     clean_df["KI_Type"] = df.iloc[:, ki_type_idx] if ki_type_idx is not None else "AKI"
+
     for i in range(1, 6):
         if i == 1:
             tx_idx = t1_idx
@@ -199,36 +271,48 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
         else:
             clean_df[f"T{i}_Code"] = ""
             clean_df[f"T{i}_Initial"] = 0
+
     clean_df = clean_df.dropna(subset=["ID"])
     print(f"[DEBUG] 有效資料行數: {len(clean_df)}")
+
     min_trade_date = clean_df["TradeDate"].min()
     if pd.isna(min_trade_date):
         start_download_date = today_ts - timedelta(days=30)
     else:
         start_download_date = min_trade_date - timedelta(days=7)
+
     all_tickers = []
     for i in range(1, 6):
         ts = clean_df[f"T{i}_Code"].dropna().unique().tolist()
         all_tickers.extend([t for t in ts if t != ""])
     all_tickers = list(set(all_tickers))
     print(f"[DEBUG] 標的清單: {all_tickers}")
+
     if not all_tickers:
         raise ValueError("❌ 找不到有效的標的代號。")
+
     try:
         history_close = yf.download(all_tickers, start=start_download_date, end=today_ts + timedelta(days=1))["Close"]
     except Exception as e:
         raise ValueError(f"美股連線失敗: {e}")
+
     history_data = _ensure_history_df(history_close, all_tickers)
-    print(f"[DEBUG] 行情下載完成，共 {len(history_data)} 天")
+
+    # ── 關鍵修正：只保留截止日期以前的數據 ──
+    history_data = history_data[history_data.index <= safe_cutoff]
+    print(f"[DEBUG] 行情下載完成，截止 {safe_cutoff.date()}，共 {len(history_data)} 天")
+
     results = []
     individual_messages_data = []
     group_summary_lines = []
     admin_summary_list = []
+
     for index, row in clean_df.iterrows():
         try:
             if pd.isna(row["IssueDate"]):
                 print(f"[DEBUG] 跳過 row {index}：IssueDate 為空")
                 continue
+
             ki_thresh_val = row["KI_Pct"] if pd.notna(row["KI_Pct"]) else 60.0
             strike_thresh_val = row["Strike_Pct"] if pd.notna(row["Strike_Pct"]) else 100.0
             ko_initial_val = row["KO_Initial"]
@@ -247,6 +331,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             coupon_thresh = (coupon_pct / 100.0) if coupon_pct else None
             is_period_end = is_period_end_check(row["KO_Type"])
             is_aki = "AKI" in str(row["KI_Type"]).upper()
+
             assets = []
             for i in range(1, 6):
                 code = row.get(f"T{i}_Code", "")
@@ -278,16 +363,19 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                         "eki_risk": False,
                         "eki_fresh_breach": False,
                     })
+
             if not assets:
                 print(f"[DEBUG] 跳過 row {index} ({row.get('ID','?')})：找不到有效標的")
                 continue
+
+            # ── 取得目前價格（使用安全截止日的最後收盤價）──
             for asset in assets:
                 try:
                     s = history_data[asset["code"]] if asset["code"] in history_data.columns else None
                     if s is None:
                         asset["price"] = 0
                         continue
-                    valid_s = s[s.index <= today_ts].dropna()
+                    valid_s = s[s.index <= safe_cutoff].dropna()
                     if not valid_s.empty:
                         curr = float(valid_s.iloc[-1])
                         asset["price"] = curr
@@ -303,24 +391,33 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                                     asset["eki_fresh_breach"] = True
                 except:
                     asset["price"] = 0
+
             months_passed = 0
             if pd.notna(row["IssueDate"]):
                 try:
-                    months_passed = (today_ts.year - row["IssueDate"].year) * 12 + today_ts.month - row["IssueDate"].month
+                    ref_date = safe_cutoff
+                    months_passed = (ref_date.year - row["IssueDate"].year) * 12 + ref_date.month - row["IssueDate"].month
                     if months_passed < 0:
                         months_passed = 0
                 except:
                     months_passed = 0
+
             current_ko_pct = ko_initial_val - (ko_step_val * months_passed)
             current_ko_thresh = current_ko_pct / 100.0
+
             product_status = "Running"
             early_redemption_date = None
-            if row["IssueDate"] <= today_ts:
-                # 加上最終評價日煞車，避免已到期商品繼續比對（殭屍KO防護）
-                max_backtest_date = today_ts
-                if pd.notna(row["ValuationDate"]) and row["ValuationDate"] < today_ts:
+
+            if row["IssueDate"] <= safe_cutoff:
+                # ── 殭屍KO防護：不超過最終評價日，也不超過安全截止日 ──
+                max_backtest_date = safe_cutoff
+                if pd.notna(row["ValuationDate"]) and row["ValuationDate"] < safe_cutoff:
                     max_backtest_date = row["ValuationDate"]
-                backtest_data = history_data[(history_data.index >= row["IssueDate"]) & (history_data.index <= max_backtest_date)]
+
+                backtest_data = history_data[
+                    (history_data.index >= row["IssueDate"]) &
+                    (history_data.index <= max_backtest_date)
+                ]
                 if not backtest_data.empty:
                     for date, prices in backtest_data.iterrows():
                         if product_status == "Early Redemption":
@@ -365,6 +462,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                         if all_locked:
                             product_status = "Early Redemption"
                             early_redemption_date = date
+
             locked_list = []
             waiting_list = []
             hit_ki_list = []
@@ -373,6 +471,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             dra_fail_list = []
             any_eki_risk_today = False
             any_eki_fresh = False
+
             for i, asset in enumerate(assets):
                 if asset["price"] > 0:
                     if is_aki:
@@ -393,28 +492,29 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     waiting_list.append(asset["code"])
                 if asset["hit_ki"]:
                     hit_ki_list.append(asset["code"])
+
                 p_pct = round(asset["perf"] * 100, 2) if asset["price"] > 0 else 0.0
                 status_icon = "✅" if asset["locked_ko"] else ("⚠️" if asset["hit_ki"] else "")
                 if asset["eki_risk"]:
                     status_icon = "📉"
                 if is_dra and asset["price"] > 0:
                     status_icon += "🛑無息" if asset["perf"] < strike_thresh else "💸"
+
                 price_display = round(asset["price"], 2) if asset["price"] > 0 else "N/A"
                 initial_display = round(asset["initial"], 2)
                 ko_trigger_val = asset["initial"] * current_ko_thresh
                 cell_text = f"【{asset['code']}】\n原: {initial_display}\n現: {price_display}\n({p_pct}%) {status_icon}"
                 cell_text += f"\n KO價: {round(ko_trigger_val, 2)}"
-                # ── 接近 KO 預警（3%以內，且已過閉鎖期）──
-                is_in_nc = today_ts < nc_end_date
+
+                is_in_nc = safe_cutoff < nc_end_date
                 if asset["price"] > 0 and not asset["locked_ko"] and not is_in_nc:
                     dist_ko = (ko_trigger_val - asset["price"]) / asset["price"] * 100
                     if 0 < dist_ko <= 3:
                         cell_text += f" ⚠️距KO {dist_ko:.1f}%"
-                # ── 顯示 KI 價格或 Strike 價格，並加接近預警 ──
+
                 if has_ki:
                     ki_price = round(asset["initial"] * ki_thresh, 2)
                     cell_text += f"\n KI價: {ki_price} ({ki_thresh_val:.0f}%)"
-                    # 接近 KI 預警（3%以內，KI 不限閉鎖期，隨時都要注意）
                     if asset["price"] > 0 and not asset["hit_ki"]:
                         dist_ki = (asset["price"] - ki_price) / asset["price"] * 100
                         if 0 < dist_ki <= 3:
@@ -422,24 +522,28 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 else:
                     strike_price_display = round(asset["initial"] * strike_thresh, 2)
                     cell_text += f"\n Strike: {strike_price_display} ({strike_thresh_val:.0f}%)"
-                    # 接近 Strike 預警（3%以內，且已過閉鎖期）
                     if asset["price"] > 0 and not is_in_nc:
                         dist_strike = (asset["price"] - strike_price_display) / asset["price"] * 100
                         if 0 < dist_strike <= 3:
                             cell_text += f" ⚠️距Strike {dist_strike:.1f}%"
+
                 if asset["locked_ko"]:
                     cell_text += f"\nKO {asset['ko_record']}"
                 if asset["hit_ki"]:
                     cell_text += f"\nKI {asset['ki_record']}"
+
                 detail_cols[f"T{i+1}_Detail"] = cell_text
+
             hit_any_ki = any(a["hit_ki"] for a in assets)
             all_above_strike_now = all((a["perf"] >= strike_thresh if a["price"] > 0 else False) for a in assets)
             valid_assets = [a for a in assets if a["perf"] > 0]
             worst_perf = min(valid_assets, key=lambda x: x["perf"])["perf"] if valid_assets else 0
+
             status_msgs = []
             line_status_short = ""
             group_status_short = ""
             need_notify = False
+
             if today_ts < row["IssueDate"]:
                 status_msgs.append("⏳ 未發行")
             elif product_status == "Early Redemption":
@@ -448,27 +552,21 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     line_status_short = "🎉 恭喜！已提前出場 (KO)"
                     group_status_short = "🎉 提前出場 (KO)"
                     need_notify = True
-            elif pd.notna(row["ValuationDate"]) and today_ts >= row["ValuationDate"]:
+            elif pd.notna(row["ValuationDate"]) and safe_cutoff >= row["ValuationDate"]:
                 if is_ben and coupon_thresh is not None:
-                    # BEN 到期邏輯
-                    # worst_perf = 最差標的表現（已計算）
                     ben_worst = min([a["perf"] for a in assets if a["perf"] > 0], default=0)
                     if ben_worst >= (1 + coupon_thresh):
-                        # 漲超過 coupon → 拿實際漲幅
                         actual_gain = round((ben_worst - 1) * 100, 2)
                         status_msgs.append(f"🚀 到期獲利 {actual_gain}%（超過Coupon實拿漲幅）")
                         line_status_short = f"🚀 到期獲利 {actual_gain}%"
                     elif ben_worst >= strike_thresh:
-                        # 執行價 ~ Coupon 之間 → 拿 Coupon
                         coupon_str = f"{coupon_pct:.1f}%"
                         status_msgs.append(f"💰 到期獲利 {coupon_str}（拿固定Coupon）")
                         line_status_short = f"💰 到期獲利 {coupon_str}"
                     else:
-                        # 跌破執行價 → 接股
                         status_msgs.append("😭 到期接股（跌破執行價）")
                         line_status_short = "😭 到期接股"
                 else:
-                    # FCN / 一般商品到期邏輯
                     final_hit_ki = any(a["perf"] < ki_thresh for a in assets)
                     if all_above_strike_now:
                         status_msgs.append("💰 到期獲利")
@@ -482,7 +580,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 if row["ValuationDate"] >= lookback_date:
                     need_notify = True
             else:
-                if today_ts < nc_end_date:
+                if safe_cutoff < nc_end_date:
                     status_msgs.append(f"🔒 NC閉鎖期 (至 {nc_end_date.strftime('%Y-%m-%d')})")
                 else:
                     status_msgs.append("👀 比價中 (月月比)" if is_period_end else "👀 比價中 (Daily)")
@@ -514,7 +612,6 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     else:
                         status_msgs.append("💸 DRA計息中")
                 if is_ben and coupon_thresh is not None:
-                    # BEN 持倉中：顯示目前表現 vs Coupon vs 執行價
                     ben_worst = min([a["perf"] for a in assets if a["perf"] > 0], default=0)
                     coupon_str = f"{coupon_pct:.1f}%"
                     strike_str = f"{strike_thresh_val:.1f}%"
@@ -527,15 +624,18 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                         if notify_ki_daily and not line_status_short:
                             line_status_short = f"⚠️ BEN 跌破執行價 ({strike_str})"
                             need_notify = True
+
             final_status = "\n".join(status_msgs)
             if line_status_short:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
             if group_status_short:
                 group_summary_lines.append(f"● {row['ID']}: {group_status_short}")
+
             line_ids = [x.strip() for x in re.split(r"[;,，、]", str(row.get("Line_ID", ""))) if x.strip()]
             mat_date_str = row["MaturityDate"].strftime("%Y-%m-%d") if pd.notna(row["MaturityDate"]) else "-"
             asset_detail_str = "\n".join([v for _, v in detail_cols.items()]) + "\n"
             print(f"[DEBUG MSG] ID={row['ID']} asset_detail_str len={len(asset_detail_str)} detail_cols keys={list(detail_cols.keys())}")
+
             common_msg_body = (
                 f"Hi {row['Name']} 您好，\n"
                 f"您的結構型商品 {row['ID']} ({row['Product_Type']}) 最新狀態：\n\n"
@@ -545,6 +645,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 f"------------------\n"
                 f"貼心通知"
             )
+
             copy_text_body = (
                 f"【商品查詢】{row['ID']}\n"
                 f"----------------\n"
@@ -558,6 +659,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 this_asset_ko = asset["initial"] * current_ko_thresh
                 copy_text_body += f"{i+1}. {asset['code']}: {round(asset['price'],2)} ({round(asset['perf']*100,2)}%) ➤ KO: {round(this_asset_ko, 2)}\n"
             copy_text_body += f"🚀 目前狀態: {product_status if product_status != 'Running' else ('KI觀察中' if any_eki_risk_today else '正常比價')}"
+
             if need_notify and line_status_short and line_ids:
                 for uid in line_ids:
                     if uid.startswith("U") or uid.startswith("C"):
@@ -569,6 +671,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                             "target": uid,
                             "msg": common_msg_body
                         })
+
             row_res = {
                 "債券代號": row["ID"],
                 "Name": row["Name"],
@@ -587,21 +690,26 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             row_res.update(detail_cols)
             results.append(row_res)
             print(f"[DEBUG] 完成 row {index}: {row['ID']}")
+
         except Exception as e:
             print(f"[ERROR] Skipping row {index}: {e}")
             print(traceback.format_exc())
             continue
+
     results_df = pd.DataFrame(results)
     print(f"[DEBUG] 最終結果筆數: {len(results_df)}")
+
     report_text = f"【ELN 戰情快報】\n📅 {real_today.strftime('%Y/%m/%d')}\n----------------\n"
     if group_summary_lines:
         report_text += "🔥 重點關注：\n" + "\n".join(group_summary_lines)
     else:
         report_text += "🍵 今日市場平穩，無特殊觸價事件。"
     report_text += "\n\n(以上資訊僅供參考，詳細報價請見監控表)"
+
     admin_text = ""
     if admin_summary_list:
         admin_text = f"【ELN 戰情快報 (Admin)】\n📅 {real_today.strftime('%Y/%m/%d')}\n----------------\n" + "\n".join(admin_summary_list)
+
     return {
         "report_text": report_text,
         "admin_text": admin_text,
