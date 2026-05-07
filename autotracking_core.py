@@ -21,6 +21,9 @@ def clean_ticker_symbol(ticker):
         return t.replace(" TT", ".TW")
     if t.endswith(" HK"):
         return t.replace(" HK", ".HK")
+    # 純4位數字 → 日股自動加 .T
+    if re.match(r'^\d{4}$', t):
+        return t + '.T'
     return t
 
 def parse_ko_settings(ko_price_val):
