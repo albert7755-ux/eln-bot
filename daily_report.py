@@ -407,15 +407,31 @@ def save_report_to_db(report_text):
         print(f"DB save failed: {e}")
 
 
+def clean_line_text(text: str) -> str:
+    """移除 LINE API 不接受的特殊字元"""
+    import unicodedata
+    # 移除控制字元（保留換行和 tab）
+    cleaned = ""
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if ch in ("\n", "\t"):
+            cleaned += ch
+        elif cat.startswith("C"):  # 控制字元
+            continue
+        else:
+            cleaned += ch
+    return cleaned
+
 def send_line_message(text):
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     }
+    safe_text = clean_line_text(text[:4900])
     payload = {
         "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": text[:4900]}]
+        "messages": [{"type": "text", "text": safe_text}]
     }
     response = requests.post(url, headers=headers, json=payload)
     if response.status_code == 200:
