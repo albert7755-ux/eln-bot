@@ -408,15 +408,12 @@ def save_report_to_db(report_text):
 
 
 def clean_line_text(text: str) -> str:
-    """移除 LINE API 不接受的特殊字元"""
     import unicodedata
-    # 移除控制字元（保留換行和 tab）
     cleaned = ""
     for ch in text:
-        cat = unicodedata.category(ch)
-        if ch in ("\n", "\t"):
+        if ch == "\n" or ch == "\t":
             cleaned += ch
-        elif cat.startswith("C"):  # 控制字元
+        elif len(ch) == 1 and unicodedata.category(ch).startswith("C"):
             continue
         else:
             cleaned += ch
