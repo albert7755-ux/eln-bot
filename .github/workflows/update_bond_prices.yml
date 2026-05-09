@@ -1,0 +1,39 @@
+name: 債券價格自動更新
+
+on:
+  schedule:
+    # 台北時間每天 18:00（UTC 10:00）週一到週五
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch:  # 允許手動觸發
+
+jobs:
+  update-bond-prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Chrome
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Install Python dependencies
+        run: |
+          pip install selenium webdriver-manager gspread google-auth pandas requests
+
+      - name: Run bond price updater
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          BOND_DRIVE_FOLDER_ID: ${{ secrets.BOND_DRIVE_FOLDER_ID }}
+        run: |
+          python bond_price_updater.py
