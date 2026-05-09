@@ -44,6 +44,7 @@ jobs:
         env:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           BOND_DRIVE_FOLDER_ID: ${{ secrets.BOND_DRIVE_FOLDER_ID }}
+          TV_SESSION_ID: ${{ secrets.TV_SESSION_ID }}
         run: python bond_price_updater.py
 
       - name: Run historical backfill
@@ -51,4 +52,5 @@ jobs:
         env:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           BOND_DRIVE_FOLDER_ID: ${{ secrets.BOND_DRIVE_FOLDER_ID }}
+          TV_SESSION_ID: ${{ secrets.TV_SESSION_ID }}
         run: python bond_backfill.py
