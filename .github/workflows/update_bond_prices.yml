@@ -2,14 +2,22 @@ name: 債券價格自動更新
 
 on:
   schedule:
-    # 台北時間每天 18:00（UTC 10:00）週一到週五
     - cron: '0 10 * * 1-5'
-  workflow_dispatch:  # 允許手動觸發
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'update=今天價格 backfill=補齊歷史'
+        required: true
+        default: 'update'
+        type: choice
+        options:
+          - update
+          - backfill
 
 jobs:
   update-bond-prices:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Checkout repo
@@ -31,9 +39,16 @@ jobs:
         run: |
           pip install selenium webdriver-manager gspread google-auth pandas requests
 
-      - name: Run bond price updater
+      - name: Run daily update
+        if: ${{ github.event_name == 'schedule' || inputs.mode == 'update' }}
         env:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           BOND_DRIVE_FOLDER_ID: ${{ secrets.BOND_DRIVE_FOLDER_ID }}
-        run: |
-          python bond_price_updater.py
+        run: python bond_price_updater.py
+
+      - name: Run historical backfill
+        if: ${{ inputs.mode == 'backfill' }}
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          BOND_DRIVE_FOLDER_ID: ${{ secrets.BOND_DRIVE_FOLDER_ID }}
+        run: python bond_backfill.py
