@@ -331,8 +331,8 @@ def main():
                 print(f"  📋 最後日期：{last_date}，已有 {len(existing_dates)} 筆")
             except Exception as e:
                 if "429" in str(e):
-                    print(f"  ⏳ API 超頻，等待 30 秒...")
-                    time.sleep(30)
+                    print(f"  ⏳ API 超頻，等待 60 秒...")
+                    time.sleep(60)
                     try:
                         sh = client.open_by_key(file_id)
                         ws = sh.get_worksheet(0)
@@ -352,11 +352,14 @@ def main():
                     failed.append(isin)
                     continue
 
-            # 如果今天已有數據，跳過
-            if TODAY in existing_dates:
-                print(f"  ⏭️ 今日已更新，跳過")
+            # Backfill 模式：不管今天有沒有數據，都要補齊歷史缺失
+            # 判斷是否有缺失：最後日期到今天之間有空缺就要補
+            days_gap = (date.today() - date.fromisoformat(last_date)).days if last_date != "2020-01-01" else 999
+            if days_gap <= 1:
+                print(f"  ⏭️ 數據已是最新（{last_date}），跳過")
                 skipped_total += 1
                 continue
+            print(f"  ⚠️ 發現空缺！最後日期 {last_date} 距今 {days_gap} 天，開始補齊...")
 
             # 從 TradingView 下載歷史 CSV
             time.sleep(random.uniform(2, 4))
