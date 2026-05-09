@@ -42,7 +42,7 @@ def get_gspread_client():
 
 
 def get_drive_files(folder_id: str) -> dict:
-    """列出 Google Drive 資料夾內所有 CSV 檔案，回傳 {檔名: file_id}"""
+    """列出 Google Drive 資料夾內所有檔案（含 Sheets 和 CSV），回傳 {檔名: file_id}"""
     creds_info = json.loads(GOOGLE_CREDENTIALS_JSON)
     creds = Credentials.from_service_account_info(
         creds_info,
@@ -52,7 +52,7 @@ def get_drive_files(folder_id: str) -> dict:
     headers = {"Authorization": f"Bearer {creds.token}"}
     params = {
         "q": f"'{folder_id}' in parents and trashed=false",
-        "fields": "files(id, name)",
+        "fields": "files(id, name, mimeType)",
         "pageSize": 500,
     }
     resp = requests.get(
@@ -60,6 +60,7 @@ def get_drive_files(folder_id: str) -> dict:
         headers=headers, params=params
     )
     files = resp.json().get("files", [])
+    print(f"  [Drive] 共找到 {len(files)} 個檔案")
     return {f["name"]: f["id"] for f in files}
 
 
@@ -201,10 +202,19 @@ def main():
     drive_files = get_drive_files(BOND_DRIVE_FOLDER_ID)
 
     # bond_master 是 Google Sheets 格式
+    print(f"  所有檔案清單（共{len(drive_files)}個）：")
+    for name in sorted(drive_files.keys()):
+        print(f"    - {repr(name)}")
     master_file_id = drive_files.get("bond_master")
     if not master_file_id:
+        # 嘗試模糊比對
+        for name, fid in drive_files.items():
+            if "bond_master" in name.lower() or "master" in name.lower():
+                master_file_id = fid
+                print(f"  ✅ 模糊比對找到：{name}")
+                break
+    if not master_file_id:
         print("❌ 找不到 bond_master")
-        print(f"  現有檔案：{list(drive_files.keys())[:10]}")
         return
 
     client = get_gspread_client()
