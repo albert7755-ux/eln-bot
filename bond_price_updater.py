@@ -233,7 +233,10 @@ def main():
 
     print(f"✅ 共 {len(bonds)} 筆債券\n")
 
-    # 2. 啟動 Selenium
+    # 2. 初始化 gspread client
+    client = get_gspread_client()
+
+    # 3. 啟動 Selenium
     print("🌐 啟動瀏覽器...")
     driver = create_driver()
 
@@ -250,39 +253,41 @@ def main():
 
             print(f"📊 {name}（{isin}）")
 
-            # 找對應的 CSV 檔案（可能有 ", 1D" 後綴）
-            csv_filename = None
+            # 找對應的檔案（Drive 裡的 Google Sheets 格式，名稱含 ", 1D"）
             file_id = None
-            for possible in [f"{filename}.csv", f"{filename}, 1D.csv", f"{filename}_1D.csv"]:
-                if possible in drive_files:
-                    csv_filename = possible
-                    file_id = drive_files[possible]
+            csv_filename = None
+            # 直接比對：Drive 檔名 = bond_master 的檔名 + ", 1D"
+            for possible_name in [
+                f"{filename}, 1D",      # Google Sheets 格式（最常見）
+                filename,               # 完全一樣
+                f"{filename}, 1D.csv",  # CSV 格式
+                f"{filename}.csv",      # 無後綴 CSV
+            ]:
+                if possible_name in drive_files:
+                    csv_filename = possible_name
+                    file_id = drive_files[possible_name]
                     break
-            # 模糊比對
             if not file_id:
-                for name, fid in drive_files.items():
-                    if filename in name and name.endswith(".csv"):
-                        csv_filename = name
-                        file_id = fid
-                        break
-            if not file_id:
-                print(f"  ⚠️ 找不到對應 CSV（{filename}），跳過")
+                print(f"  ⚠️ 找不到對應檔案（{filename}），跳過")
                 failed.append(isin)
                 continue
 
-            # 確認今天是否已更新
+            # 確認今天是否已更新（用 gspread 讀 Google Sheets）
             try:
-                rows = download_csv_content(file_id)
-                if rows and len(rows) > 1:
-                    last_date = rows[-1][0].strip()
+                sh = client.open_by_key(file_id)
+                ws = sh.get_worksheet(0)
+                all_vals = ws.get_all_values()
+                if all_vals and len(all_vals) > 1:
+                    last_date = all_vals[-1][0].strip()
                     if last_date == TODAY:
                         print(f"  ⏭️ 今日已更新（{last_date}），跳過")
                         skipped += 1
                         continue
-                    print(f"  📋 最後日期：{last_date}")
+                    print(f"  📋 最後日期：{last_date}，共 {len(all_vals)-1} 筆")
             except Exception as e:
                 print(f"  ❌ 讀取失敗：{e}")
-                rows = [["time", "close"]]
+                failed.append(isin)
+                continue
 
             # 抓取價格
             time.sleep(random.uniform(3, 6))
@@ -293,15 +298,11 @@ def main():
                 failed.append(isin)
                 continue
 
-            # 寫入 CSV
+            # 寫入 Google Sheets
             try:
-                success = append_to_csv(file_id, TODAY, price, rows)
-                if success:
-                    print(f"  ✅ 寫入成功：{TODAY} = {price}")
-                    updated += 1
-                else:
-                    print(f"  ❌ 寫入失敗")
-                    failed.append(isin)
+                ws.append_row([TODAY, price])
+                print(f"  ✅ 寫入成功：{TODAY} = {price}")
+                updated += 1
             except Exception as e:
                 print(f"  ❌ 寫入錯誤：{e}")
                 failed.append(isin)
