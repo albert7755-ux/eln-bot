@@ -115,67 +115,70 @@ def download_tv_csv(driver, exchange: str, symbol: str) -> dict | None:
         driver.get(url)
         time.sleep(7)
 
-        # 找匯出按鈕（需登入才能用）
+        # 用右鍵選單觸發 Download chart data
         try:
-            export_btn = None
+            from selenium.webdriver.common.action_chains import ActionChains
 
-            # 方法一：找相機圖示按鈕（Export chart data）
-            selectors = [
-                "button[aria-label='Export chart data']",
-                "button[data-name='export-data']",
-                "[class*='exportButton']",
-                "button[aria-label*='Export']",
-                "button[title*='Export']",
-                "button[aria-label*='export']",
-            ]
-            for sel in selectors:
+            # 在圖表中間位置右鍵
+            chart = driver.find_element(By.CSS_SELECTOR, "canvas, .chart-gui-wrapper, .pane-legacy")
+            actions = ActionChains(driver)
+            actions.context_click(chart).perform()
+            time.sleep(2)
+
+            # 找右鍵選單中的 Download chart data
+            menu_items = driver.find_elements(By.CSS_SELECTOR, "[class*='item'], [role='menuitem'], [class*='menu'] span")
+            download_item = None
+            for item in menu_items:
                 try:
-                    els = driver.find_elements(By.CSS_SELECTOR, sel)
-                    if els:
-                        export_btn = els[0]
-                        print(f"  找到匯出按鈕（{sel}）")
+                    text = (item.text or "").strip()
+                    if "download" in text.lower() or "chart data" in text.lower():
+                        download_item = item
+                        print(f"  找到下載選項：{text}")
                         break
                 except:
                     continue
 
-            # 方法二：從所有按鈕找
-            if not export_btn:
-                all_btns = driver.find_elements(By.TAG_NAME, "button")
-                for btn in all_btns:
-                    try:
-                        aria = (btn.get_attribute("aria-label") or "").lower()
-                        title = (btn.get_attribute("title") or "").lower()
-                        text = (btn.text or "").lower()
-                        combined = aria + title + text
-                        if any(k in combined for k in ["export", "download", "csv", "匯出", "下載"]):
-                            export_btn = btn
-                            print(f"  找到匯出按鈕：{aria or title or text}")
-                            break
-                    except:
-                        continue
+            if not download_item:
+                # 嘗試直接找文字
+                spans = driver.find_elements(By.XPATH, "//*[contains(text(), 'Download chart data') or contains(text(), 'download chart')]")
+                if spans:
+                    download_item = spans[0]
+                    print(f"  找到下載選項（XPath）")
 
-            if export_btn:
-                driver.execute_script("arguments[0].scrollIntoView(true);", export_btn)
-                time.sleep(0.5)
-                driver.execute_script("arguments[0].click();", export_btn)
-                print(f"  點擊匯出按鈕，等待下載...")
-                time.sleep(5)
+            if download_item:
+                download_item.click()
+                time.sleep(2)
 
-                # 等待下載完成
-                for _ in range(20):
-                    files = os.listdir(DOWNLOAD_DIR)
-                    csv_files = [f for f in files if f.endswith('.csv') and not f.endswith('.crdownload')]
-                    if csv_files:
-                        csv_path = os.path.join(DOWNLOAD_DIR, csv_files[0])
-                        print(f"  ✅ 下載完成：{csv_files[0]}")
-                        return parse_tv_csv(csv_path)
-                    time.sleep(1)
-                print(f"  ⚠️ 等待下載超時")
+                # 找 Download 確認按鈕
+                download_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Download')]")
+                if download_btns:
+                    download_btns[-1].click()
+                    print(f"  點擊 Download 確認")
+                    time.sleep(3)
+
+                    # 等待下載完成
+                    for _ in range(20):
+                        files = os.listdir(DOWNLOAD_DIR)
+                        csv_files = [f for f in files if f.endswith('.csv') and not f.endswith('.crdownload')]
+                        if csv_files:
+                            csv_path = os.path.join(DOWNLOAD_DIR, csv_files[0])
+                            print(f"  ✅ 下載完成：{csv_files[0]}")
+                            return parse_tv_csv(csv_path)
+                        time.sleep(1)
+                    print(f"  ⚠️ 等待下載超時")
+                else:
+                    print(f"  ⚠️ 找不到 Download 確認按鈕")
             else:
-                print(f"  ⚠️ 找不到匯出按鈕（可能未登入），改用頁面價格")
+                print(f"  ⚠️ 找不到右鍵選單下載選項，改用頁面價格")
+
+            # 關閉選單
+            try:
+                driver.find_element(By.TAG_NAME, "body").click()
+            except:
+                pass
 
         except Exception as e:
-            print(f"  [匯出錯誤] {e}")
+            print(f"  [右鍵選單錯誤] {e}")
 
         # fallback: 直接抓當前頁面價格
         return fallback_get_current_price(driver)
@@ -352,14 +355,8 @@ def main():
                     failed.append(isin)
                     continue
 
-            # Backfill 模式：不管今天有沒有數據，都要補齊歷史缺失
-            # 判斷是否有缺失：最後日期到今天之間有空缺就要補
-            days_gap = (date.today() - date.fromisoformat(last_date)).days if last_date != "2020-01-01" else 999
-            if days_gap <= 1:
-                print(f"  ⏭️ 數據已是最新（{last_date}），跳過")
-                skipped_total += 1
-                continue
-            print(f"  ⚠️ 發現空缺！最後日期 {last_date} 距今 {days_gap} 天，開始補齊...")
+            # Backfill 模式：強制下載 CSV 補齊所有缺失日期
+            print(f"  🔍 檢查歷史缺失，從 TradingView 下載完整數據...")
 
             # 從 TradingView 下載歷史 CSV
             time.sleep(random.uniform(2, 4))
