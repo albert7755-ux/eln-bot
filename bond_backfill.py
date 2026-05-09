@@ -307,7 +307,8 @@ def main():
                 failed.append(isin)
                 continue
 
-            # 讀取現有數據
+            # 讀取現有數據（加入等待避免 API 超頻）
+            time.sleep(2)
             try:
                 sh = client.open_by_key(file_id)
                 ws = sh.get_worksheet(0)
@@ -319,9 +320,27 @@ def main():
                 last_date = max(existing_dates) if existing_dates else "2020-01-01"
                 print(f"  📋 最後日期：{last_date}，已有 {len(existing_dates)} 筆")
             except Exception as e:
-                print(f"  ❌ 讀取失敗：{e}")
-                failed.append(isin)
-                continue
+                if "429" in str(e):
+                    print(f"  ⏳ API 超頻，等待 30 秒...")
+                    time.sleep(30)
+                    try:
+                        sh = client.open_by_key(file_id)
+                        ws = sh.get_worksheet(0)
+                        all_vals = ws.get_all_values()
+                        existing_dates = set()
+                        for row in all_vals[1:]:
+                            if row and row[0].strip():
+                                existing_dates.add(row[0].strip())
+                        last_date = max(existing_dates) if existing_dates else "2020-01-01"
+                        print(f"  📋 最後日期：{last_date}，已有 {len(existing_dates)} 筆")
+                    except Exception as e2:
+                        print(f"  ❌ 重試失敗：{e2}")
+                        failed.append(isin)
+                        continue
+                else:
+                    print(f"  ❌ 讀取失敗：{e}")
+                    failed.append(isin)
+                    continue
 
             # 如果今天已有數據，跳過
             if TODAY in existing_dates:
