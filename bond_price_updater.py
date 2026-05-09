@@ -273,6 +273,7 @@ def main():
                 continue
 
             # 確認今天是否已更新（用 gspread 讀 Google Sheets）
+            time.sleep(2)  # 避免 API 超頻
             try:
                 sh = client.open_by_key(file_id)
                 ws = sh.get_worksheet(0)
@@ -285,9 +286,26 @@ def main():
                         continue
                     print(f"  📋 最後日期：{last_date}，共 {len(all_vals)-1} 筆")
             except Exception as e:
-                print(f"  ❌ 讀取失敗：{e}")
-                failed.append(isin)
-                continue
+                if "429" in str(e):
+                    print(f"  ⏳ API 超頻，等待 30 秒後重試...")
+                    time.sleep(30)
+                    try:
+                        sh = client.open_by_key(file_id)
+                        ws = sh.get_worksheet(0)
+                        all_vals = ws.get_all_values()
+                        if all_vals and len(all_vals) > 1:
+                            last_date = all_vals[-1][0].strip()
+                            if last_date == TODAY:
+                                skipped += 1
+                                continue
+                    except Exception as e2:
+                        print(f"  ❌ 重試失敗：{e2}")
+                        failed.append(isin)
+                        continue
+                else:
+                    print(f"  ❌ 讀取失敗：{e}")
+                    failed.append(isin)
+                    continue
 
             # 抓取價格
             time.sleep(random.uniform(3, 6))
