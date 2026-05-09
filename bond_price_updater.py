@@ -200,17 +200,20 @@ def main():
     print("📂 讀取 bond_master.csv...")
     drive_files = get_drive_files(BOND_DRIVE_FOLDER_ID)
 
-    master_file_id = drive_files.get("bond_master.csv")
+    # bond_master 是 Google Sheets 格式
+    master_file_id = drive_files.get("bond_master")
     if not master_file_id:
-        print("❌ 找不到 bond_master.csv")
+        print("❌ 找不到 bond_master")
+        print(f"  現有檔案：{list(drive_files.keys())[:10]}")
         return
 
-    master_rows = download_csv_content(master_file_id)
-    # 跳過標題行
-    header = master_rows[0]
+    client = get_gspread_client()
+    ws = client.open_by_key(master_file_id).get_worksheet(0)
+    all_rows = ws.get_all_values()
+    header = all_rows[0]
     bonds = []
-    for row in master_rows[1:]:
-        if len(row) >= 3:
+    for row in all_rows[1:]:
+        if len(row) >= 3 and row[0].strip():
             bonds.append({
                 "filename": row[0].strip(),
                 "exchange": row[1].strip(),
@@ -237,11 +240,23 @@ def main():
 
             print(f"📊 {name}（{isin}）")
 
-            # 找對應的 CSV 檔案
-            csv_filename = f"{filename}.csv"
-            file_id = drive_files.get(csv_filename)
+            # 找對應的 CSV 檔案（可能有 ", 1D" 後綴）
+            csv_filename = None
+            file_id = None
+            for possible in [f"{filename}.csv", f"{filename}, 1D.csv", f"{filename}_1D.csv"]:
+                if possible in drive_files:
+                    csv_filename = possible
+                    file_id = drive_files[possible]
+                    break
+            # 模糊比對
             if not file_id:
-                print(f"  ⚠️ 找不到 {csv_filename}，跳過")
+                for name, fid in drive_files.items():
+                    if filename in name and name.endswith(".csv"):
+                        csv_filename = name
+                        file_id = fid
+                        break
+            if not file_id:
+                print(f"  ⚠️ 找不到對應 CSV（{filename}），跳過")
                 failed.append(isin)
                 continue
 
