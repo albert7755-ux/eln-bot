@@ -30,6 +30,7 @@ TODAY = date.today().strftime("%Y-%m-%d")
 BOND_DRIVE_FOLDER_ID = os.environ.get("BOND_DRIVE_FOLDER_ID", "")
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 DOWNLOAD_DIR = "/tmp/tv_downloads"
+TV_SESSION_ID = os.environ.get("TV_SESSION_ID", "")
 
 # ==========================================
 # Google Drive / Sheets 連線
@@ -114,60 +115,54 @@ def download_tv_csv(driver, exchange: str, symbol: str) -> dict | None:
         driver.get(url)
         time.sleep(7)
 
-        # 找 </> 匯出按鈕
+        # 找匯出按鈕（需登入才能用）
         try:
-            # 嘗試多個選擇器
             export_btn = None
+
+            # 方法一：找相機圖示按鈕（Export chart data）
             selectors = [
-                "button[data-name='save-load-chart-open']",
+                "button[aria-label='Export chart data']",
+                "button[data-name='export-data']",
+                "[class*='exportButton']",
                 "button[aria-label*='Export']",
                 "button[title*='Export']",
-                "[data-name='export-data']",
-                "button.js-export-data",
+                "button[aria-label*='export']",
             ]
             for sel in selectors:
                 try:
-                    btns = driver.find_elements(By.CSS_SELECTOR, sel)
-                    if btns:
-                        export_btn = btns[0]
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                    if els:
+                        export_btn = els[0]
+                        print(f"  找到匯出按鈕（{sel}）")
                         break
                 except:
                     continue
 
-            # 如果找不到，嘗試找 </> 文字的按鈕
+            # 方法二：從所有按鈕找
             if not export_btn:
                 all_btns = driver.find_elements(By.TAG_NAME, "button")
                 for btn in all_btns:
                     try:
-                        if "</>" in btn.text or "export" in btn.get_attribute("aria-label", "").lower():
+                        aria = (btn.get_attribute("aria-label") or "").lower()
+                        title = (btn.get_attribute("title") or "").lower()
+                        text = (btn.text or "").lower()
+                        combined = aria + title + text
+                        if any(k in combined for k in ["export", "download", "csv", "匯出", "下載"]):
                             export_btn = btn
-                            break
-                    except:
-                        continue
-
-            if not export_btn:
-                # 嘗試找 svg 圖示按鈕
-                btns = driver.find_elements(By.CSS_SELECTOR, "button")
-                print(f"  找到 {len(btns)} 個按鈕，嘗試點擊匯出...")
-                # 截圖 debug
-                for btn in btns:
-                    try:
-                        aria = btn.get_attribute("aria-label") or ""
-                        title = btn.get_attribute("title") or ""
-                        if any(k in (aria + title).lower() for k in ["export", "download", "csv", "data"]):
-                            export_btn = btn
-                            print(f"  找到匯出按鈕：aria={aria} title={title}")
+                            print(f"  找到匯出按鈕：{aria or title or text}")
                             break
                     except:
                         continue
 
             if export_btn:
+                driver.execute_script("arguments[0].scrollIntoView(true);", export_btn)
+                time.sleep(0.5)
                 driver.execute_script("arguments[0].click();", export_btn)
-                print(f"  點擊匯出按鈕")
-                time.sleep(3)
+                print(f"  點擊匯出按鈕，等待下載...")
+                time.sleep(5)
 
                 # 等待下載完成
-                for _ in range(15):
+                for _ in range(20):
                     files = os.listdir(DOWNLOAD_DIR)
                     csv_files = [f for f in files if f.endswith('.csv') and not f.endswith('.crdownload')]
                     if csv_files:
@@ -177,7 +172,7 @@ def download_tv_csv(driver, exchange: str, symbol: str) -> dict | None:
                     time.sleep(1)
                 print(f"  ⚠️ 等待下載超時")
             else:
-                print(f"  ⚠️ 找不到匯出按鈕，改用頁面價格抓取")
+                print(f"  ⚠️ 找不到匯出按鈕（可能未登入），改用頁面價格")
 
         except Exception as e:
             print(f"  [匯出錯誤] {e}")
@@ -277,6 +272,21 @@ def main():
     # 2. 啟動瀏覽器
     print("🌐 啟動瀏覽器...")
     driver = create_driver()
+
+    # 注入 TradingView Session Cookie
+    if TV_SESSION_ID:
+        print("🔑 注入 TradingView Session Cookie...")
+        driver.get("https://www.tradingview.com")
+        time.sleep(3)
+        driver.add_cookie({
+            "name": "sessionid",
+            "value": TV_SESSION_ID,
+            "domain": ".tradingview.com",
+            "path": "/",
+        })
+        driver.refresh()
+        time.sleep(3)
+        print("✅ Cookie 注入完成")
 
     updated_total = 0
     skipped_total = 0
