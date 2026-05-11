@@ -1595,7 +1595,7 @@ def handle_text_message(event):
                 write_job_log("ELN追蹤(手動)", "error", str(e))
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 執行失敗：{str(e)[:300]}"))
             return
-       if cmd in ("bondup", "bondnav"):
+        if cmd in ("bondup", "bondnav"):
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text="📊 手動觸發債券報價更新中...\n約需 30 分鐘，完成後會通知你 ✅"
             ))
