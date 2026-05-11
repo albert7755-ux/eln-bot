@@ -2214,7 +2214,7 @@ def job_fund_nav_update():
     now = _dt.now(TZ_TAIPEI_PYTZ)
     write_job_log("基金淨值更新", "started", now.strftime('%Y-%m-%d %H:%M'))
     try:
-        from fund_nav import run_fund_nav_update
+        from update_fund_nav_moneydj import run_fund_nav_update
 
         def _line_push(user_id, msg):
             try:
