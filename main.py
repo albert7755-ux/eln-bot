@@ -494,17 +494,20 @@ def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bo
             agent = str(r["Name"] if "Name" in r.index else "-").strip() or "-"
             agent_name_map[_id] = agent
             detail_text = (
-                f"【商品】{_id}\n"
-                f"類型: {r['Type'] if 'Type' in r.index else '-'}\n"
-                f"理專: {agent}\n"
-                f"交易日: {r['交易日'] if '交易日' in r.index else '-'}\n"
-                f"KO設定: {r['KO設定'] if 'KO設定' in r.index else '-'}\n"
-                f"最差表現: {r['最差表現'] if '最差表現' in r.index else '-'}\n"
-                f"----------------\n"
-                f"{r['狀態'] if '狀態' in r.index else ''}\n"
-                f"----------------\n"
-                + ("\n\n".join(t_details) if t_details else "")
-            )
+    f"【商品】{_id}\n"
+    f"類型: {r['Type'] if 'Type' in r.index else '-'}\n"
+    f"理專: {agent}\n"
+    f"交易日: {r['交易日'] if '交易日' in r.index else '-'}\n"
+    f"最終評價日: {r['最終評價日'] if '最終評價日' in r.index else '-'}\n"
+    f"到期日: {r['到期日'] if '到期日' in r.index else '-'}\n"
+    f"Coupon: {r['Coupon'] if 'Coupon' in r.index else '-'}\n"
+    f"KO設定: {r['KO設定'] if 'KO設定' in r.index else '-'}\n"
+    f"最差表現: {r['最差表現'] if '最差表現' in r.index else '-'}\n"
+    f"----------------\n"
+    f"{r['狀態'] if '狀態' in r.index else ''}\n"
+    f"----------------\n"
+    + ("\n\n".join(t_details) if t_details else "")
+)
             detail_map[_id] = detail_text
     summary = report
     if top5_lines:
