@@ -2,7 +2,6 @@
 基金淨值更新腳本（MoneyDJ 版）- Render 版
 從 MoneyDJ 抓取最新淨值，寫入 Google Drive fund-data 試算表
 """
-
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
@@ -14,16 +13,12 @@ import gspread
 from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import Request
 from datetime import datetime
-
 # ==========================================
 # 設定區
 # ==========================================
-
 FOLDER_ID = "1i1-zUzLNnuwo2NVWijubvBICLbladZQO"
-
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
-
 FUND_DB = {
     "F00001DRQQ_FO": {"moneydj": "pima4",   "name": "PIMCO收益增長"},
     "F0GBR04SG1_FO": {"moneydj": "JAZ03",   "name": "AV04駿利亨德森平衡基金"},
@@ -43,11 +38,9 @@ FUND_DB = {
     "F0HKG05X22_FO": {"moneydj": "ACDD04",  "name": "安聯台灣科技"},
     "F00001EBH4_FO": {"moneydj": "ACYT168", "name": "元大全球優質龍頭平衡基金"},
 }
-
 # ==========================================
 # Google Drive 連線（從環境變數讀取）
 # ==========================================
-
 def get_client():
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
     if not creds_json:
@@ -59,7 +52,6 @@ def get_client():
     ]
     creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
     return gspread.authorize(creds)
-
 def get_all_sheets(folder_id):
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
     if not creds_json:
@@ -77,11 +69,9 @@ def get_all_sheets(folder_id):
     resp = requests.get("https://www.googleapis.com/drive/v3/files",
                         headers=headers, params=params)
     return {f["name"]: f["id"] for f in resp.json().get("files", [])}
-
 # ==========================================
 # MoneyDJ 抓取淨值
 # ==========================================
-
 def fetch_nav_history_from_moneydj(moneydj_ticker):
     urls = [
         f"https://www.moneydj.com/funddj/ya/yp010001.djhtm?a={moneydj_ticker}",
@@ -92,19 +82,16 @@ def fetch_nav_history_from_moneydj(moneydj_ticker):
         "Accept-Language": "zh-TW,zh;q=0.9",
         "Referer": "https://www.moneydj.com/funddj/"
     }
-
     import re
     from datetime import date
     today = date.today()
     current_year = today.year
-
     for url in urls:
         try:
             resp = requests.get(url, headers=headers, timeout=20, verify=False)
             resp.encoding = "big5"
             soup = BeautifulSoup(resp.text, "html.parser")
             nav_dict = {}
-
             tables = soup.find_all("table")
             for table in tables:
                 rows = table.find_all("tr")
@@ -113,7 +100,6 @@ def fetch_nav_history_from_moneydj(moneydj_ticker):
                     if len(cells) < 2:
                         continue
                     texts = [c.get_text(strip=True) for c in cells]
-
                     for i, text in enumerate(texts):
                         if re.match(r"20\d\d/\d{2}/\d{2}$", text):
                             nav_date = text.replace("/", "-")
@@ -125,7 +111,6 @@ def fetch_nav_history_from_moneydj(moneydj_ticker):
                                         break
                                 except:
                                     continue
-
                     i = 0
                     while i < len(texts) - 1:
                         text = texts[i]
@@ -141,24 +126,18 @@ def fetch_nav_history_from_moneydj(moneydj_ticker):
                             except:
                                 pass
                         i += 1
-
             if nav_dict:
                 return nav_dict
-
         except Exception as e:
             print(f"    {url} 失敗：{e}")
             continue
-
     return {}
-
 # ==========================================
 # 主程式
 # ==========================================
-
 def main():
     print(f"📅 執行時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📂 資料來源：MoneyDJ\n")
-
     try:
         client = get_client()
         all_sheets = get_all_sheets(FOLDER_ID)
@@ -167,28 +146,22 @@ def main():
         print(msg)
         notify_line(0, 0, len(FUND_DB), error=msg)
         return
-
     updated = 0
     skipped = 0
     failed  = 0
-
     for sheet_name, info in FUND_DB.items():
         fund_name      = info["name"]
         moneydj_ticker = info["moneydj"]
-
         print(f"📊 {fund_name}（{sheet_name}）")
-
         sheet_id = all_sheets.get(sheet_name)
         if not sheet_id:
             print(f"  ⚠️  找不到試算表，跳過")
             failed += 1
             continue
-
         try:
             sh = client.open_by_key(sheet_id)
             ws = sh.get_worksheet(0)
             all_values = ws.get_all_values()
-
             existing_dates = set()
             last_date = ""
             for row in all_values[1:]:
@@ -197,35 +170,27 @@ def main():
                     existing_dates.add(d)
                     if d > last_date:
                         last_date = d
-
             print(f"  📋 最後日期：{last_date}，已有 {len(existing_dates)} 筆")
-
             time.sleep(2)
             nav_dict = fetch_nav_history_from_moneydj(moneydj_ticker)
-
             if not nav_dict:
                 print(f"  ❌ 無法取得淨值")
                 failed += 1
                 continue
-
             print(f"  🌐 MoneyDJ 抓到 {len(nav_dict)} 筆（{min(nav_dict.keys())} ～ {max(nav_dict.keys())}）")
-
             new_rows = sorted([
                 [d, nav_dict[d]] for d in nav_dict
                 if d not in existing_dates
             ])
-
             if not new_rows:
                 print(f"  ✅ 已是最新，無需更新")
                 skipped += 1
                 continue
-
             for row in new_rows:
                 time.sleep(0.3)
                 ws.append_row(row)
                 print(f"  ➕ 新增：{row[0]} = {row[1]}")
             updated += len(new_rows)
-
         except Exception as e:
             if "429" in str(e):
                 print(f"  ⏳ 超頻，等待 30 秒...")
@@ -233,15 +198,12 @@ def main():
             else:
                 print(f"  ❌ 錯誤：{e}")
             failed += 1
-
         print()
-
     print("=" * 50)
     print(f"✅ 成功新增：{updated} 筆")
     print(f"⏭️  已是最新：{skipped} 檔")
     print(f"❌ 失敗：{failed} 檔")
     print("=" * 50)
-
     notify_line(updated, skipped, failed)
     return updated, skipped, failed
 
@@ -264,13 +226,11 @@ def notify_line(updated: int, skipped: int, failed: int, error: str = ""):
             if failed > 0:
                 lines.append(f"❌ 失敗：{failed} 檔")
             msg = "\n".join(lines)
-
         import urllib.request as _req
         data = json.dumps({
             "to": LINE_USER_ID,
             "messages": [{"type": "text", "text": msg}]
         }).encode("utf-8")
-
         req = _req.Request(
             "https://api.line.me/v2/bot/message/push",
             data=data,
@@ -285,6 +245,14 @@ def notify_line(updated: int, skipped: int, failed: int, error: str = ""):
                 print("📱 已推播結果到 LINE！")
     except Exception as e:
         print(f"⚠️  LINE 推播錯誤：{e}")
+
+
+# ==========================================
+# 給 main.py 呼叫的包裝函式（新增）
+# ==========================================
+def run_fund_nav_update(line_push_fn=None):
+    """給 main.py 的 job_fund_nav_update() 呼叫"""
+    return main()
 
 
 if __name__ == "__main__":
