@@ -1014,7 +1014,7 @@ def handle_text_message(event):
                            "📚 知識庫\n/kb <問題> → 查詢知識庫\n/kb上傳 → 上傳檔案\n/kb清單 → 查看文件清單\n─────────────────\n"
                            "🔔 警示\n/alert add  /alert list  /alert del\n輸入 /help alert 看完整範例\n─────────────────\n"
                            "📚 文章庫\n/save  /unread  /read  /article  /del  /web\n直接傳圖片 → 自動儲存分析\n輸入 /help save 看完整說明\n─────────────────\n"
-                           "📊 基金淨值\n/fundnav → 手動更新15檔基金淨值\n/bondup → 手動更新債券價格\n/tracklog → 查看執行記錄\n─────────────────\n"
+                           "📊 基金淨值\n/fundnav → 手動更新15檔基金淨值\n/bondnav → 手動更新債券價格\n/tracklog → 查看執行記錄\n─────────────────\n"
                            "📧 其他\n/mail  /invest  /forget  /spending\n上傳錄音 → 自動逐字稿 / 摘要\n上傳檔案 → 自動分析\n─────────────────\n"
                            "進階說明：/help alert、/help eln、/help report、/help save")
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
@@ -1592,26 +1592,48 @@ def handle_text_message(event):
                 write_job_log("ELN追蹤(手動)", "error", str(e))
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 執行失敗：{str(e)[:300]}"))
             return
-        if cmd == "bondup":
-            reply_text(event, "⏳ 開始更新債券價格，完成後會通知你...")
-            def _run_bondup():
+       if cmd in ("bondup", "bondnav"):
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="📊 手動觸發債券報價更新中...\n約需 30 分鐘，完成後會通知你 ✅"
+            ))
+            def _run_bondnav():
                 try:
-                    import subprocess, sys
-                    result = subprocess.run(
-                        [sys.executable, "bond_price_updater.py"],
-                        capture_output=True, text=True, timeout=1800
+                    import urllib.request as _req
+                    pat = os.getenv("GITHUB_PAT", "")
+                    if not pat:
+                        raise RuntimeError("缺少 GITHUB_PAT 環境變數")
+                    data = json.dumps({
+                        "ref": "main",
+                        "inputs": {"mode": "update"}
+                    }).encode("utf-8")
+                    req = _req.Request(
+                        "https://api.github.com/repos/albert7755-ux/eln-bot/actions/workflows/update_bond_prices.yml/dispatches",
+                        data=data,
+                        headers={
+                            "Authorization": f"Bearer {pat}",
+                            "Accept": "application/vnd.github+json",
+                            "Content-Type": "application/json",
+                            "X-GitHub-Api-Version": "2022-11-28"
+                        },
+                        method="POST"
                     )
-                    output = result.stdout[-500:] if result.stdout else ""
-                    if result.returncode == 0:
-                        push_message(line_bot_api, event.source.user_id,
-                            f"✅ 債券價格更新完成\n{output}")
+                    with _req.urlopen(req, timeout=15) as resp:
+                        status = resp.status
+                    if status == 204:
+                        user_id = os.getenv("LINE_USER_ID", "")
+                        if user_id:
+                            line_bot_api.push_message(user_id, TextSendMessage(
+                                text="✅ 債券報價更新已觸發！\nGitHub Actions 開始執行，約 30 分鐘後完成。"
+                            ))
                     else:
-                        push_message(line_bot_api, event.source.user_id,
-                            f"❌ 債券價格更新失敗\n{result.stderr[-300:]}")
+                        raise RuntimeError(f"GitHub API 回應：{status}")
                 except Exception as e:
-                    push_message(line_bot_api, event.source.user_id,
-                        f"❌ /bondup 執行失敗：{str(e)[:200]}")
-            t = threading.Thread(target=_run_bondup, daemon=True)
+                    user_id = os.getenv("LINE_USER_ID", "")
+                    if user_id:
+                        line_bot_api.push_message(user_id, TextSendMessage(
+                            text=f"❌ /bondnav 觸發失敗：{str(e)[:200]}"
+                        ))
+            t = threading.Thread(target=_run_bondnav, daemon=True)
             t.start()
             return
 
