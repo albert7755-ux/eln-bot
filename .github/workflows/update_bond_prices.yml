@@ -47,7 +47,7 @@ jobs:
           TV_SESSION_ID: ${{ secrets.TV_SESSION_ID }}
           LINE_ACCESS_TOKEN: ${{ secrets.AGENT_LINE_CHANNEL_ACCESS_TOKEN }}
           ELN_PERSONAL_CHAT_KEY: ${{ secrets.ELN_PERSONAL_CHAT_KEY }}
-        run: python bond_price_updater.py
+        run: run: python bond_backfill.py
 
       - name: Run historical backfill
         if: ${{ inputs.mode == 'backfill' }}
