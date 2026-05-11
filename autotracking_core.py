@@ -683,6 +683,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 "最差表現": f"{round(worst_perf*100, 2)}%",
                 "交易日": row["TradeDate"].strftime("%Y-%m-%d") if pd.notna(row["TradeDate"]) else "-",
                 "最終評價日": row["ValuationDate"].strftime("%Y-%m-%d") if pd.notna(row["ValuationDate"]) else "-",
+                "到期日": row["MaturityDate"].strftime("%Y-%m-%d") if pd.notna(row["MaturityDate"]) else "-",
                 "NC月份": f"{nc_months}M",
                 "KO設定": f"{ko_initial_val}% (-{ko_step_val}%)" if ko_step_val > 0 else f"{ko_initial_val}%",
                 "KI類型": "AKI" if is_aki else "EKI",
