@@ -445,7 +445,7 @@ def generate_report():
 
 
 def main():
-    report = generate_report()
+    report, image_url, weekly_calendar = generate_report()
     save_report_to_db(report)
     print("Sending daily report to LINE...")
     send_line_message(report)
