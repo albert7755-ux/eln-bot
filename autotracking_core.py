@@ -21,7 +21,6 @@ def clean_ticker_symbol(ticker):
         return t.replace(" TT", ".TW")
     if t.endswith(" HK"):
         return t.replace(" HK", ".HK")
-    # 純4位數字 → 日股自動加 .T
     if re.match(r'^\d{4}$', t):
         return t + '.T'
     return t
@@ -125,45 +124,22 @@ def _ensure_history_df(history_close, tickers: List[str]) -> pd.DataFrame:
         return history_close
     raise ValueError("history_close format not supported")
 
-
 def get_safe_data_cutoff() -> pd.Timestamp:
-    """
-    取得「安全的數據截止日期」：
-    - 只用已確認收盤的數據（美東時間昨天或更早）
-    - 如果現在是台北時間 05:00 以前（美股尚未或剛收盤），用前天數據
-    - 如果現在是台北時間 05:00 以後（美股已確認收盤），用昨天數據
-    
-    規則：
-    台北時間 = 美東時間 + 12 或 13 小時（夏令）
-    美股收盤：美東 16:00 = 台北 04:00（夏令）/ 05:00（冬令）
-    yfinance 更新需要約 30-60 分鐘
-    
-    保守策略：台北時間 05:30 以後才信任昨天的收盤數據
-    """
     TZ_TAIPEI = pytz.timezone("Asia/Taipei")
     now_taipei = datetime.now(TZ_TAIPEI)
-    
-    # 如果台北時間還沒到 05:30，昨天的美股收盤數據可能還沒完全更新
-    # 用前一個交易日的數據（即前天）
     if now_taipei.hour < 5 or (now_taipei.hour == 5 and now_taipei.minute < 30):
-        # 用前天作為截止（確保是已收盤的數據）
         cutoff = pd.Timestamp(now_taipei.date()) - timedelta(days=2)
         print(f"[DEBUG] 台北時間 {now_taipei.strftime('%H:%M')}，美股數據可能未完全更新，截止日期用前天: {cutoff.date()}")
     else:
-        # 台北時間 05:30 以後，昨天的收盤數據已確認
         cutoff = pd.Timestamp(now_taipei.date()) - timedelta(days=1)
         print(f"[DEBUG] 台北時間 {now_taipei.strftime('%H:%M')}，使用昨天收盤數據，截止日期: {cutoff.date()}")
-    
     return cutoff
 
-
 def is_us_market_open() -> bool:
-    """判斷現在是否在美股交易時間（台北時間 22:30 到隔天 05:00）"""
     TZ_TAIPEI = pytz.timezone("Asia/Taipei")
     now_taipei = datetime.now(TZ_TAIPEI)
     hour = now_taipei.hour
     minute = now_taipei.minute
-    # 台北時間 22:30 到隔天 05:00 = 美股交易時間
     if hour > 22 or (hour == 22 and minute >= 30):
         return True
     if hour < 5:
@@ -171,7 +147,6 @@ def is_us_market_open() -> bool:
     if hour == 5 and minute < 0:
         return True
     return False
-
 
 # =========================
 # Core entry
@@ -181,15 +156,13 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     today_ts = pd.Timestamp(real_today)
     lookback_date = today_ts - timedelta(days=lookback_days)
 
-    # ── 關鍵修正：取得安全的數據截止日期 ──
-    # 只用已確認收盤的數據，避免盤中價格或當天未收盤的數據
     safe_cutoff = get_safe_data_cutoff()
     print(f"[DEBUG] 安全數據截止日: {safe_cutoff.date()}（台北今天: {today_ts.date()}）")
 
     df = _read_input_file(file_path)
     print(f"[DEBUG] 讀取完成，共 {len(df)} 行，欄位：{list(df.columns)}")
-    cols = df.columns.tolist()
 
+    cols = df.columns.tolist()
     id_idx, _ = find_col_index(cols, ["債券", "代號", "id", "商品代號"]) or (0, "")
     type_idx, _ = find_col_index(cols, ["商品類型", "producttype", "type"], exclude_keywords=["ko", "ki"])
     strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約"])
@@ -224,10 +197,12 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     clean_df["Product_Type"] = df.iloc[:, type_idx].astype(str).fillna("FCN") if type_idx is not None else "FCN"
     clean_df["TradeDate"] = pd.to_datetime(df.iloc[:, trade_date_idx], errors="coerce") if trade_date_idx is not None else pd.NaT
     clean_df["IssueDate"] = pd.to_datetime(df.iloc[:, issue_date_idx], errors="coerce") if issue_date_idx is not None else pd.NaT
+
     if maturity_date_idx is not None:
         clean_df["MaturityDate"] = pd.to_datetime(df.iloc[:, maturity_date_idx], errors="coerce")
     else:
         clean_df["MaturityDate"] = pd.NaT
+
     clean_df["ValuationDate"] = pd.to_datetime(df.iloc[:, final_date_idx], errors="coerce") if final_date_idx is not None else pd.NaT
     clean_df["TenureStr"] = df.iloc[:, tenure_idx] if tenure_idx is not None else ""
 
@@ -300,8 +275,6 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
         raise ValueError(f"美股連線失敗: {e}")
 
     history_data = _ensure_history_df(history_close, all_tickers)
-
-    # ── 關鍵修正：只保留截止日期以前的數據 ──
     history_data = history_data[history_data.index <= safe_cutoff]
     print(f"[DEBUG] 行情下載完成，截止 {safe_cutoff.date()}，共 {len(history_data)} 天")
 
@@ -328,6 +301,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 nc_end_date = row["IssueDate"] + relativedelta(months=nc_months)
             except:
                 nc_end_date = row["IssueDate"]
+
             is_dra = "DRA" in str(row["Product_Type"]).upper()
             is_ben = "BEN" in str(row["Product_Type"]).upper()
             coupon_pct = row["Coupon_Pct"] if pd.notna(row.get("Coupon_Pct")) else None
@@ -371,7 +345,6 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 print(f"[DEBUG] 跳過 row {index} ({row.get('ID','?')})：找不到有效標的")
                 continue
 
-            # ── 取得目前價格（使用安全截止日的最後收盤價）──
             for asset in assets:
                 try:
                     s = history_data[asset["code"]] if asset["code"] in history_data.columns else None
@@ -412,11 +385,9 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             early_redemption_date = None
 
             if row["IssueDate"] <= safe_cutoff:
-                # ── 殭屍KO防護：不超過最終評價日，也不超過安全截止日 ──
                 max_backtest_date = safe_cutoff
                 if pd.notna(row["ValuationDate"]) and row["ValuationDate"] < safe_cutoff:
                     max_backtest_date = row["ValuationDate"]
-
                 backtest_data = history_data[
                     (history_data.index >= row["IssueDate"]) &
                     (history_data.index <= max_backtest_date)
@@ -489,6 +460,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     if is_dra and asset["perf"] < strike_thresh:
                         any_below_strike_today = True
                         dra_fail_list.append(asset["code"])
+
                 if asset["locked_ko"]:
                     locked_list.append(asset["code"])
                 else:
@@ -497,15 +469,19 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     hit_ki_list.append(asset["code"])
 
                 p_pct = round(asset["perf"] * 100, 2) if asset["price"] > 0 else 0.0
+
+                # ── Bug 修正：已KO的標的，eki_risk 不覆蓋 ✅ ──
                 status_icon = "✅" if asset["locked_ko"] else ("⚠️" if asset["hit_ki"] else "")
-                if asset["eki_risk"]:
+                if asset["eki_risk"] and not asset["locked_ko"]:
                     status_icon = "📉"
+
                 if is_dra and asset["price"] > 0:
                     status_icon += "🛑無息" if asset["perf"] < strike_thresh else "💸"
 
                 price_display = round(asset["price"], 2) if asset["price"] > 0 else "N/A"
                 initial_display = round(asset["initial"], 2)
                 ko_trigger_val = asset["initial"] * current_ko_thresh
+
                 cell_text = f"【{asset['code']}】\n原: {initial_display}\n現: {price_display}\n({p_pct}%) {status_icon}"
                 cell_text += f"\n KO價: {round(ko_trigger_val, 2)}"
 
@@ -629,6 +605,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                             need_notify = True
 
             final_status = "\n".join(status_msgs)
+
             if line_status_short:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
             if group_status_short:
@@ -636,6 +613,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
 
             line_ids = [x.strip() for x in re.split(r"[;,，、]", str(row.get("Line_ID", ""))) if x.strip()]
             mat_date_str = row["MaturityDate"].strftime("%Y-%m-%d") if pd.notna(row["MaturityDate"]) else "-"
+            val_date_str = row["ValuationDate"].strftime("%Y-%m-%d") if pd.notna(row["ValuationDate"]) else "-"
             asset_detail_str = "\n".join([v for _, v in detail_cols.items()]) + "\n"
             print(f"[DEBUG MSG] ID={row['ID']} asset_detail_str len={len(asset_detail_str)} detail_cols keys={list(detail_cols.keys())}")
 
@@ -682,8 +660,8 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 "狀態": final_status,
                 "最差表現": f"{round(worst_perf*100, 2)}%",
                 "交易日": row["TradeDate"].strftime("%Y-%m-%d") if pd.notna(row["TradeDate"]) else "-",
-                "最終評價日": row["ValuationDate"].strftime("%Y-%m-%d") if pd.notna(row["ValuationDate"]) else "-",
-                "到期日": row["MaturityDate"].strftime("%Y-%m-%d") if pd.notna(row["MaturityDate"]) else "-",
+                "最終評價日": val_date_str,
+                "到期日": mat_date_str,  # ← 新增到期日欄位
                 "NC月份": f"{nc_months}M",
                 "KO設定": f"{ko_initial_val}% (-{ko_step_val}%)" if ko_step_val > 0 else f"{ko_initial_val}%",
                 "KI類型": "AKI" if is_aki else "EKI",
