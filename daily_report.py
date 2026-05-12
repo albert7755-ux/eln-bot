@@ -29,9 +29,7 @@ def _safe_close_pair(symbol: str):
     prev_close = float(close.iloc[-2])
     last_close = float(close.iloc[-1])
 
-    if symbol == "^TNX":
-        prev_close = prev_close / 10.0
-        last_close = last_close / 10.0
+
 
     change = last_close - prev_close
     pct = (change / prev_close) * 100 if prev_close else 0.0
