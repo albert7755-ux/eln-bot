@@ -29,6 +29,8 @@ BOND_DRIVE_FOLDER_ID = os.environ.get("BOND_DRIVE_FOLDER_ID", "")
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
 DOWNLOAD_DIR = "/tmp/tv_downloads"
 TV_SESSION_ID = os.environ.get("TV_SESSION_ID", "")
+LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "")
+ELN_PERSONAL_CHAT_KEY = os.environ.get("ELN_PERSONAL_CHAT_KEY", "")
 # ==========================================
 # Google Drive / Sheets 連線
 # ==========================================
@@ -40,6 +42,7 @@ def get_gspread_client():
     ]
     creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
     return gspread.authorize(creds)
+
 def get_drive_files(folder_id: str) -> dict:
     creds_info = json.loads(GOOGLE_CREDENTIALS_JSON)
     creds = Credentials.from_service_account_info(
@@ -58,6 +61,41 @@ def get_drive_files(folder_id: str) -> dict:
     )
     files = resp.json().get("files", [])
     return {f["name"]: f["id"] for f in files}
+
+# ==========================================
+# LINE 推播
+# ==========================================
+def notify_line(msg: str):
+    """推播結果到 LINE"""
+    token = LINE_ACCESS_TOKEN
+    chat_key = ELN_PERSONAL_CHAT_KEY
+    user_id = chat_key.replace("user:", "") if chat_key.startswith("user:") else chat_key
+    if not token or not user_id:
+        print(f"⚠️ 缺少 LINE 設定（token={bool(token)}, user_id={bool(user_id)}），跳過推播")
+        return
+    try:
+        import urllib.request as _req
+        data = json.dumps({
+            "to": user_id,
+            "messages": [{"type": "text", "text": msg}]
+        }).encode("utf-8")
+        req = _req.Request(
+            "https://api.line.me/v2/bot/message/push",
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}"
+            },
+            method="POST"
+        )
+        with _req.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                print("📱 已推播結果到 LINE！")
+            else:
+                print(f"⚠️ LINE 推播回應：{resp.status}")
+    except Exception as e:
+        print(f"⚠️ LINE 推播錯誤：{e}")
+
 # ==========================================
 # Selenium 設定
 # ==========================================
@@ -91,24 +129,17 @@ def create_driver():
     return driver
 
 def download_tv_csv(driver, exchange: str, symbol: str) -> dict | None:
-    """
-    從 TradingView 下載歷史 CSV
-    回傳 {日期: 收盤價} 的 dict
-    """
+    """從 TradingView 下載歷史 CSV，回傳 {日期: 收盤價} 的 dict"""
     tv_symbol = f"{exchange}-{symbol}"
     url = f"https://www.tradingview.com/symbols/{tv_symbol}/"
     try:
-        # 清空下載目錄
         for f in os.listdir(DOWNLOAD_DIR):
             os.remove(os.path.join(DOWNLOAD_DIR, f))
 
         driver.get(url)
-        # ★ 等待時間加長到 12 秒，給慢速頁面更多時間載入
         time.sleep(12)
 
-        # 嘗試右鍵選單
         try:
-            # ★ 改用多個 selector 逐一嘗試，不再一次找不到就報錯
             chart = None
             for selector in [
                 "canvas",
@@ -132,7 +163,6 @@ def download_tv_csv(driver, exchange: str, symbol: str) -> dict | None:
                 actions.context_click(chart).perform()
                 time.sleep(2)
 
-                # 找右鍵選單中的 Download chart data
                 menu_items = driver.find_elements(By.CSS_SELECTOR, "[class*='item'], [role='menuitem'], [class*='menu'] span")
                 download_item = None
                 for item in menu_items:
@@ -173,11 +203,9 @@ def download_tv_csv(driver, exchange: str, symbol: str) -> dict | None:
                 else:
                     print(f"  ⚠️ 找不到右鍵選單下載選項，改用頁面價格")
             else:
-                # ★ 找不到圖表元素時，等多 5 秒再試一次 fallback
                 print(f"  ⚠️ 找不到圖表元素，等待 5 秒後改用頁面價格")
                 time.sleep(5)
 
-            # 關閉選單
             try:
                 driver.find_element(By.TAG_NAME, "body").click()
             except:
@@ -186,7 +214,6 @@ def download_tv_csv(driver, exchange: str, symbol: str) -> dict | None:
         except Exception as e:
             print(f"  [右鍵選單錯誤] {e}")
 
-        # ★ fallback 加強版：多種 regex 模式嘗試抓價格
         return fallback_get_current_price(driver)
 
     except Exception as e:
@@ -221,24 +248,20 @@ def fallback_get_current_price(driver) -> dict | None:
     import re
     try:
         page_text = driver.find_element(By.TAG_NAME, "body").text
-
-        # ★ 新增多種 regex 模式
         patterns = [
-            r'([\d]{2,3}\.[\d]{1,4})\s*%?\s*of\s*par',          # XX.XX% of par
-            r'Last\s+([\d]{2,3}\.[\d]{1,4})',                     # Last XX.XX
-            r'Price\s+([\d]{2,3}\.[\d]{1,4})',                    # Price XX.XX
-            r'Close\s+([\d]{2,3}\.[\d]{1,4})',                    # Close XX.XX
-            r'\b((?:9[0-9]|1[0-1][0-9]|120)\.[\d]{1,4})\b',     # 90~120 之間的數字（債券常見價格區間）
+            r'([\d]{2,3}\.[\d]{1,4})\s*%?\s*of\s*par',
+            r'Last\s+([\d]{2,3}\.[\d]{1,4})',
+            r'Price\s+([\d]{2,3}\.[\d]{1,4})',
+            r'Close\s+([\d]{2,3}\.[\d]{1,4})',
+            r'\b((?:9[0-9]|1[0-1][0-9]|120)\.[\d]{1,4})\b',
         ]
-
         for pattern in patterns:
             match = re.search(pattern, page_text, re.IGNORECASE)
             if match:
                 val = float(match.group(1))
                 if 50 < val < 200:
-                    print(f"  💡 Fallback 抓到價格：{val}（pattern: {pattern[:30]}）")
+                    print(f"  💡 Fallback 抓到價格：{val}")
                     return {TODAY: val}
-
         print(f"  ⚠️ Fallback 也找不到價格")
     except Exception as e:
         print(f"  [Fallback錯誤] {e}")
@@ -250,13 +273,14 @@ def fallback_get_current_price(driver) -> dict | None:
 def main():
     print(f"📅 執行時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📅 今天日期：{TODAY}\n")
+
     if not GOOGLE_CREDENTIALS_JSON:
         print("❌ 缺少 GOOGLE_CREDENTIALS_JSON")
         return
     if not BOND_DRIVE_FOLDER_ID:
         print("❌ 缺少 BOND_DRIVE_FOLDER_ID")
         return
-    # 1. 讀取 bond_master
+
     print("📂 讀取 bond_master...")
     drive_files = get_drive_files(BOND_DRIVE_FOLDER_ID)
     client = get_gspread_client()
@@ -270,6 +294,7 @@ def main():
     if not master_file_id:
         print("❌ 找不到 bond_master")
         return
+
     ws_master = client.open_by_key(master_file_id).get_worksheet(0)
     all_rows = ws_master.get_all_values()
     bonds = []
@@ -282,10 +307,10 @@ def main():
                 "name": row[3].strip() if len(row) > 3 else "",
             })
     print(f"✅ 共 {len(bonds)} 筆債券\n")
-    # 2. 啟動瀏覽器
+
     print("🌐 啟動瀏覽器...")
     driver = create_driver()
-    # 注入 TradingView Session Cookie
+
     if TV_SESSION_ID:
         print("🔑 注入 TradingView Session Cookie...")
         driver.get("https://www.tradingview.com")
@@ -299,9 +324,11 @@ def main():
         driver.refresh()
         time.sleep(3)
         print("✅ Cookie 注入完成")
+
     updated_total = 0
     skipped_total = 0
     failed = []
+
     try:
         for bond in bonds:
             filename = bond["filename"]
@@ -309,7 +336,7 @@ def main():
             isin = bond["isin"]
             name = bond["name"]
             print(f"📊 {name}（{isin}）")
-            # 找對應的 Google Sheets
+
             file_id = None
             for possible in [f"{filename}, 1D", filename, f"{filename}, 1D.csv"]:
                 if possible in drive_files:
@@ -324,7 +351,7 @@ def main():
                 print(f"  ⚠️ 找不到對應檔案，跳過")
                 failed.append(isin)
                 continue
-            # 讀取現有數據
+
             time.sleep(2)
             try:
                 sh = client.open_by_key(file_id)
@@ -358,6 +385,7 @@ def main():
                     print(f"  ❌ 讀取失敗：{e}")
                     failed.append(isin)
                     continue
+
             print(f"  🔍 檢查歷史缺失，從 TradingView 下載完整數據...")
             time.sleep(random.uniform(2, 4))
             tv_data = download_tv_csv(driver, exchange, isin)
@@ -365,7 +393,7 @@ def main():
                 print(f"  ❌ 無法取得數據")
                 failed.append(isin)
                 continue
-            # 只補最近60天
+
             cutoff = (date.today() - timedelta(days=60)).strftime("%Y-%m-%d")
             missing = {
                 d: p for d, p in tv_data.items()
@@ -375,6 +403,7 @@ def main():
                 print(f"  ✅ 數據已是最新，無需補齊")
                 skipped_total += 1
                 continue
+
             sorted_missing = sorted(missing.items())
             print(f"  📝 補齊 {len(sorted_missing)} 筆缺失數據...")
             try:
@@ -386,9 +415,11 @@ def main():
                 print(f"  ❌ 寫入失敗：{e}")
                 failed.append(isin)
             print()
+
     finally:
         driver.quit()
         print("🔒 瀏覽器已關閉\n")
+
     print("=" * 50)
     print(f"✅ 成功補齊：{updated_total} 筆")
     print(f"⏭️ 已是最新：{skipped_total} 檔")
@@ -396,6 +427,13 @@ def main():
     if failed:
         print(f"失敗清單：{', '.join(failed[:10])}")
     print("=" * 50)
+
+    # LINE 推播結果
+    ts = datetime.now().strftime('%m/%d %H:%M')
+    msg = f"📊 債券報價更新完成 {ts}\n✅ 成功補齊：{updated_total} 筆\n⏭️ 已是最新：{skipped_total} 檔"
+    if failed:
+        msg += f"\n❌ 失敗：{len(failed)} 筆\n失敗：{', '.join(failed[:5])}"
+    notify_line(msg)
 
 if __name__ == "__main__":
     main()
