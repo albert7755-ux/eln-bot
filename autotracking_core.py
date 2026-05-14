@@ -445,6 +445,8 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             dra_fail_list = []
             any_eki_risk_today = False
             any_eki_fresh = False
+            near_ko_alerts = []   # 收集接近KO的警示
+            near_ki_alerts = []   # 收集接近KI的警示
 
             for i, asset in enumerate(assets):
                 if asset["price"] > 0:
@@ -490,6 +492,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     dist_ko = (ko_trigger_val - asset["price"]) / asset["price"] * 100
                     if 0 < dist_ko <= 3:
                         cell_text += f" ⚠️距KO {dist_ko:.1f}%"
+                        near_ko_alerts.append(f"{asset['code']} 距KO {dist_ko:.1f}%")
 
                 if has_ki:
                     ki_price = round(asset["initial"] * ki_thresh, 2)
@@ -498,6 +501,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                         dist_ki = (asset["price"] - ki_price) / asset["price"] * 100
                         if 0 < dist_ki <= 3:
                             cell_text += f" ⚠️距KI {dist_ki:.1f}%"
+                            near_ki_alerts.append(f"{asset['code']} 距KI {dist_ki:.1f}%")
                 else:
                     strike_price_display = round(asset["initial"] * strike_thresh, 2)
                     cell_text += f"\n Strike: {strike_price_display} ({strike_thresh_val:.0f}%)"
@@ -522,6 +526,16 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             line_status_short = ""
             group_status_short = ""
             need_notify = False
+
+            # ── 距KO/KI 接近預警（在其他更重要事件之前先設定）──
+            if near_ko_alerts:
+                line_status_short = f"⚠️ 接近KO：{', '.join(near_ko_alerts)}"
+                group_status_short = line_status_short
+                need_notify = True
+            elif near_ki_alerts:
+                line_status_short = f"⚠️ 接近KI：{', '.join(near_ki_alerts)}"
+                group_status_short = line_status_short
+                need_notify = True
 
             if today_ts < row["IssueDate"]:
                 status_msgs.append("⏳ 未發行")
