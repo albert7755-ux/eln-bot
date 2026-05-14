@@ -37,6 +37,7 @@ FUND_DB = {
     "F00001EQPP_FO": {"moneydj": "ACFP148", "name": "富邦台美雙星多重"},
     "F0HKG05X22_FO": {"moneydj": "ACDD04",  "name": "安聯台灣科技"},
     "F00001EBH4_FO": {"moneydj": "ACYT168", "name": "元大全球優質龍頭平衡基金"},
+    "AF12_FO": {"moneydj": "FLZI0", "name": "富蘭克林穩定月收益A(acc)"},
 }
 # ==========================================
 # Google Drive 連線（從環境變數讀取）
