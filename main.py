@@ -673,7 +673,7 @@ def _normalize_history_for_chat(chat_key: str) -> list[dict]:
 def ai_claude(user_text: str, chat_key: str = "") -> str:
     history = _normalize_history_for_chat(chat_key)
     messages = history + [{"role": "user", "content": user_text}]
-    resp = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1200, system=SYSTEM_PROMPT, messages=messages)
+    resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=1200, system=SYSTEM_PROMPT, messages=messages)
     reply = (resp.content[0].text or "").strip()
     if chat_key:
         save_chat_history(chat_key, "user", user_text)
@@ -683,7 +683,7 @@ def ai_claude(user_text: str, chat_key: str = "") -> str:
 def ai_claude_long(user_text: str, chat_key: str = "") -> str:
     history = _normalize_history_for_chat(chat_key)
     messages = history + [{"role": "user", "content": user_text}]
-    resp = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2500, system=SYSTEM_PROMPT, messages=messages)
+    resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=2500, system=SYSTEM_PROMPT, messages=messages)
     reply = (resp.content[0].text or "").strip()
     if chat_key:
         save_chat_history(chat_key, "user", user_text)
@@ -871,7 +871,7 @@ def save_article_text(ck: str, content: str) -> str:
     for attempt in range(3):
         try:
             resp = claude_client.messages.create(
-                model="claude-sonnet-4-20250514", max_tokens=600,
+                model="claude-sonnet-4-6", max_tokens=600,
                 messages=[{"role": "user", "content": prompt}]
             )
             break
@@ -901,7 +901,7 @@ def save_article_image(image_data: bytes, message_id: str) -> str:
     for attempt in range(3):
         try:
             resp = claude_client.messages.create(
-                model="claude-sonnet-4-20250514", max_tokens=600,
+                model="claude-sonnet-4-6", max_tokens=600,
                 messages=[{"role": "user", "content": [
                     {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
                     {"type": "text", "text": f"請用繁體中文描述這張圖片的內容並產生摘要，並判斷分類與地點。\n{ARTICLE_PROMPT_SUFFIX}"}
@@ -1845,13 +1845,13 @@ def analyze_file_with_claude(text: str, filename: str) -> str:
               "2. 條列出5-8個最重要的重點\n3. 如果有數據或結論，特別標示出來\n"
               "4. 最後一句話說明這份文件的主要價值或建議行動\n\n"
               "格式規定: 不使用 Markdown 符號（禁止 ## ** --- 等），標題用 emoji，條列用 •")
-    resp = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
+    resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
     return (resp.content[0].text or "").strip()
 
 def analyze_image_with_claude(image_data: bytes, media_type: str) -> str:
     image_b64 = _base64.b64encode(image_data).decode("utf-8")
     resp = claude_client.messages.create(
-        model="claude-sonnet-4-20250514", max_tokens=1500,
+        model="claude-sonnet-4-6", max_tokens=1500,
         messages=[{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
             {"type": "text", "text": "請分析這張圖片，幫我:\n1. 說明圖片的主要內容\n2. 如果有文字或數據，擷取重要資訊\n3. 條列出重點\n格式規定: 不使用 Markdown 符號，標題用 emoji，條列用 •"}
@@ -1874,7 +1874,7 @@ def generate_invest_post(image_data: bytes, reason: str, targets: str) -> str:
 【版本二：輕鬆版】適合一般投資群組，語氣親切，用比喻讓人容易理解，帶點觀點但不失專業。
 格式：===專業版===（內容）===輕鬆版===（內容）"""
     resp = claude_client.messages.create(
-        model="claude-sonnet-4-20250514", max_tokens=1500,
+        model="claude-sonnet-4-6", max_tokens=1500,
         messages=[{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
             {"type": "text", "text": prompt}
@@ -2311,7 +2311,7 @@ async def kb_image_to_table(file: UploadFile = File(...)):
         media_type = media_map.get(suffix, "image/png")
         img_data = _base64.b64encode(file_bytes).decode("utf-8")
         response = claude_client.messages.create(
-            model="claude-sonnet-4-20250514", max_tokens=3000,
+            model="claude-sonnet-4-6", max_tokens=3000,
             messages=[{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_data}},
                 {"type": "text", "text": (
