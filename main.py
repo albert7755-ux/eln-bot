@@ -2225,20 +2225,199 @@ import subprocess
 import tempfile
 from fastapi.responses import FileResponse
 
+def _get_fund_folder_files() -> list:
+    """列出 mutual fund data 資料夾中所有檔案"""
+    try:
+        import requests as _req
+        from google.oauth2.service_account import Credentials as _Creds
+        from google.auth.transport.requests import Request as _Req
+        fund_folder_id = os.getenv("FUND_FOLDER_ID", "")
+        if not fund_folder_id:
+            return []
+        creds_dict = json.loads(os.getenv("GOOGLE_CREDENTIALS", "{}"))
+        creds = _Creds.from_service_account_info(
+            creds_dict, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+        )
+        creds.refresh(_Req())
+        headers = {"Authorization": f"Bearer {creds.token}"}
+        params = {
+            "q": f"'{fund_folder_id}' in parents and trashed=false",
+            "fields": "files(id, name, mimeType, modifiedTime)",
+            "orderBy": "modifiedTime desc",
+        }
+        resp = _req.get("https://www.googleapis.com/drive/v3/files",
+                        headers=headers, params=params, timeout=15)
+        return resp.json().get("files", [])
+    except Exception as e:
+        print(f"[generate-ppt] 列出基金資料夾失敗：{e}")
+        return []
+
+def _download_drive_file(file_id: str) -> bytes:
+    """從 Google Drive 下載檔案內容"""
+    import requests as _req
+    from google.oauth2.service_account import Credentials as _Creds
+    from google.auth.transport.requests import Request as _Req
+    creds_dict = json.loads(os.getenv("GOOGLE_CREDENTIALS", "{}"))
+    creds = _Creds.from_service_account_info(
+        creds_dict, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+    )
+    creds.refresh(_Req())
+    headers = {"Authorization": f"Bearer {creds.token}"}
+    resp = _req.get(
+        f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media",
+        headers=headers, timeout=30
+    )
+    return resp.content
+
+def _extract_pdf_text(pdf_bytes: bytes, max_chars: int = 4000) -> str:
+    """從 PDF bytes 擷取文字"""
+    try:
+        import io
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+            text = "\n".join(page.extract_text() or "" for page in reader.pages[:8])
+            return text[:max_chars].strip()
+        except ImportError:
+            pass
+        try:
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                text = "\n".join(page.extract_text() or "" for page in pdf.pages[:8])
+            return text[:max_chars].strip()
+        except ImportError:
+            pass
+        return ""
+    except Exception as e:
+        print(f"[generate-ppt] PDF 擷取失敗：{e}")
+        return ""
+
+def _find_fund_file(fund_name: str, files: list) -> dict:
+    """根據基金名稱關鍵字找最相關的檔案"""
+    keywords = [w for w in re.split(r"[\s\-_()（）基金]", fund_name) if len(w) >= 2]
+    best_file = None
+    best_score = 0
+    for f in files:
+        fname_lower = f["name"].lower()
+        score = sum(1 for kw in keywords if kw.lower() in fname_lower)
+        if score > best_score:
+            best_score = score
+            best_file = f
+    return best_file if best_score > 0 else None
+
+def _generate_fund_intro_claude(fund_name: str, pdf_text: str) -> list:
+    """用 Claude API 根據 PDF 內容生成基金三大策略介紹"""
+    try:
+        prompt = f"""你是一位資深基金研究員。以下是「{fund_name}」的產品說明書內容摘錄：
+
+{pdf_text if pdf_text else "（無法取得說明書，請根據基金名稱推斷）"}
+
+請輸出一個 JSON 陣列，包含 3 個物件，每個物件有：
+- title：策略名稱（20字以內，需具體有特色）
+- desc：策略說明（50~80字，具體說明策略內容與優勢）
+
+只輸出 JSON 陣列，不要有其他文字，不要加 ```。"""
+        resp = claude_client.messages.create(
+            model="claude-sonnet-4-20250514", max_tokens=600,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+        strategies = json.loads(text)
+        if isinstance(strategies, list) and len(strategies) >= 1:
+            return strategies[:3]
+    except Exception as e:
+        print(f"[generate-ppt] Claude 生成基金介紹失敗：{e}")
+    return [
+        {"title": "核心投資策略", "desc": f"{fund_name}以多元資產配置為核心，追求穩定收益與資本成長的平衡。"},
+        {"title": "配息特色",     "desc": "月配息機制提供規律現金流，適合退休規劃與資產配置需求。"},
+        {"title": "風險管理",     "desc": "透過跨市場、跨資產類別分散投資，有效控制波動風險。"},
+    ]
+
+def _generate_market_background_claude() -> dict:
+    """用 Claude API 生成當前市場背景"""
+    try:
+        prompt = """請根據目前最新的全球市場環境（2025-2026年），
+為一份台灣高資產客戶的投資組合建議書撰寫「市場背景」摘要。
+
+輸出 JSON 格式，包含：
+- summary：一段80字以內的市場總結（給客戶看，要具說服力）
+- points：4個市場重點觀察，每個20~35字
+
+只輸出 JSON，不要有其他文字，不要加 ```。"""
+        resp = claude_client.messages.create(
+            model="claude-sonnet-4-20250514", max_tokens=500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+        result = json.loads(text)
+        if isinstance(result, dict) and "summary" in result and "points" in result:
+            return result
+    except Exception as e:
+        print(f"[generate-ppt] Claude 生成市場背景失敗：{e}")
+    return {
+        "summary": "在全球利率高檔震盪、美元走勢分歧的環境下，多元資產配置成為兼顧收益與風險的最佳策略。",
+        "points": [
+            "美國聯準會降息步伐趨緩，長天期債券利率維持高位，短債與信用債具吸引力",
+            "全球央行持續增持黃金，實體資產在去美元化趨勢下需求強勁",
+            "股市波動加劇，高股息與多元收益型資產提供緩衝保護",
+            "台幣匯率波動下，美元計價資產搭配月配息商品有助穩定現金流",
+        ]
+    }
+
 @app.post("/generate-ppt")
 async def generate_ppt_endpoint(request: Request):
     """
-    接收投資組合回測數據，呼叫 generate_ppt.js 生成客戶建議書 PPTX。
-    由 APP__18_.py (Streamlit) 呼叫，回傳 .pptx 檔案供下載。
+    接收投資組合回測數據，自動：
+    1. 用 Claude API 生成市場背景
+    2. 從 Google Drive mutual fund data 找 PDF → 擷取文字 → Claude 生成介紹
+    3. 呼叫 generate_ppt.js 生成 PPTX
     """
     try:
         data = await request.json()
 
-        # 建立暫存輸出檔案
+        # Step 1：生成市場背景
+        print("[generate-ppt] 生成市場背景...")
+        data["market_background"] = _generate_market_background_claude()
+
+        # Step 2：為基金標的讀取 PDF 並生成介紹
+        fund_files = _get_fund_folder_files()
+        print(f"[generate-ppt] 找到 {len(fund_files)} 個基金資料檔案")
+
+        assets = data.get("assets", [])
+        for asset in assets:
+            asset_name = asset.get("name", "")
+            asset_type = asset.get("type", "")
+            is_fund = asset_type in ("基金", "FUND") or any(
+                kw in asset_name for kw in ["基金", "Fund", "PIMCO", "施羅德", "聯博", "富達", "貝萊德", "富蘭克林", "駿利"]
+            )
+            if not is_fund:
+                continue
+
+            print(f"[generate-ppt] 處理基金：{asset_name}")
+            pdf_text = ""
+            fund_file = _find_fund_file(asset_name, fund_files)
+            if fund_file:
+                print(f"[generate-ppt] 找到對應檔案：{fund_file['name']}")
+                try:
+                    pdf_bytes = _download_drive_file(fund_file["id"])
+                    pdf_text = _extract_pdf_text(pdf_bytes)
+                    print(f"[generate-ppt] 擷取 {len(pdf_text)} 字")
+                except Exception as e:
+                    print(f"[generate-ppt] 下載 PDF 失敗：{e}")
+            else:
+                print(f"[generate-ppt] 找不到 {asset_name} 的 PDF，使用 Claude 推斷")
+
+            asset["strategies"] = _generate_fund_intro_claude(asset_name, pdf_text)
+            weight = asset.get("weight", 0)
+            src = f"資料來源：{fund_file['name']}" if fund_file else "資料來源：Claude AI 推斷"
+            asset["footnote"] = f"配置比例 {weight:.1%}  |  月配息基金  |  {src}"
+
+        data["assets"] = assets
+
+        # Step 3：呼叫 Node.js 生成 PPT
         with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
             output_path = tmp.name
 
-        # 呼叫 Node.js 生成 PPT（js 與 main.py 放在同一目錄）
         js_path = Path(__file__).parent / "generate_ppt.js"
         result = subprocess.run(
             ["node", str(js_path), "--data", json.dumps(data, ensure_ascii=False), "--output", output_path],
@@ -2248,7 +2427,6 @@ async def generate_ppt_endpoint(request: Request):
         if not result.stdout.strip().startswith("OK:"):
             raise Exception(f"PPT 生成失敗：{result.stdout[:500]} {result.stderr[:500]}")
 
-        # 組合下載檔名
         client_name = data.get("client_name", "客戶")
         report_date = data.get("report_date", datetime.now(TZ_TAIPEI).strftime("%Y%m%d"))
         filename = f"{client_name}_投資組合建議書_{report_date}.pptx"
@@ -2262,6 +2440,8 @@ async def generate_ppt_endpoint(request: Request):
 
     except Exception as e:
         print(f"[generate-ppt] 錯誤：{e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"PPT 生成失敗：{str(e)[:300]}")
 
 # ==============================
