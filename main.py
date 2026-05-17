@@ -2219,6 +2219,52 @@ def start_scheduler():
 _scheduler = start_scheduler()
 
 # ==============================
+# 客戶建議書 PPT 生成 /generate-ppt
+# ==============================
+import subprocess
+import tempfile
+from fastapi.responses import FileResponse
+
+@app.post("/generate-ppt")
+async def generate_ppt_endpoint(request: Request):
+    """
+    接收投資組合回測數據，呼叫 generate_ppt.js 生成客戶建議書 PPTX。
+    由 APP__18_.py (Streamlit) 呼叫，回傳 .pptx 檔案供下載。
+    """
+    try:
+        data = await request.json()
+
+        # 建立暫存輸出檔案
+        with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
+            output_path = tmp.name
+
+        # 呼叫 Node.js 生成 PPT（js 與 main.py 放在同一目錄）
+        js_path = Path(__file__).parent / "generate_ppt.js"
+        result = subprocess.run(
+            ["node", str(js_path), "--data", json.dumps(data, ensure_ascii=False), "--output", output_path],
+            capture_output=True, text=True, timeout=120
+        )
+
+        if not result.stdout.strip().startswith("OK:"):
+            raise Exception(f"PPT 生成失敗：{result.stdout[:500]} {result.stderr[:500]}")
+
+        # 組合下載檔名
+        client_name = data.get("client_name", "客戶")
+        report_date = data.get("report_date", datetime.now(TZ_TAIPEI).strftime("%Y%m%d"))
+        filename = f"{client_name}_投資組合建議書_{report_date}.pptx"
+
+        return FileResponse(
+            path=output_path,
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            filename=filename,
+            background=None
+        )
+
+    except Exception as e:
+        print(f"[generate-ppt] 錯誤：{e}")
+        raise HTTPException(status_code=500, detail=f"PPT 生成失敗：{str(e)[:300]}")
+
+# ==============================
 # 知識庫路由 /kb
 # ==============================
 @app.get("/kb")
