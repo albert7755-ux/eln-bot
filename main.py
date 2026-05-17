@@ -2248,8 +2248,8 @@ def job_auto_tracking():
 
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
-    scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-fri", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
-    scheduler.add_job(job_auto_tracking, CronTrigger(day_of_week="mon-fri", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ), id="auto_tracking", name="ELN自動追蹤")
+    scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
+    scheduler.add_job(job_auto_tracking, CronTrigger(day_of_week="mon-sat", hour=6, minute=50, timezone=TZ_TAIPEI_PYTZ), id="auto_tracking", name="ELN自動追蹤")
     scheduler.add_job(job_alert_monitor, IntervalTrigger(minutes=15), id="alert_monitor", name="價格警示")
     scheduler.add_job(job_spending_report, CronTrigger(hour=9, minute=0, timezone=TZ_TAIPEI_PYTZ), id="spending_report", name="月度消費明細")
     scheduler.add_job(job_mail_monitor, IntervalTrigger(minutes=15, start_date=datetime.now(TZ_TAIPEI_PYTZ).replace(second=0, microsecond=0) + timedelta(minutes=5)), id="mail_monitor", name="郵件監控")
