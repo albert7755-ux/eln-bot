@@ -5,5 +5,5 @@ apt-get install -y ffmpeg 2>/dev/null || echo "ffmpeg 安裝跳過（非 root）
 echo "📦 安裝 Python 套件..."
 pip install -r requirements.txt
 echo "🟨 安裝 Node.js 套件（PPT 生成器）..."
-npm install -g pptxgenjs react-icons react react-dom sharp
+npm install
 echo "✅ Build 完成！"
