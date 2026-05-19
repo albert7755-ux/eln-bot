@@ -673,7 +673,7 @@ def _normalize_history_for_chat(chat_key: str) -> list[dict]:
 def ai_claude(user_text: str, chat_key: str = "") -> str:
     history = _normalize_history_for_chat(chat_key)
     messages = history + [{"role": "user", "content": user_text}]
-    resp = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1200, system=SYSTEM_PROMPT, messages=messages)
+    resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=1200, system=SYSTEM_PROMPT, messages=messages)
     reply = (resp.content[0].text or "").strip()
     if chat_key:
         save_chat_history(chat_key, "user", user_text)
@@ -683,7 +683,7 @@ def ai_claude(user_text: str, chat_key: str = "") -> str:
 def ai_claude_long(user_text: str, chat_key: str = "") -> str:
     history = _normalize_history_for_chat(chat_key)
     messages = history + [{"role": "user", "content": user_text}]
-    resp = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2500, system=SYSTEM_PROMPT, messages=messages)
+    resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=2500, system=SYSTEM_PROMPT, messages=messages)
     reply = (resp.content[0].text or "").strip()
     if chat_key:
         save_chat_history(chat_key, "user", user_text)
@@ -871,7 +871,7 @@ def save_article_text(ck: str, content: str) -> str:
     for attempt in range(3):
         try:
             resp = claude_client.messages.create(
-                model="claude-sonnet-4-20250514", max_tokens=600,
+                model="claude-sonnet-4-6", max_tokens=600,
                 messages=[{"role": "user", "content": prompt}]
             )
             break
@@ -901,7 +901,7 @@ def save_article_image(image_data: bytes, message_id: str) -> str:
     for attempt in range(3):
         try:
             resp = claude_client.messages.create(
-                model="claude-sonnet-4-20250514", max_tokens=600,
+                model="claude-sonnet-4-6", max_tokens=600,
                 messages=[{"role": "user", "content": [
                     {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
                     {"type": "text", "text": f"請用繁體中文描述這張圖片的內容並產生摘要，並判斷分類與地點。\n{ARTICLE_PROMPT_SUFFIX}"}
@@ -1011,7 +1011,7 @@ def handle_text_message(event):
                            "📚 知識庫\n/kb <問題> → 查詢知識庫\n/kb上傳 → 上傳檔案\n/kb清單 → 查看文件清單\n─────────────────\n"
                            "🔔 警示\n/alert add  /alert list  /alert del\n輸入 /help alert 看完整範例\n─────────────────\n"
                            "📚 文章庫\n/save  /unread  /read  /article  /del  /web\n直接傳圖片 → 自動儲存分析\n輸入 /help save 看完整說明\n─────────────────\n"
-                           "📊 基金淨值\n/fundnav → 手動更新15檔基金淨值\n/tracklog → 查看執行記錄\n─────────────────\n"
+                           "📊 基金淨值 & 債券報價\n/fundnav → 手動更新基金淨值\n/bondnav → 手動觸發債券報價更新（94筆，約30分鐘）\n/tracklog → 查看執行記錄\n─────────────────\n"
                            "📧 其他\n/mail  /invest  /forget  /spending\n上傳錄音 → 自動逐字稿 / 摘要\n上傳檔案 → 自動分析\n─────────────────\n"
                            "進階說明：/help alert、/help eln、/help report、/help save")
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
@@ -1565,6 +1565,49 @@ def handle_text_message(event):
                 write_job_log("ELN追蹤(手動)", "error", str(e))
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 執行失敗：{str(e)[:300]}"))
             return
+        if cmd in ("bondnav",):
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="📊 手動觸發債券報價更新中...\n約需 30 分鐘，完成後會通知你 ✅"
+            ))
+            def _run_bondnav():
+                try:
+                    import urllib.request as _req
+                    pat = os.getenv("GITHUB_PAT", "")
+                    if not pat:
+                        raise RuntimeError("缺少 GITHUB_PAT 環境變數")
+                    data = json.dumps({
+                        "ref": "main",
+                        "inputs": {"mode": "update"}
+                    }).encode("utf-8")
+                    req = _req.Request(
+                        "https://api.github.com/repos/albert7755-ux/eln-bot/actions/workflows/update_bond_prices.yml/dispatches",
+                        data=data,
+                        headers={
+                            "Authorization": f"Bearer {pat}",
+                            "Accept": "application/vnd.github+json",
+                            "Content-Type": "application/json",
+                            "X-GitHub-Api-Version": "2022-11-28"
+                        },
+                        method="POST"
+                    )
+                    with _req.urlopen(req, timeout=15) as resp:
+                        status = resp.status
+                    user_id = os.getenv("LINE_USER_ID", "")
+                    if status == 204 and user_id:
+                        line_bot_api.push_message(user_id, TextSendMessage(
+                            text="✅ 債券報價更新已觸發！\nGitHub Actions 開始執行，約 30 分鐘後完成。"
+                        ))
+                    else:
+                        raise RuntimeError(f"GitHub API 回應：{status}")
+                except Exception as e:
+                    user_id = os.getenv("LINE_USER_ID", "")
+                    if user_id:
+                        line_bot_api.push_message(user_id, TextSendMessage(
+                            text=f"❌ /bondnav 觸發失敗：{str(e)[:200]}"
+                        ))
+            import threading
+            threading.Thread(target=_run_bondnav, daemon=True).start()
+            return
         if cmd == "fundnav":
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text="📊 手動更新基金淨值中...\n15 檔基金約需 2 分鐘，完成後會通知你 ✅"
@@ -1802,13 +1845,13 @@ def analyze_file_with_claude(text: str, filename: str) -> str:
               "2. 條列出5-8個最重要的重點\n3. 如果有數據或結論，特別標示出來\n"
               "4. 最後一句話說明這份文件的主要價值或建議行動\n\n"
               "格式規定: 不使用 Markdown 符號（禁止 ## ** --- 等），標題用 emoji，條列用 •")
-    resp = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
+    resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
     return (resp.content[0].text or "").strip()
 
 def analyze_image_with_claude(image_data: bytes, media_type: str) -> str:
     image_b64 = _base64.b64encode(image_data).decode("utf-8")
     resp = claude_client.messages.create(
-        model="claude-sonnet-4-20250514", max_tokens=1500,
+        model="claude-sonnet-4-6", max_tokens=1500,
         messages=[{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
             {"type": "text", "text": "請分析這張圖片，幫我:\n1. 說明圖片的主要內容\n2. 如果有文字或數據，擷取重要資訊\n3. 條列出重點\n格式規定: 不使用 Markdown 符號，標題用 emoji，條列用 •"}
@@ -1831,7 +1874,7 @@ def generate_invest_post(image_data: bytes, reason: str, targets: str) -> str:
 【版本二：輕鬆版】適合一般投資群組，語氣親切，用比喻讓人容易理解，帶點觀點但不失專業。
 格式：===專業版===（內容）===輕鬆版===（內容）"""
     resp = claude_client.messages.create(
-        model="claude-sonnet-4-20250514", max_tokens=1500,
+        model="claude-sonnet-4-6", max_tokens=1500,
         messages=[{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
             {"type": "text", "text": prompt}
@@ -2318,7 +2361,7 @@ def _generate_fund_intro_claude(fund_name: str, pdf_text: str) -> list:
 
 只輸出 JSON 陣列，不要有其他文字，不要加 ```。"""
         resp = claude_client.messages.create(
-            model="claude-sonnet-4-20250514", max_tokens=600,
+            model="claude-sonnet-4-6", max_tokens=600,
             messages=[{"role": "user", "content": prompt}]
         )
         text = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
@@ -2345,7 +2388,7 @@ def _generate_market_background_claude() -> dict:
 
 只輸出 JSON，不要有其他文字，不要加 ```。"""
         resp = claude_client.messages.create(
-            model="claude-sonnet-4-20250514", max_tokens=500,
+            model="claude-sonnet-4-6", max_tokens=500,
             messages=[{"role": "user", "content": prompt}]
         )
         text = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
@@ -2494,7 +2537,7 @@ async def kb_image_to_table(file: UploadFile = File(...)):
         media_type = media_map.get(suffix, "image/png")
         img_data = _base64.b64encode(file_bytes).decode("utf-8")
         response = claude_client.messages.create(
-            model="claude-sonnet-4-20250514", max_tokens=3000,
+            model="claude-sonnet-4-6", max_tokens=3000,
             messages=[{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_data}},
                 {"type": "text", "text": (
