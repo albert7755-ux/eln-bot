@@ -371,7 +371,7 @@ async def callback2(request: Request):
             rtoken = ev.get("replyToken", "")
             uid = ev.get("source", {}).get("userId", "")
             print(f"[ELN-G USER] uid={uid} msg={repr(txt[:50])}")
-            if not (tl.startswith("/list") or tl.startswith("/detail") or tl.startswith("/end")):
+            if not (tl.startswith("/list") or tl.startswith("/detail") or tl.startswith("/end") or tl.startswith("/nc")):
                 continue
             from linebot.models import TextSendMessage as TSM
             from collections import defaultdict
@@ -453,6 +453,42 @@ async def callback2(request: Request):
                 for bid, ag, tag in matched:
                     out += "   • " + bid + " [" + ag + "]" + tag + "\n"
                 eln_group_bot_api.reply_message(rtoken, TSM(text=out[:4900]))
+            elif tl.startswith("/nc"):
+                ps = txt.split(" ")
+                if len(ps) < 2 or not ps[1].strip():
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="請輸入：/nc YYYYMM\n例：/nc 202606\n或：/nc 202606 小美"))
+                    continue
+                qm = ps[1].strip().replace("/", "").replace("-", "")
+                if len(qm) != 6 or not qm.isdigit():
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="格式錯誤，請輸入6位數字\n例：/nc 202606"))
+                    continue
+                yr, mo = qm[:4], qm[4:]
+                name_filter_nc = ps[2].strip() if len(ps) > 2 else ""
+                search_str_nc = yr + "-" + mo
+                with engine.begin() as conn:
+                    rows = conn.execute(text("SELECT bond_id, agent_name, detail FROM eln_detail WHERE chat_key=:k ORDER BY agent_name ASC, bond_id ASC"), {"k": ck}).fetchall()
+                if not rows:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="目前尚無資料。"))
+                    continue
+                matched = []
+                import re as _re2
+                for bid, ag, det in rows:
+                    m = _re2.search(r"NC閉鎖期 \(至 (\d{4}-\d{2})-\d{2}\)", det)
+                    if m and m.group(1) == search_str_nc:
+                        if name_filter_nc:
+                            ags = [a.strip() for a in _re2.split(r"[,，、/]", ag or "") if a.strip()]
+                            if not any(name_filter_nc in a for a in ags):
+                                continue
+                        matched.append((bid, ag or "-", bond_status_tag(det)))
+                if not matched:
+                    tip = f"「{name_filter_nc}」" if name_filter_nc else ""
+                    eln_group_bot_api.reply_message(rtoken, TSM(text=f"找不到 {yr}/{mo} 閉鎖期打開{tip}的商品。"))
+                    continue
+                tip2 = f"（{name_filter_nc}）" if name_filter_nc else ""
+                out_nc = f"🔓 {yr}/{mo} 閉鎖期打開{tip2}（共 {len(matched)} 筆）：\n"
+                for bid, ag, tag in matched:
+                    out_nc += f"   • {bid} [{ag}]{tag}\n"
+                eln_group_bot_api.reply_message(rtoken, TSM(text=out_nc[:4900]))
     except Exception as e:
         print("[callback2 ERR]", e)
     return "OK"
@@ -971,7 +1007,7 @@ def handle_text_message(event):
         if cmd in ("help", "?", "指令", "幫助"):
             help_arg = parts[1].strip().lower() if len(parts) > 1 else ""
             if is_group:
-                msg = "群組可用指令：\n/detail <商品代號>：查詢標的完整狀況（支援模糊搜尋）\n/list：列出所有可查商品代號\n"
+                msg = "群組可用指令：\n/detail <商品代號>：查詢標的完整狀況（支援模糊搜尋）\n/list：列出所有可查商品代號\n/list <姓名>：查詢該理專的持倉\n/nc YYYYMM：查詢該月閉鎖期打開的商品\n/nc YYYYMM <姓名>：查詢該理專的閉鎖期商品\n/end YYYYMM：查詢該月到期商品\n"
             else:
                 if help_arg in ("alert", "警示"):
                     msg = ("🔔 Alert 指令說明\n─────────────────\n"
@@ -988,6 +1024,8 @@ def handle_text_message(event):
                            "/eln run — 立即重跑最新 ELN\n/eln history — 查看歷史 Excel\n"
                            "/eln result — 查看最近結果\n/runnow — 手動執行追蹤\n"
                            "/tracklog — 查看最近排程紀錄\n/end YYYYMM — 查詢指定月份到期商品\n"
+                           "/nc YYYYMM — 查詢指定月份閉鎖期打開的商品\n"
+                           "/nc YYYYMM 姓名 — 查詢該理專的閉鎖期打開商品\n"
                            "/chart 商品代號 — 產生走勢圖+防守線（KO/KI/Strike）")
                 elif help_arg in ("report", "pdf", "報告", "簡報"):
                     msg = ("📑 報告 / PDF 指令說明\n─────────────────\n"
@@ -1442,6 +1480,42 @@ def handle_text_message(event):
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=report[:4900]))
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 消費分析失敗：{str(e)[:200]}"))
+            return
+        if cmd.startswith("nc"):
+            nc_parts = text_raw.split(" ")
+            if len(nc_parts) < 2 or not nc_parts[1].strip():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入：/nc YYYYMM\n例：/nc 202606\n或：/nc 202606 小美"))
+                return
+            qm_nc = nc_parts[1].strip().replace("/", "").replace("-", "")
+            if len(qm_nc) != 6 or not qm_nc.isdigit():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="格式錯誤，請輸入6位數字\n例：/nc 202606"))
+                return
+            yr_nc = qm_nc[:4]
+            mo_nc = qm_nc[4:]
+            name_filter_nc = nc_parts[2].strip() if len(nc_parts) > 2 else ""
+            search_str_nc = f"{yr_nc}-{mo_nc}"
+            with engine.begin() as conn:
+                rows = conn.execute(text("SELECT bond_id, agent_name, detail FROM eln_detail WHERE chat_key=:k ORDER BY agent_name ASC, bond_id ASC"), {"k": ck}).fetchall()
+            if not rows:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無資料。"))
+                return
+            matched_nc = []
+            for bond_id, agent_name, detail in rows:
+                m = re.search(r"NC閉鎖期 \(至 (\d{4}-\d{2})-\d{2}\)", detail)
+                if m and m.group(1) == search_str_nc:
+                    if name_filter_nc:
+                        ags = [a.strip() for a in re.split(r"[,，、/]", agent_name or "") if a.strip()]
+                        if not any(name_filter_nc in a for a in ags):
+                            continue
+                    matched_nc.append((bond_id, agent_name or "-", bond_status_tag(detail)))
+            if not matched_nc:
+                tip = f"「{name_filter_nc}」" if name_filter_nc else ""
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到 {yr_nc}/{mo_nc} 閉鎖期打開{tip}的商品。"))
+                return
+            tip2 = f"（{name_filter_nc}）" if name_filter_nc else ""
+            lines_nc = [f"🔓 {yr_nc}/{mo_nc} 閉鎖期打開{tip2}（共 {len(matched_nc)} 筆）:\n"]
+            lines_nc += [f"   • {bid} [{ag}]{tag}" for bid, ag, tag in matched_nc]
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines_nc)[:4900]))
             return
         if cmd.startswith("end"):
             parts = text_raw.split(" ", 1)
@@ -2067,7 +2141,7 @@ def handle_eln_group_message(event):
         tl = text_raw.lower().strip()
         uid = event.source.user_id if hasattr(event.source, "user_id") else "unknown"
         print(f"[ELN-G USER] uid={uid} msg={repr(text_raw[:50])}")
-        if not (tl.startswith("/list") or tl.startswith("/detail")):
+        if not (tl.startswith("/list") or tl.startswith("/detail") or tl.startswith("/nc")):
             return
         ck = ELN_PERSONAL_CHAT_KEY
         if tl.startswith("/list"):
@@ -2132,6 +2206,42 @@ def handle_eln_group_message(event):
                 eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"請再精準一點，候選代號：\n{sample}"[:4900]))
                 return
             eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="查不到該代號。"))
+            return
+        if tl.startswith("/nc"):
+            nc_parts = text_raw.split(" ")
+            if len(nc_parts) < 2 or not nc_parts[1].strip():
+                eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入：/nc YYYYMM\n例：/nc 202606\n或：/nc 202606 小美"))
+                return
+            qm_nc = nc_parts[1].strip().replace("/", "").replace("-", "")
+            if len(qm_nc) != 6 or not qm_nc.isdigit():
+                eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="格式錯誤，請輸入6位數字\n例：/nc 202606"))
+                return
+            yr_nc = qm_nc[:4]
+            mo_nc = qm_nc[4:]
+            name_filter_nc = nc_parts[2].strip() if len(nc_parts) > 2 else ""
+            search_str_nc = f"{yr_nc}-{mo_nc}"
+            with engine.begin() as conn:
+                rows = conn.execute(text("SELECT bond_id, agent_name, detail FROM eln_detail WHERE chat_key=:k ORDER BY agent_name ASC, bond_id ASC"), {"k": ck}).fetchall()
+            if not rows:
+                eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無資料。"))
+                return
+            matched_nc = []
+            for bond_id, agent_name, detail in rows:
+                m = re.search(r"NC閉鎖期 \(至 (\d{4}-\d{2})-\d{2}\)", detail)
+                if m and m.group(1) == search_str_nc:
+                    if name_filter_nc:
+                        ags = [a.strip() for a in re.split(r"[,，、/]", agent_name or "") if a.strip()]
+                        if not any(name_filter_nc in a for a in ags):
+                            continue
+                    matched_nc.append((bond_id, agent_name or "-", bond_status_tag(detail)))
+            if not matched_nc:
+                tip = f"「{name_filter_nc}」" if name_filter_nc else ""
+                eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到 {yr_nc}/{mo_nc} 閉鎖期打開{tip}的商品。"))
+                return
+            tip2 = f"（{name_filter_nc}）" if name_filter_nc else ""
+            lines_nc = [f"🔓 {yr_nc}/{mo_nc} 閉鎖期打開{tip2}（共 {len(matched_nc)} 筆）:\n"]
+            lines_nc += [f"   • {bid} [{ag}]{tag}" for bid, ag, tag in matched_nc]
+            eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines_nc)[:4900]))
             return
     except Exception as e:
         print(f"[ELN-GROUP ERROR] {e}")
