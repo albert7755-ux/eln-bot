@@ -488,7 +488,8 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 cell_text += f"\n KO價: {round(ko_trigger_val, 2)}"
 
                 is_in_nc = safe_cutoff < nc_end_date
-                if asset["price"] > 0 and not asset["locked_ko"] and not is_in_nc:
+                is_still_running = (product_status == "Running") and (pd.isna(row["ValuationDate"]) or safe_cutoff < row["ValuationDate"])
+                if asset["price"] > 0 and not asset["locked_ko"] and not is_in_nc and is_still_running:
                     dist_ko = (ko_trigger_val - asset["price"]) / asset["price"] * 100
                     if 0 < dist_ko <= 3:
                         cell_text += f" ⚠️距KO {dist_ko:.1f}%"
@@ -497,7 +498,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 if has_ki:
                     ki_price = round(asset["initial"] * ki_thresh, 2)
                     cell_text += f"\n KI價: {ki_price} ({ki_thresh_val:.0f}%)"
-                    if asset["price"] > 0 and not asset["hit_ki"]:
+                    if asset["price"] > 0 and not asset["hit_ki"] and is_still_running:
                         dist_ki = (asset["price"] - ki_price) / asset["price"] * 100
                         if 0 < dist_ki <= 3:
                             cell_text += f" ⚠️距KI {dist_ki:.1f}%"
