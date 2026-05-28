@@ -541,7 +541,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 status_msgs.append("⏳ 未發行")
             elif product_status == "Early Redemption":
                 status_msgs.append(f"🎉 提前出場 ({early_redemption_date.strftime('%Y-%m-%d')})")
-                if early_redemption_date is not None and early_redemption_date >= lookback_date:
+                if early_redemption_date is not None and lookback_date <= early_redemption_date <= pd.Timestamp(safe_cutoff):
                     line_status_short = "🎉 恭喜！已提前出場 (KO)"
                     group_status_short = "🎉 提前出場 (KO)"
                     need_notify = True
@@ -570,7 +570,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     else:
                         status_msgs.append("🛡️ 到期保本")
                         line_status_short = "🛡️ 到期保本"
-                if row["ValuationDate"] >= lookback_date:
+                if lookback_date <= row["ValuationDate"] <= pd.Timestamp(safe_cutoff):
                     need_notify = True
             else:
                 if safe_cutoff < nc_end_date:
