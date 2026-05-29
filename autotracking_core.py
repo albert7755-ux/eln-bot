@@ -309,6 +309,14 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             is_period_end = is_period_end_check(row["KO_Type"])
             is_aki = "AKI" in str(row["KI_Type"]).upper()
 
+            # ── BEN 商品：沒有KO機制，KI用執行價，KO設9999 ──
+            if is_ben:
+                ki_thresh = strike_thresh
+                is_aki = False
+                ko_initial_val = 9999.0
+                ko_step_val = 0.0
+                current_ko_thresh = 9999.0
+
             assets = []
             for i in range(1, 6):
                 code = row.get(f"T{i}_Code", "")
@@ -345,18 +353,25 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 print(f"[DEBUG] 跳過 row {index} ({row.get('ID','?')})：找不到有效標的")
                 continue
 
+            # ── effective_date：已到期/已KO用當天收盤價，避免顯示今天市價 ──
+            effective_date = safe_cutoff
+            if product_status == "Early Redemption" and early_redemption_date is not None:
+                effective_date = early_redemption_date
+            elif pd.notna(row["ValuationDate"]) and today_ts >= row["ValuationDate"]:
+                effective_date = row["ValuationDate"]
+
             for asset in assets:
                 try:
                     s = history_data[asset["code"]] if asset["code"] in history_data.columns else None
                     if s is None:
                         asset["price"] = 0
                         continue
-                    valid_s = s[s.index <= safe_cutoff].dropna()
+                    valid_s = s[s.index <= effective_date].dropna()
                     if not valid_s.empty:
                         curr = float(valid_s.iloc[-1])
                         asset["price"] = curr
                         asset["perf"] = curr / asset["initial"]
-                        if (not is_aki) and (not is_dra):
+                        if (not is_aki) and (not is_dra) and product_status == "Running":
                             if asset["perf"] < ki_thresh:
                                 post_issue_data = valid_s[valid_s.index >= row["IssueDate"]]
                                 if len(post_issue_data) > 1:
@@ -546,7 +561,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     line_status_short = "🎉 恭喜！已提前出場 (KO)"
                     group_status_short = "🎉 提前出場 (KO)"
                     need_notify = True
-            elif pd.notna(row["ValuationDate"]) and safe_cutoff >= row["ValuationDate"]:
+            elif pd.notna(row["ValuationDate"]) and today_ts >= row["ValuationDate"]:
                 if is_ben and coupon_thresh is not None:
                     ben_worst = min([a["perf"] for a in assets if a["perf"] > 0], default=0)
                     if ben_worst >= (1 + coupon_thresh):
