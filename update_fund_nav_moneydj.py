@@ -38,6 +38,7 @@ FUND_DB = {
     "F0HKG05X22_FO": {"moneydj": "ACDD04",  "name": "安聯台灣科技"},
     "F00001EBH4_FO": {"moneydj": "ACYT168", "name": "元大全球優質龍頭平衡基金"},
     "F000015CRE_FO": {"moneydj": "FLZI0", "name": "富蘭克林穩定月收益A(acc)"},
+    "F0GBR04AY1_FO": {"moneydj": "FTH29",  "name": "富達全球動能多元基金"},
 }
 # ==========================================
 # Google Drive 連線（從環境變數讀取）
