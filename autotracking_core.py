@@ -353,20 +353,13 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 print(f"[DEBUG] 跳過 row {index} ({row.get('ID','?')})：找不到有效標的")
                 continue
 
-            # ── effective_date：已到期/已KO用當天收盤價，避免顯示今天市價 ──
-            effective_date = safe_cutoff
-            if product_status == "Early Redemption" and early_redemption_date is not None:
-                effective_date = early_redemption_date
-            elif pd.notna(row["ValuationDate"]) and today_ts >= row["ValuationDate"]:
-                effective_date = row["ValuationDate"]
-
             for asset in assets:
                 try:
                     s = history_data[asset["code"]] if asset["code"] in history_data.columns else None
                     if s is None:
                         asset["price"] = 0
                         continue
-                    valid_s = s[s.index <= effective_date].dropna()
+                    valid_s = s[s.index <= pd.Timestamp(effective_date)].dropna()
                     if not valid_s.empty:
                         curr = float(valid_s.iloc[-1])
                         asset["price"] = curr
@@ -451,6 +444,13 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                         if all_locked:
                             product_status = "Early Redemption"
                             early_redemption_date = date
+
+            # ── effective_date：已到期/已KO用當天收盤價，避免顯示今天市價 ──
+            effective_date = safe_cutoff
+            if product_status == "Early Redemption" and early_redemption_date is not None:
+                effective_date = early_redemption_date
+            elif pd.notna(row["ValuationDate"]) and today_ts >= row["ValuationDate"]:
+                effective_date = row["ValuationDate"]
 
             locked_list = []
             waiting_list = []
