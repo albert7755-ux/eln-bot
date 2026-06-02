@@ -414,39 +414,6 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 print(f"[DEBUG] 跳過 row {index} ({row.get('ID','?')})：找不到有效標的")
                 continue
 
-            if row.get("ID", "") == "WMGS26040252":
-                print(f"[DEBUG 26040252 dates] IssueDate={row['IssueDate']}, TradeDate={row['TradeDate']}, ValuationDate={row['ValuationDate']}, nc_end_date={nc_end_date}, product_status={product_status}, early_redemption_date={early_redemption_date}")
-            for asset in assets:
-                try:
-                    s = history_data[asset["code"]] if asset["code"] in history_data.columns else None
-                    if s is None:
-                        print(f"[DEBUG PRICE] {row['ID']} {asset['code']} 不在 history_data 中")
-                        asset["price"] = 0
-                        continue
-                    # 統一去除 timezone 後比較，避免 tz-aware vs tz-naive 的問題
-                    eff_ts = pd.Timestamp(effective_date).tz_localize(None) if pd.Timestamp(effective_date).tzinfo is None else pd.Timestamp(effective_date).tz_convert(None)
-                    s_tz = s.copy()
-                    if s_tz.index.tzinfo is not None:
-                        s_tz.index = s_tz.index.tz_convert(None)
-                    valid_s = s_tz[s_tz.index <= eff_ts].dropna()
-                    if not valid_s.empty:
-                        curr = float(valid_s.iloc[-1])
-                        asset["price"] = curr
-                        asset["perf"] = curr / asset["initial"]
-                        if asset["code"] == "TSLA":
-                            print(f"[DEBUG TSLA] eff_ts={eff_ts}, valid_s last date={valid_s.index[-1].date()}, price={curr}")
-                        if (not is_aki) and (not is_dra) and product_status == "Running":
-                            if asset["perf"] < ki_thresh:
-                                post_issue_data = valid_s[valid_s.index >= row["IssueDate"]]
-                                if len(post_issue_data) > 1:
-                                    past_data = post_issue_data.iloc[:-1]
-                                    breach_threshold_price = asset["initial"] * ki_thresh
-                                    asset["eki_fresh_breach"] = not (past_data < breach_threshold_price).any()
-                                else:
-                                    asset["eki_fresh_breach"] = True
-                except:
-                    asset["price"] = 0
-
             months_passed = 0
             if pd.notna(row["IssueDate"]):
                 try:
@@ -522,6 +489,33 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 effective_date = early_redemption_date
             elif pd.notna(row["ValuationDate"]) and today_ts >= row["ValuationDate"]:
                 effective_date = row["ValuationDate"]
+
+            for asset in assets:
+                try:
+                    s = history_data[asset["code"]] if asset["code"] in history_data.columns else None
+                    if s is None:
+                        asset["price"] = 0
+                        continue
+                    eff_ts = pd.Timestamp(effective_date).tz_localize(None) if pd.Timestamp(effective_date).tzinfo is None else pd.Timestamp(effective_date).tz_convert(None)
+                    s_tz = s.copy()
+                    if s_tz.index.tzinfo is not None:
+                        s_tz.index = s_tz.index.tz_convert(None)
+                    valid_s = s_tz[s_tz.index <= eff_ts].dropna()
+                    if not valid_s.empty:
+                        curr = float(valid_s.iloc[-1])
+                        asset["price"] = curr
+                        asset["perf"] = curr / asset["initial"]
+                        if (not is_aki) and (not is_dra) and product_status == "Running":
+                            if asset["perf"] < ki_thresh:
+                                post_issue_data = valid_s[valid_s.index >= row["IssueDate"]]
+                                if len(post_issue_data) > 1:
+                                    past_data = post_issue_data.iloc[:-1]
+                                    breach_threshold_price = asset["initial"] * ki_thresh
+                                    asset["eki_fresh_breach"] = not (past_data < breach_threshold_price).any()
+                                else:
+                                    asset["eki_fresh_breach"] = True
+                except:
+                    asset["price"] = 0
 
             locked_list = []
             waiting_list = []
