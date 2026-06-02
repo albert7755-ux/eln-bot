@@ -394,6 +394,8 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                         except:
                             initial = 0
                 if initial > 0:
+                    if row.get("ID", "") == "WMGS26040252":
+                        print(f"[DEBUG 26040252] 建立 asset: code={code}, initial={initial}")
                     assets.append({
                         "code": code,
                         "initial": initial,
@@ -416,6 +418,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 try:
                     s = history_data[asset["code"]] if asset["code"] in history_data.columns else None
                     if s is None:
+                        print(f"[DEBUG PRICE] {row['ID']} {asset['code']} 不在 history_data 中")
                         asset["price"] = 0
                         continue
                     # 統一去除 timezone 後比較，避免 tz-aware vs tz-naive 的問題
