@@ -2003,15 +2003,26 @@ def handle_file_message(event):
             return
         if ext in (".xlsx", ".xls"):
             db_set_await(ck, False)
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 收到 Excel！計算中，請稍候..."))
-            summary, top5_lines, detail_map, agent_name_map = run_autotracking(str(tmp_path))
-            db_save_result(ck, summary, top5_lines, detail_map, agent_name_map)
-            try:
-                from eln_storage import upload_eln_excel
-                upload_eln_excel(str(tmp_path))
-            except Exception as e:
-                print("[ELN Storage] upload failed:", e)
-            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900]))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 收到 Excel！計算中，請稍候約30秒..."))
+            def _run_calc(tmp_path_str, chat_key, bot_api_ref):
+                try:
+                    summary, top5_lines, detail_map, agent_name_map = run_autotracking(tmp_path_str)
+                    db_save_result(chat_key, summary, top5_lines, detail_map, agent_name_map)
+                    print(f"[CALC] 寫入完成，共 {len(detail_map)} 筆")
+                    try:
+                        from eln_storage import upload_eln_excel
+                        upload_eln_excel(tmp_path_str)
+                    except Exception as e:
+                        print("[ELN Storage] upload failed:", e)
+                    bot_api_ref.push_message(chat_key.split(":", 1)[1], TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900]))
+                except Exception as e:
+                    print(f"[CALC ERROR] {e}")
+                    import traceback as _tb
+                    print(_tb.format_exc())
+                    bot_api_ref.push_message(chat_key.split(":", 1)[1], TextSendMessage(text=f"❌ 計算失敗：{str(e)[:200]}"))
+            import threading
+            t = threading.Thread(target=_run_calc, args=(str(tmp_path), ck, _bot_api), daemon=True)
+            t.start()
             return
         if ext in (".pdf", ".docx", ".pptx"):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"收到！正在分析 {filename}，請稍候..."))
