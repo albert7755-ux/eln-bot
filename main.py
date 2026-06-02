@@ -507,55 +507,9 @@ def chat_key_of(event) -> str:
 # Adapter: core -> (summary, top5, detail_map)
 # ==============================
 def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bool = True):
+    from auto_tracking_cron import build_result
     out = calculate_from_file(file_path=file_path, lookback_days=lookback_days, notify_ki_daily=notify_ki_daily)
-    df = out.get("results_df")
-    report = out.get("report_text", "") or ""
-    top5_lines: list[str] = []
-    detail_map: dict[str, str] = {}
-    agent_name_map: dict[str, str] = {}
-    if df is not None and getattr(df, "empty", True) is False:
-        top = df.head(5)
-        for _, r in top.iterrows():
-            try:
-                status_first = str(r["狀態"]).splitlines()[0] if "狀態" in r.index else ""
-            except Exception:
-                status_first = ""
-            bond_id = str(r["債券代號"]) if "債券代號" in r.index else "-"
-            ptype = str(r["Type"]) if "Type" in r.index else "-"
-            top5_lines.append(f"● {bond_id} {ptype}｜{status_first}")
-        for _, r in df.iterrows():
-            _id = str(r["債券代號"]).strip() if "債券代號" in r.index else ""
-            if not _id or _id == "nan":
-                continue
-            t_details = []
-            for c in df.columns:
-                if str(c).endswith("_Detail"):
-                    v = r[c] if c in r.index else ""
-                    if v:
-                        t_details.append(str(v))
-            agent = str(r["Name"] if "Name" in r.index else "-").strip() or "-"
-            agent_name_map[_id] = agent
-            # ── 正確的 detail_text，包含最終評價日、到期日、Coupon ──
-            detail_text = (
-                f"【商品】{_id}\n"
-                f"類型: {r['Type'] if 'Type' in r.index else '-'}\n"
-                f"理專: {agent}\n"
-                f"交易日: {r['交易日'] if '交易日' in r.index else '-'}\n"
-                f"最終評價日: {r['最終評價日'] if '最終評價日' in r.index else '-'}\n"
-                f"到期日: {r['到期日'] if '到期日' in r.index else '-'}\n"
-                f"Coupon: {r['Coupon'] if 'Coupon' in r.index else '-'}\n"
-                f"KO設定: {r['KO設定'] if 'KO設定' in r.index else '-'}\n"
-                f"最差表現: {r['最差表現'] if '最差表現' in r.index else '-'}\n"
-                f"----------------\n"
-                f"{r['狀態'] if '狀態' in r.index else ''}\n"
-                f"----------------\n"
-                + ("\n\n".join(t_details) if t_details else "")
-            )
-            detail_map[_id] = detail_text
-    summary = report
-    if top5_lines:
-        summary += "\n\n【前5筆摘要】\n" + "\n".join(top5_lines)
-    return summary, top5_lines, detail_map, agent_name_map
+    return build_result(out)
 
 # ==============================
 # AI
