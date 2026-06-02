@@ -124,15 +124,56 @@ def _ensure_history_df(history_close, tickers: List[str]) -> pd.DataFrame:
         return history_close
     raise ValueError("history_close format not supported")
 
+# 美股常見假日（月/日），每年更新
+US_MARKET_HOLIDAYS = {
+    (1, 1),   # 元旦
+    (1, 19),  # MLK Day（1月第3週一，近似）
+    (2, 16),  # Presidents Day（2月第3週一，近似）
+    (4, 18),  # Good Friday（近似）
+    (5, 26),  # Memorial Day（5月最後週一，近似）
+    (6, 19),  # Juneteenth
+    (7, 4),   # 獨立紀念日
+    (9, 1),   # Labor Day（9月第1週一，近似）
+    (11, 27), # Thanksgiving（11月第4週四，近似）
+    (12, 25), # 聖誕節
+    # 2026 實際假日
+    (1, 19),  # MLK Day 2026
+    (2, 16),  # Presidents Day 2026
+    (4, 3),   # Good Friday 2026
+    (5, 25),  # Memorial Day 2026
+    (6, 19),  # Juneteenth 2026
+    (7, 3),   # 獨立紀念日 2026（7/4 週六，補休7/3）
+    (9, 7),   # Labor Day 2026
+    (11, 26), # Thanksgiving 2026
+    (12, 25), # 聖誕節 2026
+}
+
+def _is_us_trading_day(ts: pd.Timestamp) -> bool:
+    """判斷是否為美股交易日（非週末、非假日）"""
+    if ts.weekday() >= 5:  # 週六、週日
+        return False
+    if (ts.month, ts.day) in US_MARKET_HOLIDAYS:
+        return False
+    return True
+
+def get_last_us_trading_day(from_date: pd.Timestamp) -> pd.Timestamp:
+    """從指定日期往前找最近的美股交易日"""
+    d = from_date
+    for _ in range(10):
+        if _is_us_trading_day(d):
+            return d
+        d = d - timedelta(days=1)
+    return from_date  # fallback
+
 def get_safe_data_cutoff() -> pd.Timestamp:
     TZ_TAIPEI = pytz.timezone("Asia/Taipei")
     now_taipei = datetime.now(TZ_TAIPEI)
     if now_taipei.hour < 5 or (now_taipei.hour == 5 and now_taipei.minute < 30):
-        cutoff = pd.Timestamp(now_taipei.date()) - timedelta(days=2)
-        print(f"[DEBUG] 台北時間 {now_taipei.strftime('%H:%M')}，美股數據可能未完全更新，截止日期用前天: {cutoff.date()}")
+        raw_cutoff = pd.Timestamp(now_taipei.date()) - timedelta(days=2)
     else:
-        cutoff = pd.Timestamp(now_taipei.date()) - timedelta(days=1)
-        print(f"[DEBUG] 台北時間 {now_taipei.strftime('%H:%M')}，使用昨天收盤數據，截止日期: {cutoff.date()}")
+        raw_cutoff = pd.Timestamp(now_taipei.date()) - timedelta(days=1)
+    cutoff = get_last_us_trading_day(raw_cutoff)
+    print(f"[DEBUG] 台北時間 {now_taipei.strftime('%H:%M')}，安全截止日: {cutoff.date()}（原始: {raw_cutoff.date()}）")
     return cutoff
 
 def is_us_market_open() -> bool:
@@ -270,13 +311,26 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
         raise ValueError("❌ 找不到有效的標的代號。")
 
     try:
-        history_close = yf.download(all_tickers, start=start_download_date, end=today_ts + timedelta(days=1))["Close"]
+        # 加入 auto_adjust=True 確保取得最新調整後收盤價，避免快取問題
+        history_close = yf.download(
+            all_tickers,
+            start=start_download_date,
+            end=today_ts + timedelta(days=1),
+            auto_adjust=True,
+            progress=False
+        )["Close"]
     except Exception as e:
         raise ValueError(f"美股連線失敗: {e}")
 
     history_data = _ensure_history_df(history_close, all_tickers)
     history_data = history_data[history_data.index <= safe_cutoff]
-    print(f"[DEBUG] 行情下載完成，截止 {safe_cutoff.date()}，共 {len(history_data)} 天")
+    if not history_data.empty:
+        actual_last = history_data.index[-1].date()
+        print(f"[DEBUG] 行情下載完成，截止 {safe_cutoff.date()}，實際最新資料: {actual_last}，共 {len(history_data)} 天")
+        if str(actual_last) != str(safe_cutoff.date()):
+            print(f"[WARNING] yfinance 實際資料截止 {actual_last}，與預期 {safe_cutoff.date()} 不符，可能有資料延遲")
+    else:
+        print(f"[DEBUG] 行情下載完成，截止 {safe_cutoff.date()}，共 {len(history_data)} 天")
 
     results = []
     individual_messages_data = []
