@@ -414,6 +414,8 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 print(f"[DEBUG] 跳過 row {index} ({row.get('ID','?')})：找不到有效標的")
                 continue
 
+            if row.get("ID", "") == "WMGS26040252":
+                print(f"[DEBUG 26040252 dates] IssueDate={row['IssueDate']}, TradeDate={row['TradeDate']}, ValuationDate={row['ValuationDate']}, nc_end_date={nc_end_date}, product_status={product_status}, early_redemption_date={early_redemption_date}")
             for asset in assets:
                 try:
                     s = history_data[asset["code"]] if asset["code"] in history_data.columns else None
