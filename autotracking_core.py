@@ -418,11 +418,18 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     if s is None:
                         asset["price"] = 0
                         continue
-                    valid_s = s[s.index <= pd.Timestamp(effective_date)].dropna()
+                    # 統一去除 timezone 後比較，避免 tz-aware vs tz-naive 的問題
+                    eff_ts = pd.Timestamp(effective_date).tz_localize(None) if pd.Timestamp(effective_date).tzinfo is None else pd.Timestamp(effective_date).tz_convert(None)
+                    s_tz = s.copy()
+                    if s_tz.index.tzinfo is not None:
+                        s_tz.index = s_tz.index.tz_convert(None)
+                    valid_s = s_tz[s_tz.index <= eff_ts].dropna()
                     if not valid_s.empty:
                         curr = float(valid_s.iloc[-1])
                         asset["price"] = curr
                         asset["perf"] = curr / asset["initial"]
+                        if asset["code"] == "TSLA":
+                            print(f"[DEBUG TSLA] eff_ts={eff_ts}, valid_s last date={valid_s.index[-1].date()}, price={curr}")
                         if (not is_aki) and (not is_dra) and product_status == "Running":
                             if asset["perf"] < ki_thresh:
                                 post_issue_data = valid_s[valid_s.index >= row["IssueDate"]]
