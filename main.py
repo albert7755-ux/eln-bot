@@ -1794,6 +1794,18 @@ def handle_text_message(event):
         if cmd == "web":
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="📚 龍蝦文章庫\n\nhttps://eln-bot.onrender.com/articles"))
             return
+        if cmd == "dbcheck":
+            parts2 = text_raw.split(" ", 1)
+            bid = parts2[1].strip() if len(parts2) > 1 else "WMGS26040252"
+            with engine.begin() as conn:
+                row = conn.execute(text("SELECT bond_id, agent_name, detail, updated_at FROM eln_detail WHERE chat_key=:k AND bond_id ILIKE :b LIMIT 1"), {"k": ck, "b": f"%{bid}%"}).fetchone()
+            if not row:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"DB 查不到 {bid}，chat_key={ck}"))
+                return
+            updated = str(row[3])
+            detail_preview = (row[2] or "")[:500]
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"bond_id: {row[0]}\nagent: {row[1]}\nupdated_at: {updated}\n\n{detail_preview}"))
+            return
         if cmd == "forget":
             try:
                 with engine.begin() as conn:
