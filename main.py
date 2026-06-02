@@ -2001,8 +2001,9 @@ def handle_file_message(event):
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 存入知識庫失敗：{str(e)[:200]}"))
             return
-        if ext in (".xlsx", ".xls") and db_is_await(ck):
+        if ext in (".xlsx", ".xls"):
             db_set_await(ck, False)
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 收到 Excel！計算中，請稍候..."))
             summary, top5_lines, detail_map, agent_name_map = run_autotracking(str(tmp_path))
             db_save_result(ck, summary, top5_lines, detail_map, agent_name_map)
             try:
@@ -2010,9 +2011,9 @@ def handle_file_message(event):
                 upload_eln_excel(str(tmp_path))
             except Exception as e:
                 print("[ELN Storage] upload failed:", e)
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900]))
+            _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=(summary or "已收到檔案，但沒有產出內容")[:4900]))
             return
-        if ext in (".xlsx", ".xls", ".pdf", ".docx", ".pptx"):
+        if ext in (".pdf", ".docx", ".pptx"):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"收到！正在分析 {filename}，請稍候..."))
             text = extract_text_from_file(str(tmp_path), filename)
             if not text:
