@@ -1972,9 +1972,11 @@ def handle_file_message(event):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 收到 Excel！計算中，請稍候約30秒..."))
             def _run_calc(tmp_path_str, chat_key, bot_api_ref):
                 try:
+                    print(f"[CALC] 開始計算，chat_key={chat_key}")
                     summary, top5_lines, detail_map, agent_name_map = run_autotracking(tmp_path_str)
+                    print(f"[CALC] 計算完成，共 {len(detail_map)} 筆，開始寫入 chat_key={chat_key}")
                     db_save_result(chat_key, summary, top5_lines, detail_map, agent_name_map)
-                    print(f"[CALC] 寫入完成，共 {len(detail_map)} 筆")
+                    print(f"[CALC] 寫入完成，共 {len(detail_map)} 筆，chat_key={chat_key}")
                     try:
                         from eln_storage import upload_eln_excel
                         upload_eln_excel(tmp_path_str)
