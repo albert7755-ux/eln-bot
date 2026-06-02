@@ -322,8 +322,13 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     except Exception as e:
         raise ValueError(f"美股連線失敗: {e}")
 
-    history_data = _ensure_history_df(history_close, all_tickers)
-    history_data = history_data[history_data.index <= safe_cutoff]
+    history_data_raw = _ensure_history_df(history_close, all_tickers)
+    # 印出原始下載結果最後3筆（過濾前）
+    if not history_data_raw.empty:
+        print(f"[DEBUG] yfinance 原始資料最後3筆（過濾前）:")
+        print(history_data_raw.tail(3).to_string())
+    # 用 safe_cutoff 過濾
+    history_data = history_data_raw[history_data_raw.index <= safe_cutoff]
     if not history_data.empty:
         actual_last = history_data.index[-1].date()
         print(f"[DEBUG] 行情下載完成，截止 {safe_cutoff.date()}，實際最新資料: {actual_last}，共 {len(history_data)} 天")
