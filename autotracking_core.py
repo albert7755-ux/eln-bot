@@ -760,6 +760,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 "NC月份": f"{nc_months}M",
                 "KO設定": f"{ko_initial_val}% (-{ko_step_val}%)" if ko_step_val > 0 else f"{ko_initial_val}%",
                 "KI類型": "AKI" if is_aki else "EKI",
+                "執行價格": f"{strike_thresh_val:.0f}%",
                 "Coupon": f"{coupon_pct:.1f}%" if coupon_pct else "-",
                 "SearchText": copy_text_body,
                 "Line_ID_Raw": row.get("Line_ID", "")
