@@ -151,6 +151,8 @@ def build_result(output: dict):
                 f"到期日: {r['到期日'] if '到期日' in r.index else '-'}\n"
                 f"Coupon: {r['Coupon'] if 'Coupon' in r.index else '-'}\n"
                 f"KO設定: {r['KO設定'] if 'KO設定' in r.index else '-'}\n"
+                f"KI類型: {r['KI類型'] if 'KI類型' in r.index else '-'}\n"
+                f"執行價格: {r['執行價格'] if '執行價格' in r.index else '-'}\n"
                 f"最差表現: {r['最差表現'] if '最差表現' in r.index else '-'}\n"
                 f"----------------\n"
                 f"{r['狀態'] if '狀態' in r.index else ''}\n"
