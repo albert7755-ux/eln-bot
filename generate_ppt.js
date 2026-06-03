@@ -523,12 +523,10 @@ async function build() {
   if (data.ai_commentary) {
     const s = pres.addSlide();
     s.background = { color: C.LGRAY };
-    addHeaderBar(s, "🤖  AI 投組白話解讀　｜　專業分析，淺顯易懂", C.NAVY);
+    addHeaderBar(s, "⏱  30秒投資組合解讀　｜　重點一次看清楚", C.NAVY);
 
-    // 解讀內容框
     addCard(s, 0.22, 0.82, W - 0.44, H - 1.1);
 
-    // 分段顯示
     const paras = data.ai_commentary.split(/\n\n+/).filter(p => p.trim());
     const paraH = Math.min((H - 1.3) / Math.max(paras.length, 1), 1.35);
     paras.forEach((para, i) => {
@@ -541,10 +539,10 @@ async function build() {
       });
     });
 
-    // 底部小字
-    s.addText("※ 以上解讀由 AI 根據歷史回測數據自動生成，僅供參考，不構成投資建議。", {
+    // 固定警語
+    s.addText("⚠️ 過往績效不保證未來表現，投資前請審慎評估自身風險承受度。", {
       x: 0.35, y: H - 0.3, w: W - 0.55, h: 0.22,
-      fontSize: 7.5, color: C.GRAY, margin: 0,
+      fontSize: 8, color: C.GRAY, margin: 0,
     });
   }
 
