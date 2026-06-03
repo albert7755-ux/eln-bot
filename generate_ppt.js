@@ -518,6 +518,37 @@ async function build() {
   }
 
   // ══════════════════════════════════════════════════════
+  // Slide — AI 白話解讀（如有）
+  // ══════════════════════════════════════════════════════
+  if (data.ai_commentary) {
+    const s = pres.addSlide();
+    s.background = { color: C.LGRAY };
+    addHeaderBar(s, "🤖  AI 投組白話解讀　｜　專業分析，淺顯易懂", C.NAVY);
+
+    // 解讀內容框
+    addCard(s, 0.22, 0.82, W - 0.44, H - 1.1);
+
+    // 分段顯示
+    const paras = data.ai_commentary.split(/\n\n+/).filter(p => p.trim());
+    const paraH = Math.min((H - 1.3) / Math.max(paras.length, 1), 1.35);
+    paras.forEach((para, i) => {
+      s.addText(para.trim(), {
+        x: 0.42, y: 0.98 + i * (paraH + 0.08),
+        w: W - 0.84, h: paraH,
+        fontSize: 11.5, color: C.DARK,
+        valign: "top", margin: 0,
+        lineSpacingMultiple: 1.6,
+      });
+    });
+
+    // 底部小字
+    s.addText("※ 以上解讀由 AI 根據歷史回測數據自動生成，僅供參考，不構成投資建議。", {
+      x: 0.35, y: H - 0.3, w: W - 0.55, h: 0.22,
+      fontSize: 7.5, color: C.GRAY, margin: 0,
+    });
+  }
+
+  // ══════════════════════════════════════════════════════
   // Slide — 配息現金流試算
   // ══════════════════════════════════════════════════════
   {
