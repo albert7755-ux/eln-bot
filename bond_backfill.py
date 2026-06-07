@@ -388,7 +388,26 @@ def main():
 
             print(f"  🔍 檢查歷史缺失，從 TradingView 下載完整數據...")
             time.sleep(random.uniform(2, 4))
-            tv_data = download_tv_csv(driver, exchange, isin)
+            # FINRA 債券用 ticker 而非 ISIN
+            FINRA_ISIN_TO_TICKER = {
+                "US03769MAC01": "APO5813716",  "US09062XAG88": "BIIB4981508",
+                "US084670BK32": "BRK3963113",  "US035242AM81": "BUD4327587",
+                "US125523AK66": "CI4866401",   "US125523CF53": "CI5003121",
+                "US20030NBU46": "CMCS4382861", "US31428XCA28": "FBUO6172956",
+                "US375558BD48": "GILD4287890", "US37045VAT70": "GM4181484",
+                "US449276AF17": "IBM5449458",  "US45866FAX24": "ICE5414190",
+                "US191216CQ13": "KO4969567",   "US02209SAR40": "MO4065695",
+                "US02209SAV51": "MO4403915",   "US61747YDY86": "MS4204532",
+                "US64110LBA35": "NFLX5862368", "US747525AK99": "QCOM4246685",
+                "XS1049699926": "SCBFF4110430","US854502AJ02": "SDBO4820048",
+                "US854502AA92": "SWK.GM",      "US00206RCQ39": "T4237450",
+                "US00206RCU41": "T4451561",    "US91159HJN17": "USB5600582",
+                "US92556HAC16": "VIA4987234",  "US92343VGW81": "VZ4968008",
+                "US92343VFD10": "VZ5363445",   "US11135FCX78": "AVGO6183496",
+                "USH4209EU71":  "UBS5728143",
+            }
+            tv_symbol = FINRA_ISIN_TO_TICKER.get(isin, isin) if exchange.upper() == "FINRA" else isin
+            tv_data = download_tv_csv(driver, exchange, tv_symbol)
             if not tv_data:
                 print(f"  ❌ 無法取得數據")
                 failed.append(isin)
