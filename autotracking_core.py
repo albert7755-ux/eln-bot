@@ -334,6 +334,35 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
         print(f"[DEBUG] 行情下載完成，截止 {safe_cutoff.date()}，實際最新資料: {actual_last}，共 {len(history_data)} 天")
         if str(actual_last) != str(safe_cutoff.date()):
             print(f"[WARNING] yfinance 實際資料截止 {actual_last}，與預期 {safe_cutoff.date()} 不符，可能有資料延遲")
+
+        # ── 檢查每個標的最後一天是否為NaN（批次下載部分失敗），單獨重試 ──
+        history_data = history_data.copy()
+        retry_tickers = [t for t in all_tickers
+                         if t in history_data.columns and pd.isna(history_data[t].iloc[-1])]
+        if retry_tickers:
+            print(f"[WARNING] 以下標的最後一天無資料，單獨重試: {retry_tickers}")
+            import time as _time
+            for t in retry_tickers:
+                try:
+                    _time.sleep(1)
+                    single = yf.download(t, start=start_download_date,
+                                         end=today_ts + timedelta(days=1),
+                                         auto_adjust=True, progress=False)["Close"]
+                    if isinstance(single, pd.DataFrame):
+                        single = single.squeeze()
+                    if single is None or len(single) == 0:
+                        print(f"  ❌ {t} 重試無資料")
+                        continue
+                    if single.index.tz is not None:
+                        single.index = single.index.tz_localize(None)
+                    single = single[single.index <= pd.Timestamp(safe_cutoff)]
+                    if not single.empty and pd.notna(single.iloc[-1]):
+                        history_data[t] = history_data[t].combine_first(single)
+                        print(f"  ✅ {t} 重試成功，最新: {single.index[-1].date()} = {float(single.iloc[-1]):.2f}")
+                    else:
+                        print(f"  ❌ {t} 重試後仍無有效資料")
+                except Exception as _e:
+                    print(f"  ❌ {t} 重試失敗: {_e}")
     else:
         print(f"[DEBUG] 行情下載完成，截止 {safe_cutoff.date()}，共 {len(history_data)} 天")
 
