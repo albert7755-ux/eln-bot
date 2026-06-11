@@ -37,7 +37,10 @@ FUND_DB = {
     "F00001EQPP_FO": {"moneydj": "ACFP148", "name": "富邦台美雙星多重"},
     "F0HKG05X22_FO": {"moneydj": "ACDD04",  "name": "安聯台灣科技"},
     "F00001EBH4_FO": {"moneydj": "ACYT168", "name": "元大全球優質龍頭平衡基金"},
-    "F000015CRE_FO": {"moneydj": "FLZI0", "name": "富蘭克林穩定月收益A(acc)"},
+    "F000015CRE_FO": {"moneydj": "FLZI0",   "name": "富蘭克林穩定月收益A(acc)"},
+    "F0HKG05X1A_FO": {"moneydj": "accy01",  "name": "國泰國泰"},
+    "F0000156JS_FO": {"moneydj": "nbtg0",   "name": "路博邁次世代通訊"},
+    "F000013TSL_FO": {"moneydj": "tlzm9",   "name": "安聯智慧城市收益"},
     "F0GBR04AY1_FO": {"moneydj": "FTH29",  "name": "富達全球動能多元基金"},
 }
 # ==========================================
