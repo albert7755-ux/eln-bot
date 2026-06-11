@@ -594,11 +594,13 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 ko_trigger_val = asset["initial"] * current_ko_thresh
 
                 cell_text = f"【{asset['code']}】\n原: {initial_display}\n現: {price_display}\n({p_pct}%) {status_icon}"
-                cell_text += f"\n KO價: {round(ko_trigger_val, 2)}"
+                # KO設定為9999%代表無KO（如BEN商品），不顯示KO價
+                if current_ko_thresh < 99:
+                    cell_text += f"\n KO價: {round(ko_trigger_val, 2)}"
 
                 is_in_nc = safe_cutoff < nc_end_date
                 is_still_running = (product_status == "Running") and (pd.isna(row["ValuationDate"]) or safe_cutoff < row["ValuationDate"])
-                if asset["price"] > 0 and not asset["locked_ko"] and not is_in_nc and is_still_running:
+                if current_ko_thresh < 99 and asset["price"] > 0 and not asset["locked_ko"] and not is_in_nc and is_still_running:
                     dist_ko = (ko_trigger_val - asset["price"]) / asset["price"] * 100
                     if 0 < dist_ko <= 3:
                         cell_text += f" ⚠️距KO {dist_ko:.1f}%"
@@ -804,6 +806,10 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             continue
 
     results_df = pd.DataFrame(results)
+    # 清除 _Detail 欄位的 NaN（4標的商品會讓3標的商品的T4_Detail變NaN，造成訊息結尾出現"nan"）
+    _detail_col_names = [c for c in results_df.columns if str(c).endswith("_Detail")]
+    if _detail_col_names:
+        results_df[_detail_col_names] = results_df[_detail_col_names].fillna("")
     print(f"[DEBUG] 最終結果筆數: {len(results_df)}")
 
     report_text = f"【ELN 戰情快報】\n📅 {real_today.strftime('%Y/%m/%d')}\n----------------\n"
