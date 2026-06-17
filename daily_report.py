@@ -126,11 +126,16 @@ def build_market_snapshot(data):
 def generate_commentary_with_claude(snapshot_text: str) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+    tw_tz = pytz.timezone("Asia/Taipei")
+    today_str = datetime.now(tw_tz).strftime("%Y年%m月%d日")
+
     prompt = (
         "你是一位專業的財經日報撰寫助理，服務對象是銀行分行的理財專員。\n\n"
+        f"今天台北時間是 {today_str}。\n"
+        "以下市場數據為昨晚（美國時間）的收盤數據，請搜尋對應日期的國際財經新聞。\n\n"
         "以下是今日固定版型的市場數據：\n\n"
         f"{snapshot_text}\n\n"
-        "請上網搜尋最新、最相關的國際財經消息，再根據這些數據與新聞事件，撰寫以下內容。\n"
+        f"請上網搜尋 {today_str} 前後最新、最相關的國際財經消息（優先搜尋最近24小時內），再根據這些數據與新聞事件，撰寫以下內容。\n"
         "重點是要有新聞感與事件感，不要只寫空泛結論。\n\n"
         "請完成：\n"
         "1. 開頭市場重點：只寫1到2句，必須非常精簡，點出昨晚市場最重要的交易主線。\n"
@@ -158,14 +163,14 @@ def generate_commentary_with_claude(snapshot_text: str) -> str:
 
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=1400,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt}]
         )
     except Exception:
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=1400,
             messages=[{"role": "user", "content": prompt}]
         )
