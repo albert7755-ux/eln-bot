@@ -377,11 +377,35 @@ async def callback2(request: Request):
             from collections import defaultdict
             ck = ELN_PERSONAL_CHAT_KEY
             if tl.startswith("/list"):
-                lp = txt.split(" ", 1)
-                nf = lp[1].strip() if len(lp) > 1 else ""
+                lp = txt.split(" ", 2)
+                is_detail_mode = len(lp) > 1 and lp[1].strip().lower() == "detail"
+                if is_detail_mode:
+                    nf = lp[2].strip() if len(lp) > 2 else ""
+                else:
+                    nf = lp[1].strip() if len(lp) > 1 else ""
                 bonds = db_list_bonds(ck, limit=200)
                 if not bonds:
                     eln_group_bot_api.reply_message(rtoken, TSM(text="目前尚無資料。"))
+                    continue
+                # /list detail 姓名：顯示完整 detail，只顯示比價中
+                if is_detail_mode:
+                    if not nf:
+                        eln_group_bot_api.reply_message(rtoken, TSM(text="請輸入理專名稱\n例：/list detail 小美"))
+                        continue
+                    matched_details = []
+                    seen = set()
+                    for bid, ar, d in bonds:
+                        ags = [a.strip() for a in re.split(r"[,，、/]", ar) if a.strip()]
+                        if any(nf in a for a in ags) and bid not in seen:
+                            if bond_status_tag(d) == "":
+                                matched_details.append(d)
+                                seen.add(bid)
+                    if not matched_details:
+                        eln_group_bot_api.reply_message(rtoken, TSM(text="找不到「" + nf + "」比價中的持倉。"))
+                        continue
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="👤 " + nf + " 比價中商品（共 " + str(len(matched_details)) + " 筆）"))
+                    for det in matched_details:
+                        eln_group_bot_api.push_message(uid, TSM(text=det[:4900]))
                     continue
                 ds = {b: bond_status_tag(d) for b, _, d in bonds}
                 if nf:
@@ -1171,11 +1195,38 @@ def handle_text_message(event):
                 return
         if cmd == "list":
             from collections import defaultdict
-            list_parts = text_raw.split(" ", 1)
-            name_filter = list_parts[1].strip() if len(list_parts) > 1 else ""
+            list_parts = text_raw.split(" ", 2)
+            # 判斷是否為 /list detail 姓名
+            is_detail_mode = len(list_parts) > 1 and list_parts[1].strip().lower() == "detail"
+            if is_detail_mode:
+                name_filter = list_parts[2].strip() if len(list_parts) > 2 else ""
+            else:
+                name_filter = list_parts[1].strip() if len(list_parts) > 1 else ""
             bonds = db_list_bonds(ck, limit=200)
             if not bonds:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無已保存結果。請先 /calc 上傳 Excel。"))
+                return
+            # /list detail 姓名：顯示完整 detail，只顯示比價中的商品
+            if is_detail_mode:
+                if not name_filter:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入理專名稱\n例：/list detail 小美"))
+                    return
+                matched_details = []
+                seen = set()
+                for bond_id, agent_raw, detail in bonds:
+                    agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()]
+                    if any(name_filter in a for a in agents) and bond_id not in seen:
+                        # 只顯示比價中（排除已到期、已KO）
+                        status_tag = bond_status_tag(detail)
+                        if status_tag == "":  # 沒有特殊標籤 = 比價中
+                            matched_details.append(detail)
+                            seen.add(bond_id)
+                if not matched_details:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到「{name_filter}」比價中的持倉。"))
+                    return
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"👤 {name_filter} 比價中商品（共 {len(matched_details)} 筆）"))
+                for det in matched_details:
+                    push_long_message(_bot_api, ck.split(":", 1)[1], det[:4900])
                 return
             detail_map = {bond_id: bond_status_tag(detail) for bond_id, _, detail in bonds}
             if name_filter:
@@ -2126,11 +2177,35 @@ def handle_eln_group_message(event):
         ck = ELN_PERSONAL_CHAT_KEY
         if tl.startswith("/list"):
             from collections import defaultdict
-            list_parts = text_raw.split(" ", 1)
-            name_filter = list_parts[1].strip() if len(list_parts) > 1 else ""
+            list_parts = text_raw.split(" ", 2)
+            is_detail_mode = len(list_parts) > 1 and list_parts[1].strip().lower() == "detail"
+            if is_detail_mode:
+                name_filter = list_parts[2].strip() if len(list_parts) > 2 else ""
+            else:
+                name_filter = list_parts[1].strip() if len(list_parts) > 1 else ""
             bonds = db_list_bonds(ck, limit=200)
             if not bonds:
                 eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無資料。"))
+                return
+            # /list detail 姓名：顯示完整 detail，只顯示比價中
+            if is_detail_mode:
+                if not name_filter:
+                    eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入理專名稱\n例：/list detail 小美"))
+                    return
+                matched_details = []
+                seen = set()
+                for bond_id, agent_raw, detail in bonds:
+                    agents = [a.strip() for a in re.split(r"[,，、/]", agent_raw) if a.strip()]
+                    if any(name_filter in a for a in agents) and bond_id not in seen:
+                        if bond_status_tag(detail) == "":
+                            matched_details.append(detail)
+                            seen.add(bond_id)
+                if not matched_details:
+                    eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到「{name_filter}」比價中的持倉。"))
+                    return
+                eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"👤 {name_filter} 比價中商品（共 {len(matched_details)} 筆）"))
+                for det in matched_details:
+                    eln_group_bot_api.push_message(event.source.user_id, TextSendMessage(text=det[:4900]))
                 return
             detail_map_status = {bond_id: bond_status_tag(detail) for bond_id, _, detail in bonds}
             if name_filter:
