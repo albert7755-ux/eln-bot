@@ -1,6 +1,10 @@
-import requests
-import streamlit as st
+import os
 import logging
+import requests
+from dotenv import load_dotenv
+
+# 載入環境變數 (在本地端會讀取 .env 檔，在雲端則讀取伺服器的 Environment Variables)
+load_dotenv()
 
 class NotebookLMClient:
     def __init__(self, notebook_id):
@@ -10,11 +14,10 @@ class NotebookLMClient:
         """
         self.notebook_id = notebook_id
         
-        # 核心防護：從 Streamlit 環境變數讀取機密 Cookie，絕對不要明碼寫在 GitHub 上
-        try:
-            self.session_cookie = st.secrets["notebooklm"]["secure_1psid"]
-        except KeyError:
-            logging.error("找不到 NotebookLM Cookie，請確認 secrets.toml 設定。")
+        # 從環境變數讀取機密 Cookie，絕對不要明碼寫在程式碼裡
+        self.session_cookie = os.getenv("NOTEBOOKLM_COOKIE")
+        if not self.session_cookie:
+            logging.error("找不到 NotebookLM Cookie，請確認環境變數 NOTEBOOKLM_COOKIE 是否設定正確。")
             self.session_cookie = ""
 
         # 模擬正常瀏覽器的標頭
@@ -31,11 +34,14 @@ class NotebookLMClient:
         """
         向 NotebookLM 法規知識庫提問並取得完整回答
         """
+        if not self.session_cookie:
+            return "系統尚未綁定 NotebookLM 憑證，請通知管理員檢查環境變數設定。"
+
         url = f"{self.base_url}/notebooks/{self.notebook_id}/query"
         payload = {"query": user_query}
 
         try:
-            # 設定 30 秒 timeout，避免 API 卡住導致你的主機台也跟著無回應
+            # 設定 30 秒 timeout，避免 API 卡住導致你的 FastAPI 伺服器跟著堵塞
             response = requests.post(url, headers=self.headers, json=payload, timeout=30)
             response.raise_for_status()
             
