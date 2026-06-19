@@ -10,7 +10,7 @@ class NotebookLMClient:
     def __init__(self, notebook_id):
         """
         初始化 NotebookLM 客戶端
-        :param notebook_id: 你在 NotebookLM 建立的法規知識庫專屬 ID
+        :param notebook_id: 2513ecbc-b188-48ec-8619-cb6825940ec3
         """
         self.notebook_id = notebook_id
         
