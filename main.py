@@ -1008,12 +1008,12 @@ def handle_text_message(event):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 系統尚未綁定 NotebookLM 模組，請聯絡管理員檢查環境變數與套件。"))
                 return
                 
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="🔍 正在前往 NotebookLM 翻閱內部規範，請稍候幾秒鐘..."))
+            # 🚨 為了節省 LINE 推播額度，直接用免費的 reply_message 回傳答案
             try:
                 answer = nl_client.ask_regulation(actual_query)
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=answer[:4900]))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=answer[:4900]))
             except Exception as e:
-                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 查詢失敗：{e}"))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 查詢失敗：{e}"))
             return
         # ==========================================
         
