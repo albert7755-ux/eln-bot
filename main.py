@@ -68,6 +68,17 @@ eln_group_handler = WebhookHandler(ELN_GROUP_CHANNEL_SECRET) if ELN_GROUP_CHANNE
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
+# ==============================
+# NotebookLM Setup
+# ==============================
+try:
+    from notebooklm_client import NotebookLMClient
+    REGULATION_NOTEBOOK_ID = "2513ecbc-b188-48ec-8619-cb6825940ec3" 
+    nl_client = NotebookLMClient(notebook_id=REGULATION_NOTEBOOK_ID)
+except Exception as e:
+    nl_client = None
+    print(f"NotebookLM 初始化失敗: {e}")
+
 app = FastAPI()
 from articles import router as articles_router
 app.include_router(articles_router)
@@ -980,8 +991,32 @@ def handle_text_message(event):
             cmd = tl.split()[0] if tl.split() else tl
             raw_cmd = text_raw
         parts = text_raw.split(" ", 1)
+        
         if is_group and not tl.startswith("/"):
             return
+            
+        # ==========================================
+        # NotebookLM 專屬指令攔截 (保證優先執行)
+        # ==========================================
+        if text_raw.startswith("/內規"):
+            actual_query = text_raw.replace("/內規", "").strip()
+            if not actual_query:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請在指令後面加上想查詢的內容喔！\n例如：/內規 Lombard lending 最高可以到幾歲？"))
+                return
+                
+            if not nl_client:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 系統尚未綁定 NotebookLM 模組，請聯絡管理員檢查環境變數與套件。"))
+                return
+                
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="🔍 正在前往 NotebookLM 翻閱內部規範，請稍候幾秒鐘..."))
+            try:
+                answer = nl_client.ask_regulation(actual_query)
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=answer[:4900]))
+            except Exception as e:
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 查詢失敗：{e}"))
+            return
+        # ==========================================
+        
         if cmd in ("help", "?", "指令", "幫助"):
             help_arg = parts[1].strip().lower() if len(parts) > 1 else ""
             if is_group:
@@ -1024,7 +1059,7 @@ def handle_text_message(event):
                            "/runnow  /tracklog  /end\n─────────────────\n"
                            "📰 財經\n/daily  /daily cache  /market\n─────────────────\n"
                            "📑 報告\n/report  /pdf\n─────────────────\n"
-                           "📚 知識庫\n/kb <問題> → 查詢知識庫\n/kb上傳 → 上傳檔案\n/kb清單 → 查看文件清單\n─────────────────\n"
+                           "📚 知識庫\n/內規 <問題> → 查詢 NotebookLM 法規\n/kb <問題> → 查詢 Chroma 知識庫\n/kb上傳 → 上傳檔案\n/kb清單 → 查看文件清單\n─────────────────\n"
                            "🔔 警示\n/alert add  /alert list  /alert del\n輸入 /help alert 看完整範例\n─────────────────\n"
                            "📚 文章庫\n/save  /unread  /read  /article  /del  /web\n直接傳圖片 → 自動儲存分析\n輸入 /help save 看完整說明\n─────────────────\n"
                            "📊 基金淨值 & 債券報價\n/fundnav → 手動更新基金淨值\n/bondnav → 手動觸發債券報價更新（94筆，約30分鐘）\n/tracklog → 查看執行記錄\n─────────────────\n"
@@ -1052,7 +1087,7 @@ def handle_text_message(event):
         if cmd in ("send", "skip"):
             arg = parts[1].strip().lower() if len(parts) > 1 else ""
             if not arg:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請指定編號或 all\n範例：/send 1　/skip 2　/send all"))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請指定編號或 all\n範例：/send 1 /skip 2 /send all"))
                 return
             with engine.begin() as conn:
                 rows = conn.execute(text("SELECT id, target_id, agent_name, bond_id, status, msg FROM eln_pending_notifications WHERE chat_key=:k ORDER BY id"), {"k": ck}).fetchall()
@@ -1815,7 +1850,7 @@ def handle_text_message(event):
             source_label = {"url": "🔗 網址", "image": "🖼️ 圖片", "text": "📝 文字"}.get(row[4], "📄")
             status = "✅ 已讀" if row[5] else "📌 未讀"
             dt = row[6].astimezone(TZ_TAIPEI_PYTZ).strftime("%Y/%m/%d %H:%M")
-            msg = f"📄 文章 #{row[0]}\n標題：{row[1] or '無標題'}\n類型：{source_label}　{status}\n儲存時間：{dt}\n───────────\n{row[3] or '無摘要'}"
+            msg = f"📄 文章 #{row[0]}\n標題：{row[1] or '無標題'}\n類型：{source_label} {status}\n儲存時間：{dt}\n───────────\n{row[3] or '無摘要'}"
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg[:4900]))
             return
         if cmd == "read":
