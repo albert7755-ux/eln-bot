@@ -1,3 +1,10 @@
+太有魄力了！開放給前線使用，這絕對能成為你們分行理專與櫃台同仁的超強火力支援。
+
+既然決定開放，我們就必須在「群組機器人」的兩個海關閘門（`callback2` 和 `handle_eln_group_message`）裡，把 `/內規` 加進白名單，並讓它讀取 `regulations.txt`，用 `reply_message` 免費回傳給群組。
+
+以下是為你準備的**最新完整版 `main.py**`，請直接全選複製，去覆蓋你 GitHub 上的檔案，更新後，群組內的同仁就可以直接用 `/內規` 查法規了：
+
+```python
 import knowledge
 import base64 as _base64
 from fastapi import Form
@@ -371,11 +378,45 @@ async def callback2(request: Request):
             rtoken = ev.get("replyToken", "")
             uid = ev.get("source", {}).get("userId", "")
             print(f"[ELN-G USER] uid={uid} msg={repr(txt[:50])}")
-            if not (tl.startswith("/list") or tl.startswith("/detail") or tl.startswith("/end") or tl.startswith("/nc")):
+            if not (tl.startswith("/list") or tl.startswith("/detail") or tl.startswith("/end") or tl.startswith("/nc") or tl.startswith("/內規")):
                 continue
             from linebot.models import TextSendMessage as TSM
             from collections import defaultdict
             ck = ELN_PERSONAL_CHAT_KEY
+            
+            # ==========================================
+            # 群組版 內規專屬指令攔截 (callback2)
+            # ==========================================
+            if tl.startswith("/內規"):
+                actual_query = txt.replace("/內規", "").strip()
+                if not actual_query:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="請在指令後面加上想查詢的內容喔！\n例如：/內規 Lombard lending 最高可以到幾歲？"))
+                    continue
+                try:
+                    file_path = Path("regulations.txt")
+                    if not file_path.exists():
+                        eln_group_bot_api.reply_message(rtoken, TSM(text="❌ 找不到 regulations.txt，請確認已將法規檔案上傳至系統。"))
+                        continue
+                    regulation_text = file_path.read_text(encoding="utf-8")
+                    prompt = f"""你現在是銀行的法遵與內部規範專家。請根據以下【內部規範全文】，精準回答同仁的問題。
+要求：
+- 必須跨章節統整資訊，舉一反三。
+- 語氣必須符合專業銀行內部規範說明。
+- 若規範中未提及該狀況，請據實以告，不可自行編造。
+- 嚴禁使用 Markdown 語法 (例如 **, ##, --- 等)，請用純文字或 Emoji 條列排版。
+
+【內部規範全文】
+{regulation_text}
+
+【同仁問題】
+{actual_query}"""
+                    answer = ai_claude_long(prompt, chat_key=ck)
+                    eln_group_bot_api.reply_message(rtoken, TSM(text=answer[:4900]))
+                except Exception as e:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text=f"❌ 內部規範查詢失敗：{e}"))
+                continue
+            # ==========================================
+            
             if tl.startswith("/list"):
                 lp = txt.split(" ", 2)
                 is_detail_mode = len(lp) > 1 and lp[1].strip().lower() == "detail"
@@ -2217,9 +2258,44 @@ def handle_eln_group_message(event):
         tl = text_raw.lower().strip()
         uid = event.source.user_id if hasattr(event.source, "user_id") else "unknown"
         print(f"[ELN-G USER] uid={uid} msg={repr(text_raw[:50])}")
-        if not (tl.startswith("/list") or tl.startswith("/detail") or tl.startswith("/nc")):
+        if not (tl.startswith("/list") or tl.startswith("/detail") or tl.startswith("/nc") or tl.startswith("/內規")):
             return
         ck = ELN_PERSONAL_CHAT_KEY
+        from linebot.models import TextSendMessage as TSM
+        
+        # ==========================================
+        # 群組版 內規專屬指令攔截 (handle_eln_group_message)
+        # ==========================================
+        if tl.startswith("/內規"):
+            actual_query = text_raw.replace("/內規", "").strip()
+            if not actual_query:
+                eln_group_bot_api.reply_message(event.reply_token, TSM(text="請在指令後面加上想查詢的內容喔！\n例如：/內規 Lombard lending 最高可以到幾歲？"))
+                return
+            try:
+                file_path = Path("regulations.txt")
+                if not file_path.exists():
+                    eln_group_bot_api.reply_message(event.reply_token, TSM(text="❌ 找不到 regulations.txt，請確認已將法規檔案上傳至系統。"))
+                    return
+                regulation_text = file_path.read_text(encoding="utf-8")
+                prompt = f"""你現在是銀行的法遵與內部規範專家。請根據以下【內部規範全文】，精準回答同仁的問題。
+要求：
+- 必須跨章節統整資訊，舉一反三。
+- 語氣必須符合專業銀行內部規範說明。
+- 若規範中未提及該狀況，請據實以告，不可自行編造。
+- 嚴禁使用 Markdown 語法 (例如 **, ##, --- 等)，請用純文字或 Emoji 條列排版。
+
+【內部規範全文】
+{regulation_text}
+
+【同仁問題】
+{actual_query}"""
+                answer = ai_claude_long(prompt, chat_key=ck)
+                eln_group_bot_api.reply_message(event.reply_token, TSM(text=answer[:4900]))
+            except Exception as e:
+                eln_group_bot_api.reply_message(event.reply_token, TSM(text=f"❌ 內部規範查詢失敗：{e}"))
+            return
+        # ==========================================
+        
         if tl.startswith("/list"):
             from collections import defaultdict
             list_parts = text_raw.split(" ", 2)
@@ -2619,3 +2695,5 @@ async def kb_delete(doc_id: str):
     return {"success": True}
 
 app.mount("/kb/static", StaticFiles(directory="static/kb"), name="kb-static")
+
+```
