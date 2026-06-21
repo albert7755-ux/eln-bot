@@ -1,10 +1,3 @@
-太有魄力了！開放給前線使用，這絕對能成為你們分行理專與櫃台同仁的超強火力支援。
-
-既然決定開放，我們就必須在「群組機器人」的兩個海關閘門（`callback2` 和 `handle_eln_group_message`）裡，把 `/內規` 加進白名單，並讓它讀取 `regulations.txt`，用 `reply_message` 免費回傳給群組。
-
-以下是為你準備的**最新完整版 `main.py**`，請直接全選複製，去覆蓋你 GitHub 上的檔案，更新後，群組內的同仁就可以直接用 `/內規` 查法規了：
-
-```python
 import knowledge
 import base64 as _base64
 from fastapi import Form
@@ -2695,5 +2688,3 @@ async def kb_delete(doc_id: str):
     return {"success": True}
 
 app.mount("/kb/static", StaticFiles(directory="static/kb"), name="kb-static")
-
-```
