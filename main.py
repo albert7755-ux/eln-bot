@@ -68,17 +68,6 @@ eln_group_handler = WebhookHandler(ELN_GROUP_CHANNEL_SECRET) if ELN_GROUP_CHANNE
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-# ==============================
-# NotebookLM Setup
-# ==============================
-try:
-    from notebooklm_client import NotebookLMClient
-    REGULATION_NOTEBOOK_ID = "2513ecbc-b188-48ec-8619-cb6825940ec3" 
-    nl_client = NotebookLMClient(notebook_id=REGULATION_NOTEBOOK_ID)
-except Exception as e:
-    nl_client = None
-    print(f"NotebookLM 初始化失敗: {e}")
-
 app = FastAPI()
 from articles import router as articles_router
 app.include_router(articles_router)
@@ -996,7 +985,7 @@ def handle_text_message(event):
             return
             
         # ==========================================
-        # NotebookLM 專屬指令攔截 (保證優先執行)
+        # 內規專屬指令攔截 (使用 Claude 全文理解，完美舉一反三)
         # ==========================================
         if text_raw.startswith("/內規"):
             actual_query = text_raw.replace("/內規", "").strip()
@@ -1004,16 +993,37 @@ def handle_text_message(event):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="請在指令後面加上想查詢的內容喔！\n例如：/內規 Lombard lending 最高可以到幾歲？"))
                 return
                 
-            if not nl_client:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 系統尚未綁定 NotebookLM 模組，請聯絡管理員檢查環境變數與套件。"))
-                return
-                
-            # 🚨 為了節省 LINE 推播額度，直接用免費的 reply_message 回傳答案
             try:
-                answer = nl_client.ask_regulation(actual_query)
+                # 1. 讀取你放在專案裡的法規純文字檔
+                file_path = Path("regulations.txt")
+                if not file_path.exists():
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 找不到 regulations.txt，請確認已將法規檔案上傳至系統。"))
+                    return
+                    
+                regulation_text = file_path.read_text(encoding="utf-8")
+                
+                # 2. 組裝超強的 Prompt，逼迫 Claude 詳讀全文
+                prompt = f"""你現在是銀行的法遵與內部規範專家。請根據以下【內部規範全文】，精準回答同仁的問題。
+要求：
+- 必須跨章節統整資訊，舉一反三。
+- 語氣必須符合專業銀行內部規範說明。
+- 若規範中未提及該狀況，請據實以告，不可自行編造。
+- 嚴禁使用 Markdown 語法 (例如 **, ##, --- 等)，請用純文字或 Emoji 條列排版。
+
+【內部規範全文】
+{regulation_text}
+
+【同仁問題】
+{actual_query}"""
+
+                # 3. 使用你原本寫好的 ai_claude_long
+                answer = ai_claude_long(prompt, chat_key=ck)
+                
+                # 4. 直接回傳答案，完全使用免推播額度的 reply_message
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=answer[:4900]))
+                
             except Exception as e:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 查詢失敗：{e}"))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 內部規範查詢失敗：{e}"))
             return
         # ==========================================
         
