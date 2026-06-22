@@ -391,20 +391,27 @@ async def callback2(request: Request):
                         eln_group_bot_api.reply_message(rtoken, TSM(text="❌ 找不到 regulations.txt，請確認已將法規檔案上傳至系統。"))
                         continue
                     regulation_text = file_path.read_text(encoding="utf-8")
-                    prompt = f"""你現在是銀行的法遵與內部規範專家。請根據以下【內部規範全文】，精準回答同仁的問題。
-要求：
-- 必須跨章節統整資訊，舉一反三。
-- 語氣必須符合專業銀行內部規範說明。
-- 若規範中未提及該狀況，請據實以告，不可自行編造。
-- 嚴禁使用 Markdown 語法 (例如 **, ##, --- 等)，請用純文字或 Emoji 條列排版。
-
-【內部規範全文】
-{regulation_text}
-
-【同仁問題】
-{actual_query}"""
-                    answer = ai_claude_long(prompt, chat_key=ck)
-                    eln_group_bot_api.reply_message(rtoken, TSM(text=answer[:4900]))
+                    
+                    # 💯 防縮排錯誤寫法
+                    prompt_lines = [
+                        "你現在是銀行的法遵與內部規範專家。請根據以下【內部規範全文】，直接且精準回答同仁的問題。",
+                        "",
+                        "【嚴格限制】",
+                        "1. 絕對不要輸出任何「因為文本是程式碼...」或「無法回答」的廢話警告。",
+                        "2. 絕對不要在結尾補充「可以這樣跟客戶/專員說」的話術。",
+                        "3. 嚴禁使用 Markdown 語法 (例如 **, ##, --- 等)，請用純文字或 Emoji 條列排版。",
+                        "",
+                        "【內部規範全文】",
+                        regulation_text,
+                        "",
+                        "【同仁問題】",
+                        actual_query
+                    ]
+                    prompt = "\n".join(prompt_lines)
+                    
+                    raw_answer = ai_claude_long(prompt, chat_key=ck)
+                    final_answer = "⚠️ 僅供參考，本回覆由 AI 統整，不代表總行最終內規解釋。\n\n" + raw_answer
+                    eln_group_bot_api.reply_message(rtoken, TSM(text=final_answer[:4900]))
                 except Exception as e:
                     eln_group_bot_api.reply_message(rtoken, TSM(text=f"❌ 內部規範查詢失敗：{e}"))
                 continue
@@ -1028,7 +1035,6 @@ def handle_text_message(event):
                 return
                 
             try:
-                # 1. 讀取你放在專案裡的法規純文字檔
                 file_path = Path("regulations.txt")
                 if not file_path.exists():
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 找不到 regulations.txt，請確認已將法規檔案上傳至系統。"))
@@ -1036,25 +1042,28 @@ def handle_text_message(event):
                     
                 regulation_text = file_path.read_text(encoding="utf-8")
                 
-                # 2. 組裝超強的 Prompt，逼迫 Claude 詳讀全文
-                prompt = f"""你現在是銀行的法遵與內部規範專家。請根據以下【內部規範全文】，精準回答同仁的問題。
-要求：
-- 必須跨章節統整資訊，舉一反三。
-- 語氣必須符合專業銀行內部規範說明。
-- 若規範中未提及該狀況，請據實以告，不可自行編造。
-- 嚴禁使用 Markdown 語法 (例如 **, ##, --- 等)，請用純文字或 Emoji 條列排版。
+                # 防縮排錯誤的 Prompt 組合方式
+                prompt_lines = [
+                    "你現在是銀行的法遵與內部規範專家。請根據以下【內部規範全文】，直接且精準回答同仁的問題。",
+                    "",
+                    "【嚴格限制】",
+                    "1. 絕對不要輸出任何「因為文本是程式碼...」或「無法回答」的廢話警告。",
+                    "2. 絕對不要在結尾補充「可以這樣跟客戶/專員說」的話術。",
+                    "3. 嚴禁使用 Markdown 語法 (例如 **, ##, --- 等)，請用純文字或 Emoji 條列排版。",
+                    "",
+                    "【內部規範全文】",
+                    regulation_text,
+                    "",
+                    "【同仁問題】",
+                    actual_query
+                ]
+                prompt = "\n".join(prompt_lines)
 
-【內部規範全文】
-{regulation_text}
-
-【同仁問題】
-{actual_query}"""
-
-                # 3. 使用你原本寫好的 ai_claude_long
-                answer = ai_claude_long(prompt, chat_key=ck)
+                raw_answer = ai_claude_long(prompt, chat_key=ck)
+                # 物理綁定警語，不讓 AI 決定
+                final_answer = "⚠️ 僅供參考，本回覆由 AI 統整，不代表總行最終內規解釋。\n\n" + raw_answer
                 
-                # 4. 直接回傳答案，完全使用免推播額度的 reply_message
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text=answer[:4900]))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=final_answer[:4900]))
                 
             except Exception as e:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 內部規範查詢失敗：{e}"))
@@ -1103,7 +1112,7 @@ def handle_text_message(event):
                            "/runnow  /tracklog  /end\n─────────────────\n"
                            "📰 財經\n/daily  /daily cache  /market\n─────────────────\n"
                            "📑 報告\n/report  /pdf\n─────────────────\n"
-                           "📚 知識庫\n/內規 <問題> → 查詢 NotebookLM 法規\n/kb <問題> → 查詢 Chroma 知識庫\n/kb上傳 → 上傳檔案\n/kb清單 → 查看文件清單\n─────────────────\n"
+                           "📚 知識庫\n/內規 <問題> → 查詢 內部法規\n/kb <問題> → 查詢 Chroma 知識庫\n/kb上傳 → 上傳檔案\n/kb清單 → 查看文件清單\n─────────────────\n"
                            "🔔 警示\n/alert add  /alert list  /alert del\n輸入 /help alert 看完整範例\n─────────────────\n"
                            "📚 文章庫\n/save  /unread  /read  /article  /del  /web\n直接傳圖片 → 自動儲存分析\n輸入 /help save 看完整說明\n─────────────────\n"
                            "📊 基金淨值 & 債券報價\n/fundnav → 手動更新基金淨值\n/bondnav → 手動觸發債券報價更新（94筆，約30分鐘）\n/tracklog → 查看執行記錄\n─────────────────\n"
@@ -2270,22 +2279,28 @@ def handle_eln_group_message(event):
                     eln_group_bot_api.reply_message(event.reply_token, TSM(text="❌ 找不到 regulations.txt，請確認已將法規檔案上傳至系統。"))
                     return
                 regulation_text = file_path.read_text(encoding="utf-8")
-               prompt = f"""你現在是銀行的法遵與內部規範專家。請根據以下【內部規範全文】，精準回答同仁的問題。
-要求：
-- 必須跨章節統整資訊，舉一反三。
-- 語氣必須符合專業銀行內部規範說明。
-- 若規範中未提及該狀況，請據實以告，不可自行編造。
-- 嚴禁使用 Markdown 語法 (例如 **, ##, --- 等)，請用純文字或 Emoji 條列排版。
-- 🚨 嚴禁在結尾補充「可以這樣跟客戶/專員說」等話術建議。
-- 🚨 無論遇到什麼狀況，必須在回覆的【最開頭】固定加上這句警語：「⚠️ 僅供參考，本回覆由 AI 統整，不代表總行最終內規解釋。」，且嚴禁輸出任何與系統、程式碼、檔案錯誤相關的技術性警告或長篇說明。
+                
+                # 防縮排錯誤的 Prompt 組合方式
+                prompt_lines = [
+                    "你現在是銀行的法遵與內部規範專家。請根據以下【內部規範全文】，直接且精準回答同仁的問題。",
+                    "",
+                    "【嚴格限制】",
+                    "1. 絕對不要輸出任何「因為文本是程式碼...」或「無法回答」的廢話警告。",
+                    "2. 絕對不要在結尾補充「可以這樣跟客戶/專員說」的話術。",
+                    "3. 嚴禁使用 Markdown 語法 (例如 **, ##, --- 等)，請用純文字或 Emoji 條列排版。",
+                    "",
+                    "【內部規範全文】",
+                    regulation_text,
+                    "",
+                    "【同仁問題】",
+                    actual_query
+                ]
+                prompt = "\n".join(prompt_lines)
 
-【內部規範全文】
-{regulation_text}
-
-【同仁問題】
-{actual_query}"""
                 answer = ai_claude_long(prompt, chat_key=ck)
-                eln_group_bot_api.reply_message(event.reply_token, TSM(text=answer[:4900]))
+                final_answer = "⚠️ 僅供參考，本回覆由 AI 統整，不代表總行最終內規解釋。\n\n" + answer
+                
+                eln_group_bot_api.reply_message(event.reply_token, TSM(text=final_answer[:4900]))
             except Exception as e:
                 eln_group_bot_api.reply_message(event.reply_token, TSM(text=f"❌ 內部規範查詢失敗：{e}"))
             return
