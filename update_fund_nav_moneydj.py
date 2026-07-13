@@ -42,6 +42,7 @@ FUND_DB = {
     "F0000156JS_FO": {"moneydj": "nbtg0",   "name": "路博邁次世代通訊"},
     "F000013TSL_FO": {"moneydj": "tlzm9",   "name": "安聯智慧城市收益"},
     "F0GBR04AY1_FO": {"moneydj": "FTH29",  "name": "富達全球動能多元基金"},
+    "F00000XDVB_FO": {"moneydj": "acfh67",  "name": "復華物聯網科技基金"},
 }
 # ==========================================
 # Google Drive 連線（從環境變數讀取）
