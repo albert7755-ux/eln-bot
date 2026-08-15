@@ -112,6 +112,13 @@ def read_bonds(path):
             elif h.startswith("產品代碼"): col.setdefault("code", i)
             elif h == "債券名稱": col.setdefault("name", i)
             elif h == "幣別": col.setdefault("ccy", i)
+            elif h == "債券評等": col.setdefault("sp", i)
+            elif h == "債券順位": col.setdefault("seniority", i)
+            elif h == "BidPrice": col.setdefault("bid", i)
+            elif h == "剩餘年期": col.setdefault("years", i)
+            elif h == "存續期間": col.setdefault("duration", i)
+            elif h == "產品風險屬性": col.setdefault("risk", i)
+            elif h == "備註": col.setdefault("remark", i)
             elif h.startswith("票面"): col.setdefault("coupon", i)
             elif h.startswith("配息"): col.setdefault("freq", i)
             elif h == "OfferPrice": col.setdefault("offer", i)
@@ -128,8 +135,16 @@ def read_bonds(path):
                 continue
             def g(k):
                 return r[col[k]] if k in col and col[k] < len(r) else None
+            sp_i = col.get("sp")
+            ratings = ""
+            if sp_i is not None:
+                trio = [str(x).strip() for x in r[sp_i:sp_i+3] if x not in (None, "")]
+                ratings = " / ".join(trio) if trio else ""
             b = dict(
                 isin=isin, code=g("code"), name=str(g("name") or "").strip(),
+                ratings=ratings, seniority=g("seniority"), bid=g("bid"),
+                years=g("years"), duration=g("duration"), risk=g("risk"),
+                remark=str(g("remark") or "").strip(),
                 ccy=g("ccy"), coupon=g("coupon"), freq=str(g("freq") or "").strip(),
                 offer=g("offer"), ytm=g("ytm"), maturity=to_date(g("maturity")),
                 min_amt=g("min_amt"), avail=g("avail"), sheet=name,
@@ -140,6 +155,26 @@ def read_bonds(path):
             else:
                 bonds[isin] = b
     return list(bonds.values())
+
+def issuer_of(name):
+    """『美林私人有限公司債3』→『美林私人有限公司』；『美國公債1』→『美國公債』"""
+    n = re.sub(r"[\s\d]+$", "", str(name)).strip()
+    if n.endswith("公司債"):
+        base = n[:-3].strip()   # 蘋果公司債 → 蘋果；Alphabet 公司債 → Alphabet
+        return base + "公司" if base.endswith("有限") else base   # 美林私人有限公司債 → 美林私人有限公司
+    if n.endswith("公債"):
+        return n                # 美國公債、澳洲公債
+    if n.endswith("債"):
+        return n[:-1]           # 西太平洋銀行債 → 西太平洋銀行
+    return n
+
+def biz_days_after(d, n):
+    cur = d
+    while n > 0:
+        cur += timedelta(days=1)
+        if cur.weekday() < 5:
+            n -= 1
+    return cur
 
 # ---------- 核心 ----------
 def build_alerts(path, today=None, lookahead=LOOKAHEAD_DAYS):
@@ -161,21 +196,32 @@ def build_alerts(path, today=None, lookahead=LOOKAHEAD_DAYS):
     alerts.sort(key=lambda a: (a["coupon_date"], -a["lag"], a["name"]))
     return alerts
 
-def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, max_lines=30):
-    """回傳給 LINE 用的純文字訊息：只列『還來得及』的，已過的只給數字"""
+def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3, max_lines=30):
+    """
+    回傳給 LINE 用的純文字訊息。
+    lookahead  : 往前看幾天的配息日（預設 14）
+    days_ahead : 只顯示『最晚下單日』落在今天起 N 個營業日內的（預設 3）；None = 全部顯示
+    """
     today = today or date.today()
     alerts = build_alerts(path, today, lookahead)
-    ok = [a for a in alerts if a["status"].startswith("✅")]
-    gone = len(alerts) - len(ok)
+    ok_all = [a for a in alerts if a["status"].startswith("✅")]
+    gone = len(alerts) - len(ok_all)
     wd = "一二三四五六日"
+    if days_ahead is None:
+        ok, cutoff = ok_all, None
+    else:
+        cutoff = biz_days_after(today, days_ahead)
+        ok = [a for a in ok_all if a["last_trade"] <= cutoff]
+    scope = f"最晚下單日在 {days_ahead} 個營業日內（～{cutoff:%m/%d}）" if cutoff else f"未來{lookahead}天全部"
     if not ok:
-        return (f"📅 {today:%m/%d} 海外債配息雷達\n"
-                f"未來{lookahead}天有 {len(alerts)} 檔配息，但最晚下單日皆已過，今日無可搶配息標的。"
+        return (f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達\n"
+                f"{scope}沒有需要搶進的配息債。\n"
+                f"（未來{lookahead}天共 {len(alerts)} 檔配息，還來得及 {len(ok_all)} 檔，可打 /coupon all 看全部）"
                 + DISCLAIMER)
     ok.sort(key=lambda a: (a["last_trade"], -a["lag"], a["name"]))
     lines = [f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達",
-             f"未來{lookahead}天 {len(alerts)} 檔配息｜還來得及 {len(ok)} 檔｜已過 {gone} 檔",
-             "（依最晚下單日排序，越上面越急）\n"]
+             f"{scope}：{len(ok)} 檔",
+             f"（未來{lookahead}天共 {len(alerts)} 檔配息｜還來得及 {len(ok_all)}｜已過 {gone}）\n"]
     cur = None
     for i, a in enumerate(ok):
         if a["last_trade"] != cur:
@@ -194,6 +240,87 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, max_lines=30
             break
     lines.append(DISCLAIMER)
     return "\n".join(lines)
+
+# ---------- Excel 條件表 ----------
+def build_coupon_sheet(path, out_path, today=None, lookahead=LOOKAHEAD_DAYS, intro_fn=None):
+    """
+    把『還來得及參與』的債券輸出成 Excel 條件表。
+    intro_fn(list[str]) -> dict[str,str]：可選，傳入發行機構名單，回傳簡介（例如用 Claude 產生）
+    回傳 (out_path, 檔數, 發行機構數)
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    today = today or date.today()
+    alerts = [a for a in build_alerts(path, today, lookahead) if a["status"].startswith("✅")]
+    alerts.sort(key=lambda a: (a["last_trade"], -a["lag"], a["name"]))
+    issuers = []
+    for a in alerts:
+        iss = issuer_of(a["name"])
+        a["issuer"] = iss
+        if iss not in issuers:
+            issuers.append(iss)
+    intros = {}
+    if intro_fn and issuers:
+        try:
+            intros = intro_fn(issuers) or {}
+        except Exception as e:
+            intros = {"_error": str(e)}
+
+    wb = Workbook()
+    navy = PatternFill("solid", fgColor="0B2A4A")
+    hf = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+    bf = Font(name="Arial", size=10)
+    thin = Side(style="thin", color="D0D0D0"); bd = Border(top=thin, bottom=thin, left=thin, right=thin)
+    wrap = Alignment(vertical="top", wrap_text=True)
+
+    # Sheet 1 條件表
+    ws = wb.active; ws.title = "配息債條件表"
+    cols = ["最晚下單日", "配息日", "交割", "發行機構", "債券名稱", "ISIN", "產品代碼", "幣別",
+            "票面利率%", "配息頻率", "評等(S&P/Moody's/Fitch)", "債券順位", "Bid", "Offer", "YTM/YTC",
+            "到期日", "剩餘年期", "存續期間", "風險屬性", "最低申購面額", "本日額度", "備註", "來源Sheet"]
+    ws["A1"] = f"海外債配息雷達 — 還來得及參與（{today:%Y/%m/%d} 起未來{lookahead}天，共 {len(alerts)} 檔）"
+    ws["A1"].font = Font(name="Arial", bold=True, size=13, color="0B2A4A")
+    ws["A2"] = "最晚交割日=配息日前1營業日；US/CA T+1、其他 T+2；營業日僅排除週六日；配息日由到期日+頻率倒推，請以實際為準"
+    ws["A2"].font = Font(name="Arial", size=9, italic=True, color="666666")
+    for j, c in enumerate(cols, 1):
+        cell = ws.cell(row=4, column=j, value=c); cell.font = hf; cell.fill = navy
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True); cell.border = bd
+    for i, a in enumerate(alerts, 5):
+        vals = [a["last_trade"], a["coupon_date"], f"T+{a['lag']}", a["issuer"], a["name"], a["isin"], a["code"], a["ccy"],
+                a["coupon"], a["freq"], a["ratings"], a["seniority"],
+                a["bid"] if a["bid"] not in (None, "#VALUE!") else None,
+                a["offer"] if a["offer"] not in (None, "#VALUE!") else None,
+                a["ytm"], a["maturity"], a["years"], a["duration"], a["risk"], a["min_amt"], a["avail"],
+                a["remark"], "、".join(sorted(a["sheets"]))]
+        for j, v in enumerate(vals, 1):
+            cell = ws.cell(row=i, column=j, value=v); cell.font = bf; cell.border = bd; cell.alignment = wrap
+            if isinstance(v, date): cell.number_format = "yyyy/mm/dd"
+        if a["last_trade"] == today:
+            for j in range(1, len(cols) + 1):
+                ws.cell(row=i, column=j).fill = PatternFill("solid", fgColor="FFF2CC")
+    widths = [11, 11, 6, 18, 24, 15, 15, 6, 9, 8, 20, 12, 8, 8, 11, 11, 8, 8, 8, 12, 8, 50, 30]
+    for j, w in enumerate(widths, 1): ws.column_dimensions[get_column_letter(j)].width = w
+    ws.freeze_panes = "F5"; ws.auto_filter.ref = f"A4:{get_column_letter(len(cols))}{4 + len(alerts)}"
+
+    # Sheet 2 發行機構簡介
+    ws2 = wb.create_sheet("發行機構簡介")
+    ws2["A1"] = "發行機構簡介（AI 產生，僅供內部參考，對客說明請以公開資訊為準）"
+    ws2["A1"].font = Font(name="Arial", bold=True, size=13, color="0B2A4A")
+    for j, c in enumerate(["發行機構", "本次配息檔數", "簡介"], 1):
+        cell = ws2.cell(row=3, column=j, value=c); cell.font = hf; cell.fill = navy; cell.border = bd
+    cnt = {}
+    for a in alerts: cnt[a["issuer"]] = cnt.get(a["issuer"], 0) + 1
+    for i, iss in enumerate(issuers, 4):
+        ws2.cell(row=i, column=1, value=iss).font = bf
+        ws2.cell(row=i, column=2, value=cnt.get(iss, 0)).font = bf
+        c3 = ws2.cell(row=i, column=3, value=intros.get(iss, intros.get("_error", "")))
+        c3.font = bf; c3.alignment = wrap
+        for j in range(1, 4): ws2.cell(row=i, column=j).border = bd
+    ws2.column_dimensions["A"].width = 24; ws2.column_dimensions["B"].width = 12; ws2.column_dimensions["C"].width = 90
+
+    wb.save(out_path)
+    return out_path, len(alerts), len(issuers)
 
 if __name__ == "__main__":
     p = sys.argv[1]
