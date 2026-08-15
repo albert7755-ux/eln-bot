@@ -91,8 +91,6 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 app = FastAPI()
 from articles import router as articles_router
 app.include_router(articles_router)
-from eln_form_router import router as eln_form_router
-app.include_router(eln_form_router)
 
 VERSION = "eln-autotracking-db-v3-2026-03-05"
 TZ_TAIPEI = timezone(timedelta(hours=8))
@@ -1143,7 +1141,7 @@ def handle_text_message(event):
                            "🔔 警示\n/alert add  /alert list  /alert del\n輸入 /help alert 看完整範例\n─────────────────\n"
                            "📚 文章庫\n/save  /unread  /read  /article  /del  /web\n直接傳圖片 → 自動儲存分析\n輸入 /help save 看完整說明\n─────────────────\n"
                            "📊 基金淨值 & 債券報價\n/fundnav → 手動更新基金淨值\n/bondnav → 手動觸發債券報價更新（94筆，約30分鐘）\n/tracklog → 查看執行記錄\n─────────────────\n"
-                           "💰 海外債配息雷達\n/coupon → 3個營業日內要下單的配息債\n/coupon 7 → 7個營業日內\n/coupon all → 未來14天全部\n/coupon table → Excel條件表＋發行機構簡介\n上傳 Bond_Pricing Excel → 自動更新報價檔並重算\n（每天 06:45 自動推播）\n─────────────────\n"
+                           "💰 海外債配息雷達\n/coupon → 3個營業日內要下單的配息債\n/coupon 7 → 7個營業日內\n/coupon all → 未來14天全部\n/coupon table → Excel條件表＋發行機構簡介（未來14天）\n/issuer 蘋果 → 單一發行機構簡介＋架上債券（模糊搜尋）\n上傳 Bond_Pricing Excel → 自動更新報價檔並重算\n（每天 06:45 自動推播）\n─────────────────\n"
                            "📧 其他\n/mail  /invest  /forget  /spending\n上傳錄音 → 自動逐字稿 / 摘要\n上傳檔案 → 自動分析\n─────────────────\n"
                            "進階說明：/help alert、/help eln、/help report、/help save")
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
@@ -1803,6 +1801,35 @@ def handle_text_message(event):
             import threading
             threading.Thread(target=_run_bondnav, daemon=True).start()
             return
+        if cmd == "issuer" or cmd.startswith("issuer "):
+            # /issuer 蘋果   → 該發行機構簡介 + 架上所有債券（模糊搜尋，不限配息中）
+            kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
+            if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔，請先把 Bond_Pricing Excel 傳給我。"))
+                return
+            if not kw:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="🔎 用法：/issuer 蘋果\n/issuer merrill\n/issuer US037833\n（模糊搜尋發行機構／債券名稱／ISIN／產品代碼）"))
+                return
+            try:
+                from bond_coupon_alert import search_issuers, format_issuer_bonds
+                hits = search_issuers(str(BOND_PRICE_FILE), kw)
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 搜尋失敗：{str(e)[:200]}"))
+                return
+            if not hits:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🔎 找不到跟「{kw}」相關的發行機構。"))
+                return
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🔎 找到 {len(hits)} 家：{'、'.join(h[0] for h in hits)}\n整理簡介中..."))
+            def _run_issuer(chat_key, bot_api_ref, hits_):
+                try:
+                    intros = get_issuer_intros([h[0] for h in hits_])
+                except Exception as e:
+                    intros = {h[0]: f"（簡介暫無法取得：{str(e)[:80]}）" for h in hits_}
+                for iss, bl in hits_:
+                    push_long_message(bot_api_ref, chat_key.split(":", 1)[1], format_issuer_bonds(iss, bl, intros.get(iss, "")))
+            import threading
+            threading.Thread(target=_run_issuer, args=(ck, _bot_api, hits), daemon=True).start()
+            return
         if cmd == "coupon":
             # /coupon          → 最晚下單日在 3 個營業日內
             # /coupon 7        → 7 個營業日內
@@ -1823,72 +1850,8 @@ def handle_text_message(event):
                     try:
                         from bond_coupon_alert import build_coupon_sheet
                         from pdf_generator import upload_to_drive
-                        def _issuer_intro(issuers):
-                            """先查 DB 快取，缺的才叫 AI；AI 依序試 Claude → OpenAI → Gemini"""
-                            intros = {}
-                            with engine.begin() as conn:
-                                rows = conn.execute(text("SELECT issuer, intro FROM bond_issuer_intro")).fetchall()
-                            cache = {r[0]: r[1] for r in rows}
-                            missing = []
-                            for iss in issuers:
-                                if iss in cache:
-                                    intros[iss] = cache[iss]
-                                else:
-                                    missing.append(iss)
-                            if not missing:
-                                return intros
-                            prompt = ("你是台灣銀行財富管理部門的固定收益研究員。請針對下列債券發行機構各寫一段 60～100 字的繁體中文簡介，"
-                                      "內容包含：主要業務、總部所在國家、在產業中的地位、信用體質重點（例如投資等級/政府支持/主要風險）。"
-                                      "語氣專業中性，不要投資建議。只回傳 JSON 物件，key 為發行機構名稱（必須跟輸入完全一致），value 為簡介文字，不要任何其他文字或 markdown。\n\n發行機構名單：\n"
-                                      + "\n".join(f"- {x}" for x in missing))
-                            def _parse(raw):
-                                raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M).strip()
-                                return json.loads(raw)
-                            got, source, errs = None, "", []
-                            # Claude
-                            try:
-                                resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=4000,
-                                                                     messages=[{"role": "user", "content": prompt}])
-                                got = _parse("".join(getattr(b, "text", "") for b in resp.content)); source = "claude"
-                            except Exception as e:
-                                errs.append(f"claude:{str(e)[:60]}")
-                            # OpenAI
-                            if got is None and openai_client:
-                                try:
-                                    resp = openai_client.chat.completions.create(model="gpt-4.1-mini", temperature=0.3, max_tokens=4000,
-                                                                                 messages=[{"role": "user", "content": prompt}])
-                                    got = _parse(resp.choices[0].message.content); source = "openai"
-                                except Exception as e:
-                                    errs.append(f"openai:{str(e)[:60]}")
-                            # Gemini
-                            if got is None and GEMINI_API_KEY:
-                                try:
-                                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-                                    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-                                    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
-                                    with urllib.request.urlopen(req, timeout=90) as r_:
-                                        data = json.loads(r_.read().decode("utf-8"))
-                                    got = _parse(data["candidates"][0]["content"]["parts"][0]["text"]); source = "gemini"
-                                except Exception as e:
-                                    errs.append(f"gemini:{str(e)[:60]}")
-                            if got is None:
-                                for iss in missing:
-                                    intros[iss] = "（簡介暫無法取得，AI 服務不可用：" + "；".join(errs)[:120] + "）"
-                                return intros
-                            with engine.begin() as conn:
-                                for iss in missing:
-                                    txt_ = str(got.get(iss, "")).strip()
-                                    if txt_:
-                                        intros[iss] = txt_
-                                        conn.execute(text("""INSERT INTO bond_issuer_intro(issuer, intro, source, updated_at)
-                                                             VALUES (:i, :t, :s, NOW())
-                                                             ON CONFLICT (issuer) DO UPDATE SET intro=EXCLUDED.intro, source=EXCLUDED.source, updated_at=NOW()"""),
-                                                     {"i": iss, "t": txt_, "s": source})
-                                    else:
-                                        intros[iss] = "（AI 未回傳此機構簡介）"
-                            return intros
                         out_path = f"/tmp/配息債條件表_{today_:%Y%m%d}.xlsx"
-                        _, n_bond, n_iss, intros = build_coupon_sheet(str(BOND_PRICE_FILE), out_path, today=today_, lookahead=14, intro_fn=_issuer_intro)
+                        _, n_bond, n_iss, intros = build_coupon_sheet(str(BOND_PRICE_FILE), out_path, today=today_, lookahead=14, intro_fn=get_issuer_intros)
                         link = upload_to_drive(out_path, f"配息債條件表_{today_:%Y%m%d}.xlsx")
                         try:
                             os.remove(out_path)
@@ -2724,6 +2687,71 @@ def job_auto_tracking():
         write_job_log("ELN追蹤", "success", "追蹤完成")
     except Exception as e:
         write_job_log("ELN追蹤", "error", str(e))
+
+def get_issuer_intros(issuers):
+    """先查 DB 快取，缺的才叫 AI；AI 依序試 Claude → OpenAI → Gemini"""
+    intros = {}
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT issuer, intro FROM bond_issuer_intro")).fetchall()
+    cache = {r[0]: r[1] for r in rows}
+    missing = []
+    for iss in issuers:
+        if iss in cache:
+            intros[iss] = cache[iss]
+        else:
+            missing.append(iss)
+    if not missing:
+        return intros
+    prompt = ("你是台灣銀行財富管理部門的固定收益研究員。請針對下列債券發行機構各寫一段 60～100 字的繁體中文簡介，"
+              "內容包含：主要業務、總部所在國家、在產業中的地位、信用體質重點（例如投資等級/政府支持/主要風險）。"
+              "語氣專業中性，不要投資建議。只回傳 JSON 物件，key 為發行機構名稱（必須跟輸入完全一致），value 為簡介文字，不要任何其他文字或 markdown。\n\n發行機構名單：\n"
+              + "\n".join(f"- {x}" for x in missing))
+    def _parse(raw):
+        raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M).strip()
+        return json.loads(raw)
+    got, source, errs = None, "", []
+    # Claude
+    try:
+        resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=4000,
+                                             messages=[{"role": "user", "content": prompt}])
+        got = _parse("".join(getattr(b, "text", "") for b in resp.content)); source = "claude"
+    except Exception as e:
+        errs.append(f"claude:{str(e)[:60]}")
+    # OpenAI
+    if got is None and openai_client:
+        try:
+            resp = openai_client.chat.completions.create(model="gpt-4.1-mini", temperature=0.3, max_tokens=4000,
+                                                         messages=[{"role": "user", "content": prompt}])
+            got = _parse(resp.choices[0].message.content); source = "openai"
+        except Exception as e:
+            errs.append(f"openai:{str(e)[:60]}")
+    # Gemini
+    if got is None and GEMINI_API_KEY:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=90) as r_:
+                data = json.loads(r_.read().decode("utf-8"))
+            got = _parse(data["candidates"][0]["content"]["parts"][0]["text"]); source = "gemini"
+        except Exception as e:
+            errs.append(f"gemini:{str(e)[:60]}")
+    if got is None:
+        for iss in missing:
+            intros[iss] = "（簡介暫無法取得，AI 服務不可用：" + "；".join(errs)[:120] + "）"
+        return intros
+    with engine.begin() as conn:
+        for iss in missing:
+            txt_ = str(got.get(iss, "")).strip()
+            if txt_:
+                intros[iss] = txt_
+                conn.execute(text("""INSERT INTO bond_issuer_intro(issuer, intro, source, updated_at)
+                                     VALUES (:i, :t, :s, NOW())
+                                     ON CONFLICT (issuer) DO UPDATE SET intro=EXCLUDED.intro, source=EXCLUDED.source, updated_at=NOW()"""),
+                             {"i": iss, "t": txt_, "s": source})
+            else:
+                intros[iss] = "（AI 未回傳此機構簡介）"
+    return intros
 
 def job_bond_coupon_radar():
     """每天 06:45 推播海外債配息雷達給 Albert（週一～週五）"""
