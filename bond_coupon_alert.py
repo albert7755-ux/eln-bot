@@ -237,7 +237,7 @@ def build_alerts(path, today=None, lookahead=LOOKAHEAD_DAYS):
     alerts.sort(key=lambda a: (a["coupon_date"], -a["lag"], a["name"]))
     return alerts
 
-def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3, max_lines=30):
+def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3, max_lines=30, maturity_days=30):
     """
     回傳給 LINE 用的純文字訊息。
     lookahead  : 往前看幾天的配息日（預設 14）
@@ -254,11 +254,12 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
         cutoff = biz_days_after(today, days_ahead)
         ok = [a for a in ok_all if a["last_trade"] <= cutoff]
     scope = f"最晚下單日在 {days_ahead} 個營業日內（～{cutoff:%m/%d}）" if cutoff else f"未來{lookahead}天全部"
+    mat_txt = format_maturities(maturing_soon(path, today, maturity_days), today, maturity_days) if maturity_days else ""
     if not ok:
         return (f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達\n"
                 f"{scope}沒有需要搶進的配息債。\n"
                 f"（未來{lookahead}天共 {len(alerts)} 檔配息，還來得及 {len(ok_all)} 檔，可打 /coupon all 看全部）"
-                + DISCLAIMER)
+                + mat_txt + DISCLAIMER)
     ok.sort(key=lambda a: (a["last_trade"], -a["lag"], a["name"]))
     lines = [f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達",
              f"{scope}：{len(ok)} 檔",
@@ -279,7 +280,115 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
         if i + 1 >= max_lines and i + 1 < len(ok):
             lines.append(f"…另有 {len(ok)-i-1} 檔，見Excel")
             break
+    if mat_txt:
+        lines.append(mat_txt)
     lines.append(DISCLAIMER)
+    return "\n".join(lines)
+
+# ---------- 通用小工具 ----------
+def first_num(v):
+    """'5.32/5.33' → 5.32；'101.78' → 101.78；'-'/'#N/A'/None → None"""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    m = re.search(r"-?\d+(?:\.\d+)?", str(v).replace(",", ""))
+    return float(m.group()) if m else None
+
+def find_bonds(path, keyword, max_hits=8):
+    """
+    找單一債券：關鍵字可含名稱片段 / ISIN / 產品代碼 / 到期年份，例如「蘋果 2043」「US037833」「蘋果9」
+    回傳 list[bond]，依到期日排序
+    """
+    toks = [t for t in re.split(r"\s+", str(keyword).strip()) if t]
+    if not toks:
+        return []
+    years = {int(t) for t in toks if re.fullmatch(r"20\d\d", t)}
+    words = [t.lower() for t in toks if not re.fullmatch(r"20\d\d", t)]
+    hits = []
+    for b in read_bonds(path):
+        hay = f"{b['name']} {b['isin']} {b['code'] or ''}".lower().replace(" ", "")
+        if all(w.replace(" ", "") in hay for w in words) and (not years or (b["maturity"] and b["maturity"].year in years)):
+            hits.append(b)
+    hits.sort(key=lambda b: (b["maturity"] or date.max))
+    return hits[:max_hits]
+
+# ---------- 到期日提醒 ----------
+def maturing_soon(path, today=None, days=30):
+    """回傳未來 days 天內到期的架上債券（依到期日排序）"""
+    today = today or date.today()
+    end = today + timedelta(days=days)
+    out = [b for b in read_bonds(path) if b["maturity"] and today <= b["maturity"] <= end]
+    out.sort(key=lambda b: (b["maturity"], b["name"]))
+    return out
+
+def format_maturities(bonds, today=None, days=30, max_lines=15):
+    today = today or date.today()
+    if not bonds:
+        return ""
+    wd = "一二三四五六日"
+    lines = [f"\n💵 資金到期提醒（未來{days}天 {len(bonds)} 檔到期，本金將回流）"]
+    for b in bonds[:max_lines]:
+        d = b["maturity"]
+        lines.append(f"▪ {d:%m/%d}({wd[d.weekday()]}) {b['name']} {b['ccy']} {b['coupon']}%｜{pi_tag(b)}")
+    if len(bonds) > max_lines:
+        lines.append(f"…另有 {len(bonds)-max_lines} 檔")
+    lines.append("→ 建議提前聯絡持有客戶討論再投資")
+    return "\n".join(lines)
+
+# ---------- 報價檔快照與差異（信評異動 / 新上架 / 下架）----------
+def bond_snapshot(path):
+    """{isin: {name, ratings, ytm, offer, maturity}}"""
+    snap = {}
+    for b in read_bonds(path):
+        snap[b["isin"]] = {
+            "name": b["name"], "ratings": b.get("ratings") or "",
+            "ytm": first_num(b["ytm"]), "offer": first_num(b["offer"]),
+            "maturity": b["maturity"].isoformat() if b["maturity"] else None,
+        }
+    return snap
+
+def diff_snapshots(old, new):
+    """回傳 dict：rating_changes / new_bonds / removed_bonds"""
+    old = old or {}
+    rating_changes, new_bonds, removed = [], [], []
+    for isin, nb in new.items():
+        ob = old.get(isin)
+        if ob is None:
+            new_bonds.append((isin, nb["name"]))
+            continue
+        o_r = _norm_rating(ob.get("ratings", "")); n_r = _norm_rating(nb.get("ratings", ""))
+        if o_r and n_r and o_r != n_r:
+            rating_changes.append((isin, nb["name"], ob.get("ratings", ""), nb.get("ratings", "")))
+    for isin, ob in old.items():
+        if isin not in new:
+            removed.append((isin, ob["name"]))
+    return {"rating_changes": rating_changes, "new_bonds": new_bonds, "removed_bonds": removed}
+
+def _norm_rating(r):
+    """把 'N/A / Aa1 / AA+' 正規化成 'aa1/aa+'，忽略 N/A 與空白，避免假異動"""
+    parts = [x.strip().lower() for x in str(r).split("/")]
+    parts = [x for x in parts if x and x not in ("n/a", "na", "none", "-", "wd", "nr")]
+    return "/".join(parts)
+
+def format_snapshot_diff(diff, max_lines=15):
+    lines = []
+    rc, nb, rm = diff["rating_changes"], diff["new_bonds"], diff["removed_bonds"]
+    if rc:
+        lines.append(f"🚨 信評異動 {len(rc)} 檔（依報價檔比對）")
+        for isin, name, o, n in rc[:max_lines]:
+            lines.append(f"▪ {name}\n  {o} → {n}")
+        if len(rc) > max_lines: lines.append(f"…另有 {len(rc)-max_lines} 檔")
+    if nb:
+        lines.append(f"🆕 新上架 {len(nb)} 檔")
+        for isin, name in nb[:max_lines]:
+            lines.append(f"▪ {name} ({isin})")
+        if len(nb) > max_lines: lines.append(f"…另有 {len(nb)-max_lines} 檔")
+    if rm:
+        lines.append(f"📤 下架/移除 {len(rm)} 檔")
+        for isin, name in rm[:max_lines]:
+            lines.append(f"▪ {name}")
+        if len(rm) > max_lines: lines.append(f"…另有 {len(rm)-max_lines} 檔")
     return "\n".join(lines)
 
 # ---------- 發行機構模糊搜尋 ----------
