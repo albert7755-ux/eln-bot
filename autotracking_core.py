@@ -192,6 +192,67 @@ def is_us_market_open() -> bool:
 # =========================
 # Core entry
 # =========================
+
+def calculate_from_db(db_engine, lookback_days: int = 3, notify_ki_daily: bool = True):
+    """從 eln_products 資料庫表讀取資料，組成 DataFrame 後呼叫 calculate_from_file 的核心邏輯"""
+    from sqlalchemy import text as sa_text
+    import io
+
+    with db_engine.begin() as conn:
+        rows = conn.execute(sa_text("""
+            SELECT bond_id, trade_date, product_type, tenure_months, currency,
+                   t1_code, t1_initial, t2_code, t2_initial, t3_code, t3_initial,
+                   t4_code, t4_initial, t5_code, t5_initial,
+                   coupon_pct, strike_pct, ko_pct, ko_type, ki_pct, ki_type,
+                   issue_date, valuation_date, maturity_date, agent_name, line_id
+            FROM eln_products
+            ORDER BY trade_date ASC
+        """)).fetchall()
+
+    if not rows:
+        raise ValueError("eln_products 表沒有資料")
+
+    cols = ["債券代號","交易日","商品類型","天期 (月)","幣別",
+            "標的1","標的1.1","標的2","標的2.1","標的3","標的3.1",
+            "標的4","標的4.1","標的5","標的5.1",
+            "收益率(年化%)/","執行價格(%)","KO 價格(%)","KO 類型","KI 價格(%)","KI 類型",
+            "發行日","最終評價日","到期日","理專","LINE_ID"]
+
+    records = []
+    for r in rows:
+        records.append({
+            "債券代號": r[0],
+            "交易日": r[1],
+            "商品類型": r[2] or "FCN",
+            "天期 (月)": r[3],
+            "幣別": r[4] or "美元",
+            "標的1": r[5], "標的1.1": r[6],
+            "標的2": r[7], "標的2.1": r[8],
+            "標的3": r[9], "標的3.1": r[10],
+            "標的4": r[11], "標的4.1": r[12],
+            "標的5": r[13], "標的5.1": r[14],
+            "收益率(年化%)/": r[15],
+            "執行價格(%)": r[16] or 100,
+            "KO 價格(%)": r[17] or 100,
+            "KO 類型": r[18] or "Daily Memory",
+            "KI 價格(%)": r[19] or 70,
+            "KI 類型": r[20] or "AKI",
+            "發行日": r[21],
+            "最終評價日": r[22],
+            "到期日": r[23],
+            "理專": r[24] or "",
+            "LINE_ID": r[25] or "",
+        })
+
+    df = pd.DataFrame(records)
+    print(f"[DEBUG] 從 eln_products 讀取 {len(df)} 筆")
+
+    # 存成臨時 Excel 讓 calculate_from_file 處理
+    tmp_path = "/tmp/eln_from_db.xlsx"
+    df.to_excel(tmp_path, index=False, engine="openpyxl")
+    return calculate_from_file(tmp_path, lookback_days=lookback_days, notify_ki_daily=notify_ki_daily)
+
+
 def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily: bool = True) -> Dict[str, Any]:
     real_today = datetime.now()
     today_ts = pd.Timestamp(real_today)
