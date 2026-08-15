@@ -162,6 +162,23 @@ async def add_product(request: Request):
         raise HTTPException(status_code=400, detail=f"新增失敗：{str(e)}")
 
 
+@router.post("/eln-form/delete")
+async def delete_product(request: Request):
+    """刪除商品（需密碼）"""
+    data = await request.json()
+    if data.get("password") != ADMIN_PASSWORD:
+        raise HTTPException(status_code=403, detail="密碼錯誤")
+    product_id = data.get("id")
+    if not product_id:
+        raise HTTPException(status_code=400, detail="缺少商品 ID")
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM eln_products WHERE id=:id"), {"id": product_id})
+        return {"success": True, "message": "✅ 刪除成功"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"刪除失敗：{str(e)}")
+
+
 @router.post("/eln-form/update")
 async def update_product(request: Request):
     """修改商品（需密碼）"""
