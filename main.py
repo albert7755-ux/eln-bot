@@ -103,6 +103,11 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 def init_db():
     with engine.begin() as conn:
         conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS bond_issuer_intro (
+            issuer TEXT PRIMARY KEY, intro TEXT NOT NULL, source TEXT,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );"""))
+        conn.execute(text("""
         CREATE TABLE IF NOT EXISTS eln_last_report (
             chat_key TEXT PRIMARY KEY, summary TEXT NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1817,25 +1822,84 @@ def handle_text_message(event):
                         from bond_coupon_alert import build_coupon_sheet
                         from pdf_generator import upload_to_drive
                         def _issuer_intro(issuers):
+                            """先查 DB 快取，缺的才叫 AI；AI 依序試 Claude → OpenAI → Gemini"""
+                            intros = {}
+                            with engine.begin() as conn:
+                                rows = conn.execute(text("SELECT issuer, intro FROM bond_issuer_intro")).fetchall()
+                            cache = {r[0]: r[1] for r in rows}
+                            missing = []
+                            for iss in issuers:
+                                if iss in cache:
+                                    intros[iss] = cache[iss]
+                                else:
+                                    missing.append(iss)
+                            if not missing:
+                                return intros
                             prompt = ("你是台灣銀行財富管理部門的固定收益研究員。請針對下列債券發行機構各寫一段 60～100 字的繁體中文簡介，"
                                       "內容包含：主要業務、總部所在國家、在產業中的地位、信用體質重點（例如投資等級/政府支持/主要風險）。"
                                       "語氣專業中性，不要投資建議。只回傳 JSON 物件，key 為發行機構名稱（必須跟輸入完全一致），value 為簡介文字，不要任何其他文字或 markdown。\n\n發行機構名單：\n"
-                                      + "\n".join(f"- {x}" for x in issuers))
-                            resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=4000,
-                                                                 messages=[{"role": "user", "content": prompt}])
-                            raw = "".join(getattr(b, "text", "") for b in resp.content).strip()
-                            raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
-                            return json.loads(raw)
+                                      + "\n".join(f"- {x}" for x in missing))
+                            def _parse(raw):
+                                raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M).strip()
+                                return json.loads(raw)
+                            got, source, errs = None, "", []
+                            # Claude
+                            try:
+                                resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=4000,
+                                                                     messages=[{"role": "user", "content": prompt}])
+                                got = _parse("".join(getattr(b, "text", "") for b in resp.content)); source = "claude"
+                            except Exception as e:
+                                errs.append(f"claude:{str(e)[:60]}")
+                            # OpenAI
+                            if got is None and openai_client:
+                                try:
+                                    resp = openai_client.chat.completions.create(model="gpt-4.1-mini", temperature=0.3, max_tokens=4000,
+                                                                                 messages=[{"role": "user", "content": prompt}])
+                                    got = _parse(resp.choices[0].message.content); source = "openai"
+                                except Exception as e:
+                                    errs.append(f"openai:{str(e)[:60]}")
+                            # Gemini
+                            if got is None and GEMINI_API_KEY:
+                                try:
+                                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+                                    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+                                    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+                                    with urllib.request.urlopen(req, timeout=90) as r_:
+                                        data = json.loads(r_.read().decode("utf-8"))
+                                    got = _parse(data["candidates"][0]["content"]["parts"][0]["text"]); source = "gemini"
+                                except Exception as e:
+                                    errs.append(f"gemini:{str(e)[:60]}")
+                            if got is None:
+                                for iss in missing:
+                                    intros[iss] = "（簡介暫無法取得，AI 服務不可用：" + "；".join(errs)[:120] + "）"
+                                return intros
+                            with engine.begin() as conn:
+                                for iss in missing:
+                                    txt_ = str(got.get(iss, "")).strip()
+                                    if txt_:
+                                        intros[iss] = txt_
+                                        conn.execute(text("""INSERT INTO bond_issuer_intro(issuer, intro, source, updated_at)
+                                                             VALUES (:i, :t, :s, NOW())
+                                                             ON CONFLICT (issuer) DO UPDATE SET intro=EXCLUDED.intro, source=EXCLUDED.source, updated_at=NOW()"""),
+                                                     {"i": iss, "t": txt_, "s": source})
+                                    else:
+                                        intros[iss] = "（AI 未回傳此機構簡介）"
+                            return intros
                         out_path = f"/tmp/配息債條件表_{today_:%Y%m%d}.xlsx"
-                        _, n_bond, n_iss = build_coupon_sheet(str(BOND_PRICE_FILE), out_path, today=today_, lookahead=14, intro_fn=_issuer_intro)
+                        _, n_bond, n_iss, intros = build_coupon_sheet(str(BOND_PRICE_FILE), out_path, today=today_, lookahead=14, intro_fn=_issuer_intro)
                         link = upload_to_drive(out_path, f"配息債條件表_{today_:%Y%m%d}.xlsx")
                         try:
                             os.remove(out_path)
                         except Exception:
                             pass
                         bot_api_ref.push_message(chat_key.split(":", 1)[1], TextSendMessage(
-                            text=f"📎 配息債條件表已完成\n{today_:%m/%d} 起未來14天還來得及參與：{n_bond} 檔，發行機構 {n_iss} 家\n\n"
-                                 f"Sheet1 條件表（評等/順位/報價/YTM/備註）\nSheet2 發行機構簡介（AI 產生，對客請以公開資訊為準）\n\n🔗 {link}"))
+                            text=f"📎 配息債條件表已完成\n{today_:%m/%d} 起未來14天還來得及參與：{n_bond} 檔，發行機構 {n_iss} 家\n"
+                                 f"（單一工作表，含評等/順位/Offer/YTM/備註/發行機構簡介）\n\n🔗 {link}"))
+                        # 手機看 Excel 不方便 → 簡介同步用文字推一份
+                        if intros:
+                            intro_txt = "🏦 發行機構簡介（AI 產生，對客請以公開資訊為準）\n\n" + "\n\n".join(
+                                f"▪ {k}\n{v}" for k, v in intros.items())
+                            push_long_message(bot_api_ref, chat_key.split(":", 1)[1], intro_txt)
                     except Exception as e:
                         print(f"[BondRadar TABLE ERROR] {e}")
                         print(_traceback.format_exc())
