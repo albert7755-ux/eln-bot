@@ -299,8 +299,8 @@
         <label>理專名稱 *</label>
         <input type="text" id="f_agent_name" placeholder="小美、庚霖">
       </div>
-      <div class="form-group">
-        <label>LINE ID（選填）</label>
+      <div class="form-group admin-only" style="display:none">
+        <label>LINE ID（管理員填寫）</label>
         <input type="text" id="f_line_id" placeholder="U1234...">
       </div>
     </div>
@@ -397,6 +397,8 @@ function loginAdmin() {
     isAdmin = true;
     document.getElementById('adminBadge').classList.remove('hidden');
     document.getElementById('adminPwd').value = '';
+    // 顯示 LINE ID 欄位
+    document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
     alert('✅ 管理員登入成功，可以修改所有商品');
     loadProducts();
   } else {
@@ -496,7 +498,7 @@ async function submitAdd() {
 
 function clearForm() {
   ['f_bond_id','f_trade_date','f_tenure_months','f_issue_date','f_valuation_date',
-   'f_maturity_date','f_coupon_pct','f_ko_type','f_line_id'].forEach(id => {
+   'f_maturity_date','f_coupon_pct','f_ko_type'].forEach(id => {
     document.getElementById(id).value = '';
   });
   document.getElementById('f_product_type').value = 'FCN';
