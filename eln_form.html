@@ -288,6 +288,7 @@
         <select id="f_ki_type">
           <option value="AKI">AKI</option>
           <option value="EKI">EKI</option>
+          <option value="None">None（無KI）</option>
         </select>
       </div>
     </div>
@@ -611,7 +612,7 @@ function buildEditForm(p) {
         'Period End Memory','NC1M Period End Memory','NC2M Period End Memory','NC3M Period End Memory'
       ]);
   html += field('KI%', 'ki_pct', p.ki_pct, 'number');
-  html += sel('KI類型', 'ki_type', p.ki_type, ['AKI','EKI']);
+  html += sel('KI類型', 'ki_type', p.ki_type, ['AKI','EKI','None']);
   html += field('Coupon%', 'coupon_pct', p.coupon_pct, 'number');
   html += field('Strike%', 'strike_pct', p.strike_pct, 'number');
   html += field('理專', 'agent_name', p.agent_name);
