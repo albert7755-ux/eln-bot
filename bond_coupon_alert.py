@@ -244,9 +244,9 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
 # ---------- Excel 條件表 ----------
 def build_coupon_sheet(path, out_path, today=None, lookahead=LOOKAHEAD_DAYS, intro_fn=None):
     """
-    把『還來得及參與』的債券輸出成 Excel 條件表。
-    intro_fn(list[str]) -> dict[str,str]：可選，傳入發行機構名單，回傳簡介（例如用 Claude 產生）
-    回傳 (out_path, 檔數, 發行機構數)
+    把『還來得及參與』的債券輸出成單一 sheet 的 Excel 條件表（手機也看得到）。
+    intro_fn(list[str]) -> dict[str,str]：可選，傳入發行機構名單，回傳簡介
+    回傳 (out_path, 檔數, 發行機構數, intros_dict)
     """
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -265,7 +265,7 @@ def build_coupon_sheet(path, out_path, today=None, lookahead=LOOKAHEAD_DAYS, int
         try:
             intros = intro_fn(issuers) or {}
         except Exception as e:
-            intros = {"_error": str(e)}
+            intros = {i: f"（簡介暫無法取得：{str(e)[:80]}）" for i in issuers}
 
     wb = Workbook()
     navy = PatternFill("solid", fgColor="0B2A4A")
@@ -274,14 +274,14 @@ def build_coupon_sheet(path, out_path, today=None, lookahead=LOOKAHEAD_DAYS, int
     thin = Side(style="thin", color="D0D0D0"); bd = Border(top=thin, bottom=thin, left=thin, right=thin)
     wrap = Alignment(vertical="top", wrap_text=True)
 
-    # Sheet 1 條件表
     ws = wb.active; ws.title = "配息債條件表"
     cols = ["最晚下單日", "配息日", "交割", "發行機構", "債券名稱", "ISIN", "產品代碼", "幣別",
-            "票面利率%", "配息頻率", "評等(S&P/Moody's/Fitch)", "債券順位", "Bid", "Offer", "YTM/YTC",
-            "到期日", "剩餘年期", "存續期間", "風險屬性", "最低申購面額", "本日額度", "備註", "來源Sheet"]
+            "票面利率%", "配息頻率", "評等(S&P/Moody's/Fitch)", "債券順位", "Offer", "YTM/YTC",
+            "到期日", "剩餘年期", "存續期間", "風險屬性", "最低申購面額", "本日額度", "備註", "發行機構簡介(AI)", "來源Sheet"]
     ws["A1"] = f"海外債配息雷達 — 還來得及參與（{today:%Y/%m/%d} 起未來{lookahead}天，共 {len(alerts)} 檔）"
     ws["A1"].font = Font(name="Arial", bold=True, size=13, color="0B2A4A")
-    ws["A2"] = "最晚交割日=配息日前1營業日；US/CA T+1、其他 T+2；營業日僅排除週六日；配息日由到期日+頻率倒推，請以實際為準"
+    ws["A2"] = ("最晚交割日=配息日前1營業日；US/CA T+1、其他 T+2；營業日僅排除週六日；配息日由到期日+頻率倒推，請以實際為準。"
+                "發行機構簡介為 AI 產生，僅供內部參考，對客說明請以公開資訊為準。")
     ws["A2"].font = Font(name="Arial", size=9, italic=True, color="666666")
     for j, c in enumerate(cols, 1):
         cell = ws.cell(row=4, column=j, value=c); cell.font = hf; cell.fill = navy
@@ -289,38 +289,20 @@ def build_coupon_sheet(path, out_path, today=None, lookahead=LOOKAHEAD_DAYS, int
     for i, a in enumerate(alerts, 5):
         vals = [a["last_trade"], a["coupon_date"], f"T+{a['lag']}", a["issuer"], a["name"], a["isin"], a["code"], a["ccy"],
                 a["coupon"], a["freq"], a["ratings"], a["seniority"],
-                a["bid"] if a["bid"] not in (None, "#VALUE!") else None,
                 a["offer"] if a["offer"] not in (None, "#VALUE!") else None,
                 a["ytm"], a["maturity"], a["years"], a["duration"], a["risk"], a["min_amt"], a["avail"],
-                a["remark"], "、".join(sorted(a["sheets"]))]
+                a["remark"], intros.get(a["issuer"], ""), "、".join(sorted(a["sheets"]))]
         for j, v in enumerate(vals, 1):
             cell = ws.cell(row=i, column=j, value=v); cell.font = bf; cell.border = bd; cell.alignment = wrap
             if isinstance(v, date): cell.number_format = "yyyy/mm/dd"
         if a["last_trade"] == today:
             for j in range(1, len(cols) + 1):
                 ws.cell(row=i, column=j).fill = PatternFill("solid", fgColor="FFF2CC")
-    widths = [11, 11, 6, 18, 24, 15, 15, 6, 9, 8, 20, 12, 8, 8, 11, 11, 8, 8, 8, 12, 8, 50, 30]
+    widths = [11, 11, 6, 18, 24, 15, 15, 6, 9, 8, 20, 12, 8, 11, 11, 8, 8, 8, 12, 8, 45, 55, 28]
     for j, w in enumerate(widths, 1): ws.column_dimensions[get_column_letter(j)].width = w
     ws.freeze_panes = "F5"; ws.auto_filter.ref = f"A4:{get_column_letter(len(cols))}{4 + len(alerts)}"
-
-    # Sheet 2 發行機構簡介
-    ws2 = wb.create_sheet("發行機構簡介")
-    ws2["A1"] = "發行機構簡介（AI 產生，僅供內部參考，對客說明請以公開資訊為準）"
-    ws2["A1"].font = Font(name="Arial", bold=True, size=13, color="0B2A4A")
-    for j, c in enumerate(["發行機構", "本次配息檔數", "簡介"], 1):
-        cell = ws2.cell(row=3, column=j, value=c); cell.font = hf; cell.fill = navy; cell.border = bd
-    cnt = {}
-    for a in alerts: cnt[a["issuer"]] = cnt.get(a["issuer"], 0) + 1
-    for i, iss in enumerate(issuers, 4):
-        ws2.cell(row=i, column=1, value=iss).font = bf
-        ws2.cell(row=i, column=2, value=cnt.get(iss, 0)).font = bf
-        c3 = ws2.cell(row=i, column=3, value=intros.get(iss, intros.get("_error", "")))
-        c3.font = bf; c3.alignment = wrap
-        for j in range(1, 4): ws2.cell(row=i, column=j).border = bd
-    ws2.column_dimensions["A"].width = 24; ws2.column_dimensions["B"].width = 12; ws2.column_dimensions["C"].width = 90
-
     wb.save(out_path)
-    return out_path, len(alerts), len(issuers)
+    return out_path, len(alerts), len(issuers), intros
 
 if __name__ == "__main__":
     p = sys.argv[1]
