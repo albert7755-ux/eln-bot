@@ -29,7 +29,8 @@ LOOKAHEAD_DAYS = 14
 DISCLAIMER = (
     "\n⚠️ 已知限制\n"
     "1. 配息日是從「到期日＋配息頻率」倒推的，少數債券付息日與到期日不同號，請以實際配息日為主\n"
-    "2. 營業日只避開週六日，未避開台美假日，假日前後請人工再確認"
+    "2. 營業日只避開週六日，未避開台美假日，假日前後請人工再確認\n"
+    "3. 🔒專投＝限專業投資人（依報價檔分頁或備註判斷）；💎高資產＝高資產客戶專屬"
 )
 
 def is_bond_pricing_file(path, filename=""):
@@ -92,6 +93,29 @@ def next_coupon_dates(maturity, freq_months, start, end):
         d -= relativedelta(months=freq_months)
     return sorted(out)
 
+def pi_tag(b):
+    """
+    申購資格：
+      🔒專投  = 出現在「_專投」sheet，或備註含「專業投資人」
+      一般    = 出現在「非專投」sheet
+      💎高資產 = 出現在「高資產」sheet（額外附註）
+    回傳如 "🔒專投" / "一般" / "🔒專投💎高資產" / "未標示"
+    """
+    sheets = b.get("sheets") or set()
+    remark = str(b.get("remark") or "")
+    is_pi = any(("專投" in n and "非專投" not in n) for n in sheets) or ("專業投資人" in remark)
+    is_np = any("非專投" in n for n in sheets)
+    is_ha = any("高資產" in n for n in sheets)
+    if is_pi:
+        tag = "🔒專投"
+    elif is_np:
+        tag = "一般"
+    else:
+        tag = "未標示"
+    if is_ha:
+        tag += "💎高資產"
+    return tag
+
 # ---------- 讀 Excel ----------
 def read_bonds(path):
     """把所有 sheet 讀成 list[dict]，並用 ISIN 去重"""
@@ -133,6 +157,9 @@ def read_bonds(path):
             isin = str(r[col["isin"]]).strip()
             if not re.match(r"^[A-Z]{2}[A-Z0-9]{9}\d$", isin):
                 continue
+            _nm = str(r[col["name"]] if "name" in col else "").strip()
+            if not _nm or _nm.startswith("#"):
+                continue
             def g(k):
                 return r[col[k]] if k in col and col[k] < len(r) else None
             sp_i = col.get("sp")
@@ -157,15 +184,29 @@ def read_bonds(path):
     return list(bonds.values())
 
 def issuer_of(name):
-    """『美林私人有限公司債3』→『美林私人有限公司』；『美國公債1』→『美國公債』"""
-    n = re.sub(r"[\s\d]+$", "", str(name)).strip()
-    if n.endswith("公司債"):
-        base = n[:-3].strip()   # 蘋果公司債 → 蘋果；Alphabet 公司債 → Alphabet
-        return base + "公司" if base.endswith("有限") else base   # 美林私人有限公司債 → 美林私人有限公司
+    """
+    債券名稱 → 發行機構（歸戶用的正規化名稱）
+    美林私人有限公司債3 / 美林私人公司債13 / 美林公司債6 → 美林
+    高盛金融國際有限公司債25 / 高盛金融公司債39 → 高盛金融
+    蘋果公司債9 → 蘋果；美國公債1 → 美國公債；西太平洋銀行債8 → 西太平洋銀行
+    """
+    n = re.sub(r"[\s\d０-９]+$", "", str(name)).strip()
     if n.endswith("公債"):
-        return n                # 美國公債、澳洲公債
-    if n.endswith("債"):
-        return n[:-1]           # 西太平洋銀行債 → 西太平洋銀行
+        return n
+    if n.endswith("公司債"):
+        n = n[:-3]
+    elif n.endswith("債"):
+        n = n[:-1]
+    n = n.strip()
+    # 反覆去掉法人型態字尾，讓同一集團不同發行主體歸成一家
+    changed = True
+    while changed:
+        changed = False
+        for suf in ("有限公司", "有限", "私人", "國際", "公司"):
+            if n.endswith(suf) and len(n) - len(suf) >= 2:
+                n = n[: -len(suf)].strip()
+                changed = True
+                break
     return n
 
 def biz_days_after(d, n):
@@ -232,13 +273,80 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
         ytm = a["ytm"] if a["ytm"] not in (None, "", 0) else "-"
         avail = "" if str(a["avail"]) == "有" else f"｜額度:{a['avail']}"
         lines.append(
-            f"{a['name']} {a['ccy']} {a['coupon']}% {a['freq']}\n"
+            f"{a['name']} {a['ccy']} {a['coupon']}% {a['freq']}｜{pi_tag(a)}\n"
             f"  配息{a['coupon_date']:%m/%d}｜T+{a['lag']}｜Offer {offer}｜YTM {ytm}{avail}"
         )
         if i + 1 >= max_lines and i + 1 < len(ok):
             lines.append(f"…另有 {len(ok)-i-1} 檔，見Excel")
             break
     lines.append(DISCLAIMER)
+    return "\n".join(lines)
+
+# ---------- 發行機構模糊搜尋 ----------
+EN_ALIAS = {
+    "apple": "蘋果", "aapl": "蘋果", "microsoft": "微軟", "msft": "微軟", "amazon": "亞馬遜", "amzn": "亞馬遜",
+    "google": "Alphabet", "alphabet": "Alphabet", "meta": "Meta", "nvidia": "輝達", "intel": "英特爾",
+    "cisco": "思科", "oracle": "甲骨文", "ibm": "IBM", "verizon": "威瑞森", "at&t": "AT&T", "tmobile": "TMobile", "t-mobile": "TMobile",
+    "merrill": "美林", "ml": "美林", "goldman": "高盛", "gs": "高盛", "morgan stanley": "摩根士丹利", "ms": "摩根士丹利",
+    "jpmorgan": "摩根大通", "jpm": "摩根大通", "citi": "花旗", "citigroup": "花旗", "wells": "富國", "bofa": "美國銀行",
+    "ubs": "瑞銀", "hsbc": "匯豐", "barclays": "巴克萊", "socgen": "法國興業", "societe generale": "法國興業", "bnp": "法國巴黎",
+    "credit agricole": "法國農業", "deutsche": "德意志", "westpac": "西太平洋", "anz": "澳盛", "nab": "澳洲國民", "cba": "澳洲聯邦",
+    "lilly": "禮來", "eli lilly": "禮來", "pfizer": "輝瑞", "abbvie": "艾伯維", "merck": "默克", "j&j": "嬌生", "johnson": "嬌生",
+    "moody": "穆迪", "moodys": "穆迪", "s&p": "標普", "walmart": "沃爾瑪", "boeing": "波音", "disney": "迪士尼",
+    "berkshire": "波克夏", "paypal": "Paypal", "treasury": "美國公債", "ust": "美國公債", "tsmc": "台積電",
+    "vodafone": "沃達豐", "toyota": "豐田", "exxon": "埃克森", "chevron": "雪佛龍", "coca": "可口可樂", "pepsi": "百事",
+    "broadcom": "博通", "qualcomm": "高通", "tesla": "特斯拉", "netflix": "Netflix", "starbucks": "星巴克", "nike": "耐吉",
+}
+
+def search_issuers(path, keyword, max_issuers=3):
+    """
+    在整份報價檔（不限配息中）模糊搜尋發行機構。
+    比對：關鍵字（不分大小寫）包含於 發行機構名 / 債券名稱 / ISIN / 產品代碼；
+    找不到時用 difflib 找最相近的機構名。
+    回傳 [(issuer, [bond,...]), ...]，最多 max_issuers 家。
+    """
+    import difflib
+    kw = str(keyword).strip().lower()
+    if not kw:
+        return []
+    # 常見英文名 → 中文（讓 /issuer apple 也找得到）
+    for en, zh in EN_ALIAS.items():
+        if kw == en or (len(kw) >= 4 and (kw in en or en in kw)):
+            kw = zh.lower()
+            break
+    groups = {}
+    for b in read_bonds(path):
+        iss = issuer_of(b["name"])
+        b["issuer"] = iss
+        groups.setdefault(iss, []).append(b)
+    hits = []
+    for iss, bl in groups.items():
+        hay = " ".join([iss] + [b["name"] for b in bl] + [b["isin"] for b in bl] + [str(b["code"] or "") for b in bl]).lower()
+        if kw in hay:
+            hits.append(iss)
+    if not hits:
+        hits = difflib.get_close_matches(keyword, list(groups.keys()), n=max_issuers, cutoff=0.6)
+    out = []
+    for iss in hits[:max_issuers]:
+        bl = sorted(groups[iss], key=lambda b: (b["maturity"] or date.max))
+        out.append((iss, bl))
+    return out
+
+def format_issuer_bonds(issuer, bonds, intro="", max_bonds=12):
+    """組成 LINE 文字：簡介 + 該機構架上債券摘要"""
+    lines = [f"🏦 {issuer}（架上 {len(bonds)} 檔）"]
+    if intro:
+        lines.append(intro)
+    lines.append("")
+    for b in bonds[:max_bonds]:
+        offer = b["offer"] if b["offer"] not in (None, "", 0, "#VALUE!", "#N/A") else "-"
+        ytm = b["ytm"] if b["ytm"] not in (None, "", 0, "#N/A") else "-"
+        mat = f"{b['maturity']:%Y/%m/%d}" if b["maturity"] else "-"
+        rt = " / ".join(x for x in str(b.get("ratings") or "").split(" / ") if x and x.upper() not in ("N/A", "NA", "NONE"))
+        rating = f"｜{rt}" if rt else ""
+        lines.append(f"▪ {b['name']} {b['ccy']} {b['coupon']}% {b['freq']}｜{pi_tag(b)}\n  到期{mat}｜Offer {offer}｜YTM {ytm}{rating}")
+    if len(bonds) > max_bonds:
+        lines.append(f"…另有 {len(bonds)-max_bonds} 檔")
     return "\n".join(lines)
 
 # ---------- Excel 條件表 ----------
@@ -275,7 +383,7 @@ def build_coupon_sheet(path, out_path, today=None, lookahead=LOOKAHEAD_DAYS, int
     wrap = Alignment(vertical="top", wrap_text=True)
 
     ws = wb.active; ws.title = "配息債條件表"
-    cols = ["最晚下單日", "配息日", "交割", "發行機構", "債券名稱", "ISIN", "產品代碼", "幣別",
+    cols = ["最晚下單日", "配息日", "交割", "申購資格", "發行機構", "債券名稱", "ISIN", "產品代碼", "幣別",
             "票面利率%", "配息頻率", "評等(S&P/Moody's/Fitch)", "債券順位", "Offer", "YTM/YTC",
             "到期日", "剩餘年期", "存續期間", "風險屬性", "最低申購面額", "本日額度", "備註", "發行機構簡介(AI)", "來源Sheet"]
     ws["A1"] = f"海外債配息雷達 — 還來得及參與（{today:%Y/%m/%d} 起未來{lookahead}天，共 {len(alerts)} 檔）"
@@ -287,7 +395,7 @@ def build_coupon_sheet(path, out_path, today=None, lookahead=LOOKAHEAD_DAYS, int
         cell = ws.cell(row=4, column=j, value=c); cell.font = hf; cell.fill = navy
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True); cell.border = bd
     for i, a in enumerate(alerts, 5):
-        vals = [a["last_trade"], a["coupon_date"], f"T+{a['lag']}", a["issuer"], a["name"], a["isin"], a["code"], a["ccy"],
+        vals = [a["last_trade"], a["coupon_date"], f"T+{a['lag']}", pi_tag(a), a["issuer"], a["name"], a["isin"], a["code"], a["ccy"],
                 a["coupon"], a["freq"], a["ratings"], a["seniority"],
                 a["offer"] if a["offer"] not in (None, "#VALUE!") else None,
                 a["ytm"], a["maturity"], a["years"], a["duration"], a["risk"], a["min_amt"], a["avail"],
@@ -298,9 +406,9 @@ def build_coupon_sheet(path, out_path, today=None, lookahead=LOOKAHEAD_DAYS, int
         if a["last_trade"] == today:
             for j in range(1, len(cols) + 1):
                 ws.cell(row=i, column=j).fill = PatternFill("solid", fgColor="FFF2CC")
-    widths = [11, 11, 6, 18, 24, 15, 15, 6, 9, 8, 20, 12, 8, 11, 11, 8, 8, 8, 12, 8, 45, 55, 28]
+    widths = [11, 11, 6, 12, 18, 24, 15, 15, 6, 9, 8, 20, 12, 8, 11, 11, 8, 8, 8, 12, 8, 45, 55, 28]
     for j, w in enumerate(widths, 1): ws.column_dimensions[get_column_letter(j)].width = w
-    ws.freeze_panes = "F5"; ws.auto_filter.ref = f"A4:{get_column_letter(len(cols))}{4 + len(alerts)}"
+    ws.freeze_panes = "G5"; ws.auto_filter.ref = f"A4:{get_column_letter(len(cols))}{4 + len(alerts)}"
     wb.save(out_path)
     return out_path, len(alerts), len(issuers), intros
 
