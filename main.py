@@ -45,6 +45,87 @@ def _bond_price_dir() -> Path:
 
 BOND_PRICE_FILE = Path(os.getenv("BOND_PRICE_FILE", "")) if os.getenv("BOND_PRICE_FILE") else (_bond_price_dir() / "bond_pricing_latest.xlsx")
 
+# 海外債群組白名單：在該群裡龍蝦只回這些指令，其餘一律不理（比照 ELN 群）
+BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "alert", "rating", "help"}
+
+def is_bond_group_chat(chat_key: str) -> bool:
+    """這個 chat 是不是用 /coupon settarget 設定的海外債群組"""
+    try:
+        t = load_targets() or {}
+        return bool(t.get("bond")) and t.get("bond_type") in ("group", "room") and chat_key.split(":", 1)[1] == t.get("bond")
+    except Exception:
+        return False
+
+BOND_GROUP_HELP = (
+    "💰 海外債配息雷達（本群專用指令）\n"
+    "/coupon → 3個營業日內要下單的配息債\n"
+    "/coupon 7 → 7個營業日內\n"
+    "/coupon all → 未來14天全部\n"
+    "/coupon table → Excel條件表＋發行機構簡介\n"
+    "/issuer 蘋果 → 發行機構簡介＋架上債券（模糊搜尋，可用英文/ISIN）\n"
+    "/alert 蘋果 2043 ytm>5.2 → 到價通知（list 查看 / del 刪除）\n"
+    "/rating → 立即掃描外部信評新聞（list / watch / unwatch）\n"
+    "上傳 Bond_Pricing Excel → 更新報價檔並重算（自動比對信評異動/新上架）\n"
+    "（每天 06:45 自動推播）\n"
+    "\n🔒專投＝限專業投資人；💎高資產＝高資產客戶專屬"
+)
+
+BOND_SNAPSHOT_FILE = BOND_PRICE_FILE.parent / "bond_snapshot.json"
+
+def check_bond_alerts(bot_api=None, source="upload"):
+    """
+    比對所有 active 的到價條件；命中就推播給設定者並關閉該條件（一次性）。
+    在『上傳新報價檔』與『每日 06:45』各跑一次。回傳命中數。
+    """
+    bot_api = bot_api or line_bot_api
+    if not (_BOND_RADAR_OK and BOND_PRICE_FILE.exists()):
+        return 0
+    from bond_coupon_alert import bond_snapshot, first_num
+    snap = bond_snapshot(str(BOND_PRICE_FILE))
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT id, chat_id, isin, bond_name, field, op, threshold FROM bond_price_alert WHERE active = TRUE")).fetchall()
+    hit = 0
+    ops = {">": lambda a, b: a > b, ">=": lambda a, b: a >= b, "<": lambda a, b: a < b, "<=": lambda a, b: a <= b}
+    for aid, chat_id, isin, bname, field, op, thr in rows:
+        b = snap.get(isin)
+        if not b:
+            continue
+        cur = b.get("ytm") if field == "ytm" else b.get("offer")
+        if cur is None:
+            continue
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE bond_price_alert SET last_value=:v WHERE id=:i"), {"v": cur, "i": aid})
+        if ops.get(op, lambda a, b: False)(cur, thr):
+            hit += 1
+            fname = "YTM" if field == "ytm" else "Offer"
+            msg = (f"🎯 到價通知 #{aid}\n{bname}\n{fname} {cur} 已 {op} {thr}（設定條件）\n"
+                   f"目前 Offer {b.get('offer')}｜YTM {b.get('ytm')}\n"
+                   f"（本條件已自動關閉，要繼續追請重新 /alert 設定；來源：{'新報價檔' if source=='upload' else '每日檢查'}）")
+            try:
+                bot_api.push_message(chat_id, TextSendMessage(text=msg))
+            except Exception as e:
+                print(f"[BondAlert] push fail {e}")
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE bond_price_alert SET active=FALSE, triggered_at=NOW() WHERE id=:i"), {"i": aid})
+    return hit
+
+def snapshot_and_diff():
+    """上傳新報價檔後：跟上一份快照比對（信評異動/新上架/下架），再覆蓋快照。回傳文字（無異動則空字串）"""
+    from bond_coupon_alert import bond_snapshot, diff_snapshots, format_snapshot_diff
+    new = bond_snapshot(str(BOND_PRICE_FILE))
+    old = {}
+    if BOND_SNAPSHOT_FILE.exists():
+        try:
+            old = json.loads(BOND_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            old = {}
+    txt_ = format_snapshot_diff(diff_snapshots(old, new)) if old else "（首次建立快照，下次上傳起會比對信評異動／新上架／下架）"
+    try:
+        BOND_SNAPSHOT_FILE.write_text(json.dumps(new, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        print(f"[BondSnapshot] write fail {e}")
+    return txt_
+
 # --- Alert ticker aliases ---
 ALERT_TICKER_ALIAS = {
     "dxy": "DX-Y.NYB", "spx": "^GSPC", "sp500": "^GSPC", "ndx": "^NDX",
@@ -102,6 +183,22 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 def init_db():
     with engine.begin() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS bond_rating_watch (
+            issuer TEXT PRIMARY KEY, en_name TEXT, added_by TEXT, active BOOLEAN NOT NULL DEFAULT TRUE,
+            added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_checked TIMESTAMPTZ
+        );"""))
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS bond_rating_news_seen (
+            link TEXT PRIMARY KEY, issuer TEXT, title TEXT, seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );"""))
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS bond_price_alert (
+            id SERIAL PRIMARY KEY, chat_id TEXT NOT NULL, isin TEXT NOT NULL, bond_name TEXT,
+            field TEXT NOT NULL, op TEXT NOT NULL, threshold DOUBLE PRECISION NOT NULL,
+            active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            triggered_at TIMESTAMPTZ, last_value DOUBLE PRECISION
+        );"""))
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS bond_issuer_intro (
             issuer TEXT PRIMARY KEY, intro TEXT NOT NULL, source TEXT,
@@ -1044,6 +1141,13 @@ def handle_text_message(event):
             raw_cmd = text_raw[1:]
         else:
             cmd = tl.split()[0] if tl.split() else tl
+        # ── 海外債群組：只回白名單指令，一般聊天/其他指令一律靜默 ──
+        if is_group and is_bond_group_chat(ck):
+            if not tl.startswith("/") or cmd not in BOND_GROUP_ALLOWED_CMDS:
+                return
+            if cmd == "help":
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=BOND_GROUP_HELP))
+                return
             raw_cmd = text_raw
         parts = text_raw.split(" ", 1)
         
@@ -1141,7 +1245,7 @@ def handle_text_message(event):
                            "🔔 警示\n/alert add  /alert list  /alert del\n輸入 /help alert 看完整範例\n─────────────────\n"
                            "📚 文章庫\n/save  /unread  /read  /article  /del  /web\n直接傳圖片 → 自動儲存分析\n輸入 /help save 看完整說明\n─────────────────\n"
                            "📊 基金淨值 & 債券報價\n/fundnav → 手動更新基金淨值\n/bondnav → 手動觸發債券報價更新（94筆，約30分鐘）\n/tracklog → 查看執行記錄\n─────────────────\n"
-                           "💰 海外債配息雷達\n/coupon → 3個營業日內要下單的配息債\n/coupon 7 → 7個營業日內\n/coupon all → 未來14天全部\n/coupon table → Excel條件表＋發行機構簡介（未來14天）\n/issuer 蘋果 → 單一發行機構簡介＋架上債券（模糊搜尋）\n上傳 Bond_Pricing Excel → 自動更新報價檔並重算\n（每天 06:45 自動推播）\n─────────────────\n"
+                           "💰 海外債配息雷達\n/coupon → 3個營業日內要下單的配息債\n/coupon 7 → 7個營業日內\n/coupon all → 未來14天全部\n/coupon table → Excel條件表＋發行機構簡介（未來14天）\n/issuer 蘋果 → 單一發行機構簡介＋架上債券（模糊搜尋）\n/alert 蘋果 2043 ytm>5.2 → YTM/Offer 到價通知（list / del）\n/rating → 外部信評新聞掃描（Google News）；list / watch / unwatch；每天 07:00 自動\n/coupon subscribe → 理專私訊訂閱每日推播（unsubscribe 取消）\n/coupon settarget → 在海外債群組打一次，每日推播也推到該群（off 取消）\n上傳 Bond_Pricing Excel → 自動更新報價檔並重算（比對信評異動/新上架/下架）\n（每天 06:45 自動推播，含30天內到期提醒）\n─────────────────\n"
                            "📧 其他\n/mail  /invest  /forget  /spending\n上傳錄音 → 自動逐字稿 / 摘要\n上傳檔案 → 自動分析\n─────────────────\n"
                            "進階說明：/help alert、/help eln、/help report、/help save")
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
@@ -1801,6 +1905,107 @@ def handle_text_message(event):
             import threading
             threading.Thread(target=_run_bondnav, daemon=True).start()
             return
+        if cmd == "rating":
+            # /rating              → 立刻掃一次監控名單的信評新聞
+            # /rating list         → 監控名單
+            # /rating watch 台積電  → 手動加入   /rating unwatch 台積電 → 移除
+            # /rating fix          → 補英文名
+            arg = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
+            al = arg.lower()
+            chat_id = ck.split(":", 1)[1]
+            if al in ("list", "ls", "名單"):
+                with engine.begin() as conn:
+                    rows = conn.execute(text("SELECT issuer, en_name, added_by, last_checked FROM bond_rating_watch WHERE active=TRUE ORDER BY issuer")).fetchall()
+                if not rows:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="監控名單是空的。跑一次 /coupon table 會自動加入，或 /rating watch 蘋果")); return
+                lines = [f"📡 信評監控名單（{len(rows)} 家，每天 07:00 掃 Google News）"]
+                for iss, en, by, lc in rows:
+                    lines.append(f"▪ {iss}（{en or '英文名待補'}）")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900])); return
+            if al.startswith(("watch ", "add ", "加入 ")):
+                name = arg.split(" ", 1)[1].strip()
+                with engine.begin() as conn:
+                    conn.execute(text("INSERT INTO bond_rating_watch(issuer, added_by, active) VALUES (:i,:b,TRUE) ON CONFLICT (issuer) DO UPDATE SET active=TRUE"), {"i": name, "b": chat_id})
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已加入監控：{name}（英文名會自動補）")); return
+            if al.startswith(("unwatch ", "del ", "remove ", "移除 ")):
+                name = arg.split(" ", 1)[1].strip()
+                with engine.begin() as conn:
+                    n = conn.execute(text("UPDATE bond_rating_watch SET active=FALSE WHERE issuer=:i"), {"i": name}).rowcount
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已移除：{name}" if n else f"名單裡沒有「{name}」")); return
+            if al in ("fix", "補英文"):
+                n = ensure_en_names()
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已補 {n} 家英文名")); return
+            if al in ("", "check", "now", "掃描"):
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📡 掃描監控名單的信評新聞中，約 30～90 秒..."))
+                def _run_rating(chat_id_, bot_api_ref):
+                    try:
+                        msg = run_rating_news_check(days=3)
+                        push_long_message(bot_api_ref, chat_id_, msg or "📡 近 3 天監控名單沒有新的信評動作新聞。")
+                    except Exception as e:
+                        bot_api_ref.push_message(chat_id_, TextSendMessage(text=f"❌ 信評掃描失敗：{str(e)[:200]}"))
+                import threading
+                threading.Thread(target=_run_rating, args=(chat_id, _bot_api), daemon=True).start()
+                return
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="用法：/rating（立即掃描）\n/rating list\n/rating watch 蘋果\n/rating unwatch 蘋果")); return
+        if cmd == "alert":
+            # /alert 蘋果 2043 ytm>5.2   → 設定到價條件（YTM 或 Offer）
+            # /alert US037833 offer<90
+            # /alert list  /alert del 3
+            if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔，請先把 Bond_Pricing Excel 傳給我。"))
+                return
+            arg = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
+            chat_id = ck.split(":", 1)[1]
+            usage = ("🎯 到價通知用法：\n/alert 蘋果 2043 ytm>5.2\n/alert US037833 offer<90\n/alert 蘋果9 ytm>=5\n"
+                     "/alert list → 我的條件\n/alert del 3 → 刪除 #3\n（每次更新報價檔＋每天 06:45 檢查，命中推播一次後自動關閉）")
+            if not arg:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=usage)); return
+            al = arg.lower()
+            if al in ("list", "ls", "清單"):
+                with engine.begin() as conn:
+                    rows = conn.execute(text("SELECT id, bond_name, field, op, threshold, last_value FROM bond_price_alert WHERE chat_id=:c AND active=TRUE ORDER BY id"), {"c": chat_id}).fetchall()
+                if not rows:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有進行中的到價條件。\n" + usage)); return
+                lines = ["🎯 進行中的到價條件"]
+                for r in rows:
+                    lv = f"｜目前 {r[5]}" if r[5] is not None else ""
+                    lines.append(f"#{r[0]} {r[1]}｜{r[2].upper()} {r[3]} {r[4]}{lv}")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900])); return
+            if al.startswith(("del ", "delete ", "刪除 ", "rm ")):
+                try:
+                    aid = int(al.split()[1])
+                except Exception:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="請給編號，例：/alert del 3")); return
+                with engine.begin() as conn:
+                    n = conn.execute(text("UPDATE bond_price_alert SET active=FALSE WHERE id=:i AND chat_id=:c AND active=TRUE"), {"i": aid, "c": chat_id}).rowcount
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已刪除 #{aid}" if n else f"找不到 #{aid}")); return
+            m = re.search(r"(ytm|offer|price|殖利率|價格|yield)\s*(>=|<=|>|<|≥|≤)\s*(-?\d+(?:\.\d+)?)\s*$", arg, flags=re.I)
+            if not m:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="看不懂條件 🤔\n" + usage)); return
+            field_raw, op, thr = m.group(1).lower(), m.group(2).replace("≥", ">=").replace("≤", "<="), float(m.group(3))
+            field = "ytm" if field_raw in ("ytm", "殖利率", "yield") else "offer"
+            keyword = arg[:m.start()].strip()
+            if not keyword:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請指定債券，例：/alert 蘋果 2043 ytm>5.2")); return
+            from bond_coupon_alert import find_bonds, first_num
+            hits = find_bonds(str(BOND_PRICE_FILE), keyword)
+            if not hits:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到「{keyword}」，可用 /issuer 查名稱或改用 ISIN。")); return
+            if len(hits) > 1:
+                lines = [f"「{keyword}」對到 {len(hits)} 檔，請加到期年份或用 ISIN 指定："]
+                for b in hits:
+                    lines.append(f"▪ {b['name']}｜到期 {b['maturity']:%Y/%m/%d}｜{b['isin']}")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900])); return
+            b = hits[0]
+            cur = first_num(b["ytm"]) if field == "ytm" else first_num(b["offer"])
+            with engine.begin() as conn:
+                aid = conn.execute(text("""INSERT INTO bond_price_alert(chat_id, isin, bond_name, field, op, threshold, last_value)
+                                          VALUES (:c,:i,:n,:f,:o,:t,:v) RETURNING id"""),
+                                   {"c": chat_id, "i": b["isin"], "n": b["name"], "f": field, "o": op, "t": thr, "v": cur}).scalar()
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=f"✅ 已設定到價通知 #{aid}\n{b['name']}（{b['isin']}）\n條件：{field.upper()} {op} {thr}\n目前：Offer {b['offer']}｜YTM {b['ytm']}\n"
+                     f"每次更新報價檔＋每天 06:45 檢查，命中會推播一次。/alert list 查看"))
+            return
         if cmd == "issuer" or cmd.startswith("issuer "):
             # /issuer 蘋果   → 該發行機構簡介 + 架上所有債券（模糊搜尋，不限配息中）
             kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
@@ -1844,6 +2049,55 @@ def handle_text_message(event):
             parts = raw_cmd.split()
             arg = parts[1].lower() if len(parts) > 1 else ""
             _today = datetime.now(TZ_TAIPEI).date()
+            if arg in ("settarget", "設定推播"):
+                # 在海外債群組裡打 /coupon settarget → 每天 06:45 配息雷達推到這個群
+                targets = load_targets()
+                if event.source.type == "group":
+                    tid, ttype = event.source.group_id, "group"
+                elif event.source.type == "room":
+                    tid, ttype = event.source.room_id, "room"
+                else:
+                    tid, ttype = event.source.user_id, "user"
+                targets["bond"] = tid
+                targets["bond_type"] = ttype
+                save_targets(targets)
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=f"✅ 已設定：每天 06:45 海外債配息雷達推播到這個{'群組' if ttype != 'user' else '對話'}。\n取消請打 /coupon settarget off"))
+                return
+            if arg in ("off",) or (len(parts) > 2 and parts[1].lower() == "settarget" and parts[2].lower() == "off"):
+                targets = load_targets()
+                targets.pop("bond", None); targets.pop("bond_type", None)
+                save_targets(targets)
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已取消群組推播，之後只推給 Albert 個人。"))
+                return
+            if arg in ("subscribe", "sub", "訂閱"):
+                # 理專在一對一私訊裡打 /coupon subscribe → 每天 06:45 個別收到配息雷達
+                if event.source.type != "user":
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="請私訊 Albert Claw 打 /coupon subscribe 訂閱個人推播；群組請用 /coupon settarget。"))
+                    return
+                targets = load_targets()
+                subs = targets.get("bond_subscribers", [])
+                if event.source.user_id in subs:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="你已經訂閱過了 ✅ 每天 06:45 會收到海外債配息雷達。\n取消請打 /coupon unsubscribe"))
+                    return
+                subs.append(event.source.user_id)
+                targets["bond_subscribers"] = subs
+                save_targets(targets)
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 訂閱成功！每天 06:45（週一～五）會收到海外債配息雷達。\n目前訂閱人數：{len(subs)}\n取消請打 /coupon unsubscribe"))
+                return
+            if arg in ("unsubscribe", "unsub", "取消訂閱"):
+                targets = load_targets()
+                subs = [u for u in targets.get("bond_subscribers", []) if u != getattr(event.source, "user_id", None)]
+                targets["bond_subscribers"] = subs
+                save_targets(targets)
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已取消訂閱，之後不會再收到每日配息雷達。"))
+                return
+            if arg in ("subscribers", "subs", "訂閱名單"):
+                targets = load_targets()
+                subs = targets.get("bond_subscribers", [])
+                grp = "有" if targets.get("bond") else "無"
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📋 海外債配息雷達推播對象\n個人訂閱：{len(subs)} 人\n群組推播：{grp}\n（LINE 不提供姓名，只有 ID；理專自己打 /coupon subscribe 就會加入）"))
+                return
             if arg in ("table", "表", "excel", "xlsx"):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 正在整理配息債條件表＋發行機構簡介，約 30～60 秒，完成後傳連結給你..."))
                 def _run_coupon_table(chat_key, bot_api_ref, today_):
@@ -2184,6 +2438,10 @@ def handle_file_message(event):
         filename = getattr(event.message, "file_name", "") or ""
         ext = Path(filename).suffix.lower()
         print("[FILE]", ck, filename)
+        # ── 海外債群組：只收 Bond_Pricing 報價檔（.xlsx），其他檔案不理 ──
+        _bond_group = event.source.type in ("group", "room") and is_bond_group_chat(ck)
+        if _bond_group and ext not in (".xlsx", ".xlsm"):
+            return
         message_id = event.message.id
         content = _bot_api.get_message_content(message_id)
         tmp_path = UPLOAD_DIR / f"upload_{int(datetime.now(TZ_TAIPEI).timestamp())}{ext}"
@@ -2230,6 +2488,12 @@ def handle_file_message(event):
             except Exception as _e:
                 print(f"[BondRadar] 偵測失敗：{_e}")
         print(f"[BondRadar] 模組OK={_BOND_RADAR_OK} 檔名像債券={_looks_like_bond} 偵測結果={_is_bond}")
+        if _bond_group and not _is_bond:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+            return
         if _looks_like_bond and not _BOND_RADAR_OK:
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text="⚠️ 檔名看起來是海外債報價檔，但 bond_coupon_alert.py 模組沒有載入成功。\n請確認該檔案已放進 repo 根目錄並重新部署（Render Logs 搜尋 [BondRadar] 看錯誤原因）。"))
@@ -2245,6 +2509,19 @@ def handle_file_message(event):
                     write_job_log("海外債配息雷達", "file_updated", fname)
                     msg = _bond_build_alert(str(BOND_PRICE_FILE), today=datetime.now(TZ_TAIPEI).date())
                     push_long_message(bot_api_ref, chat_key.split(":", 1)[1], "✅ 報價檔已更新\n\n" + msg)
+                    # 信評異動 / 新上架 / 下架
+                    try:
+                        diff_txt = snapshot_and_diff()
+                        if diff_txt:
+                            push_long_message(bot_api_ref, chat_key.split(":", 1)[1], "📋 與上一份報價檔比對\n" + diff_txt)
+                    except Exception as e:
+                        print(f"[BondSnapshot ERROR] {e}")
+                    # 到價通知
+                    try:
+                        n_hit = check_bond_alerts(bot_api_ref, source="upload")
+                        print(f"[BondAlert] upload check hits={n_hit}")
+                    except Exception as e:
+                        print(f"[BondAlert ERROR] {e}")
                 except Exception as e:
                     print(f"[BondRadar ERROR] {e}")
                     print(_traceback.format_exc())
@@ -2311,6 +2588,8 @@ def handle_image_message(event):
     try:
         ck = chat_key_of(event)
         print("[IMAGE]", ck)
+        if event.source.type in ("group", "room") and is_bond_group_chat(ck):
+            return  # 海外債群組不處理圖片
         message_id = event.message.id
         content = _bot_api.get_message_content(message_id)
         image_data = b""
@@ -2373,6 +2652,8 @@ def handle_audio_message(event, _override_bot_api=None):
     _bot_api = _override_bot_api or line_bot_api
     ck = chat_key_of(event)
     print(f"[AUDIO] {ck}")
+    if event.source.type in ("group", "room") and is_bond_group_chat(ck):
+        return  # 海外債群組不處理語音
     try:
         _bot_api.reply_message(event.reply_token, TextSendMessage(text="🎙️ 收到語音，轉文字中，請稍候..."))
         message_id = event.message.id
@@ -2688,84 +2969,222 @@ def job_auto_tracking():
     except Exception as e:
         write_job_log("ELN追蹤", "error", str(e))
 
-def get_issuer_intros(issuers):
-    """先查 DB 快取，缺的才叫 AI；AI 依序試 Claude → OpenAI → Gemini"""
-    intros = {}
-    with engine.begin() as conn:
-        rows = conn.execute(text("SELECT issuer, intro FROM bond_issuer_intro")).fetchall()
-    cache = {r[0]: r[1] for r in rows}
-    missing = []
-    for iss in issuers:
-        if iss in cache:
-            intros[iss] = cache[iss]
-        else:
-            missing.append(iss)
-    if not missing:
-        return intros
-    prompt = ("你是台灣銀行財富管理部門的固定收益研究員。請針對下列債券發行機構各寫一段 60～100 字的繁體中文簡介，"
-              "內容包含：主要業務、總部所在國家、在產業中的地位、信用體質重點（例如投資等級/政府支持/主要風險）。"
-              "語氣專業中性，不要投資建議。只回傳 JSON 物件，key 為發行機構名稱（必須跟輸入完全一致），value 為簡介文字，不要任何其他文字或 markdown。\n\n發行機構名單：\n"
-              + "\n".join(f"- {x}" for x in missing))
+def llm_json_fallback(prompt, max_tokens=4000):
+    """
+    要 JSON 的 LLM 呼叫，依序 Claude → OpenAI → Gemini，回傳 (parsed_json, source, errors)。
+    任一成功就回傳；全失敗回 (None, "", errors)。
+    """
     def _parse(raw):
         raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M).strip()
         return json.loads(raw)
-    got, source, errs = None, "", []
-    # Claude
+    errs = []
     try:
-        resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=4000,
+        resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=max_tokens,
                                              messages=[{"role": "user", "content": prompt}])
-        got = _parse("".join(getattr(b, "text", "") for b in resp.content)); source = "claude"
+        return _parse("".join(getattr(b, "text", "") for b in resp.content)), "claude", errs
     except Exception as e:
         errs.append(f"claude:{str(e)[:60]}")
-    # OpenAI
-    if got is None and openai_client:
+    if openai_client:
         try:
-            resp = openai_client.chat.completions.create(model="gpt-4.1-mini", temperature=0.3, max_tokens=4000,
+            resp = openai_client.chat.completions.create(model="gpt-4.1-mini", temperature=0.3, max_tokens=max_tokens,
                                                          messages=[{"role": "user", "content": prompt}])
-            got = _parse(resp.choices[0].message.content); source = "openai"
+            return _parse(resp.choices[0].message.content), "openai", errs
         except Exception as e:
             errs.append(f"openai:{str(e)[:60]}")
-    # Gemini
-    if got is None and GEMINI_API_KEY:
+    if GEMINI_API_KEY:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
             payload = {"contents": [{"parts": [{"text": prompt}]}]}
             req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
             with urllib.request.urlopen(req, timeout=90) as r_:
                 data = json.loads(r_.read().decode("utf-8"))
-            got = _parse(data["candidates"][0]["content"]["parts"][0]["text"]); source = "gemini"
+            return _parse(data["candidates"][0]["content"]["parts"][0]["text"]), "gemini", errs
         except Exception as e:
             errs.append(f"gemini:{str(e)[:60]}")
-    if got is None:
-        for iss in missing:
-            intros[iss] = "（簡介暫無法取得，AI 服務不可用：" + "；".join(errs)[:120] + "）"
-        return intros
+    return None, "", errs
+
+def get_issuer_intros(issuers):
+    """先查 DB 快取，缺的才叫 AI（Claude → OpenAI → Gemini）；同時取得英文名並自動加入信評監控名單"""
+    intros = {}
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT issuer, intro FROM bond_issuer_intro")).fetchall()
+    cache = {r[0]: r[1] for r in rows}
+    missing = [i for i in issuers if i not in cache]
+    for iss in issuers:
+        if iss in cache:
+            intros[iss] = cache[iss]
+    if missing:
+        prompt = ("你是台灣銀行財富管理部門的固定收益研究員。請針對下列債券發行機構各寫一段 60～100 字的繁體中文簡介，"
+                  "內容包含：主要業務、總部所在國家、在產業中的地位、信用體質重點（例如投資等級/政府支持/主要風險）。"
+                  "語氣專業中性，不要投資建議。同時給出該機構在國際新聞中最常用的英文名稱（短名，例如 Apple、Verizon、Goldman Sachs、U.S. Treasury）。"
+                  "只回傳 JSON 物件，key 為發行機構名稱（必須跟輸入完全一致），value 為物件 {\"intro\": 簡介, \"en\": 英文名}，不要任何其他文字或 markdown。\n\n發行機構名單：\n"
+                  + "\n".join(f"- {x}" for x in missing))
+        got, source, errs = llm_json_fallback(prompt)
+        if got is None:
+            for iss in missing:
+                intros[iss] = "（簡介暫無法取得，AI 服務不可用：" + "；".join(errs)[:120] + "）"
+        else:
+            with engine.begin() as conn:
+                for iss in missing:
+                    v = got.get(iss, {})
+                    if isinstance(v, str):
+                        v = {"intro": v, "en": ""}
+                    txt_ = str(v.get("intro", "")).strip()
+                    en_ = str(v.get("en", "")).strip()
+                    if txt_:
+                        intros[iss] = txt_
+                        conn.execute(text("""INSERT INTO bond_issuer_intro(issuer, intro, source, updated_at)
+                                             VALUES (:i, :t, :s, NOW())
+                                             ON CONFLICT (issuer) DO UPDATE SET intro=EXCLUDED.intro, source=EXCLUDED.source, updated_at=NOW()"""),
+                                     {"i": iss, "t": txt_, "s": source})
+                    else:
+                        intros[iss] = "（AI 未回傳此機構簡介）"
+                    if en_:
+                        conn.execute(text("""INSERT INTO bond_rating_watch(issuer, en_name, added_by, active)
+                                             VALUES (:i, :e, 'auto', TRUE)
+                                             ON CONFLICT (issuer) DO UPDATE SET en_name=COALESCE(bond_rating_watch.en_name, EXCLUDED.en_name)"""),
+                                     {"i": iss, "e": en_})
+    # 已有簡介但還沒進監控名單的（例如舊快取）→ 也加進去，英文名先留空，之後 /rating fix 補
+    with engine.begin() as conn:
+        for iss in issuers:
+            conn.execute(text("""INSERT INTO bond_rating_watch(issuer, added_by, active) VALUES (:i, 'auto', TRUE)
+                                 ON CONFLICT (issuer) DO NOTHING"""), {"i": iss})
+    return intros
+
+def ensure_en_names():
+    """幫監控名單裡沒有英文名的機構補英文名（一次 LLM 呼叫）"""
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT issuer FROM bond_rating_watch WHERE active=TRUE AND (en_name IS NULL OR en_name='')")).fetchall()
+    missing = [r[0] for r in rows]
+    if not missing:
+        return 0
+    prompt = ("請給出下列債券發行機構在國際財經新聞中最常用的英文短名（例如 蘋果→Apple、威瑞森電信→Verizon、高盛金融→Goldman Sachs、美國公債→U.S. Treasury）。"
+              "只回傳 JSON 物件，key 為中文名（與輸入完全一致），value 為英文名。\n\n" + "\n".join(f"- {x}" for x in missing))
+    got, _, _ = llm_json_fallback(prompt, max_tokens=2000)
+    if not got:
+        return 0
+    n = 0
     with engine.begin() as conn:
         for iss in missing:
-            txt_ = str(got.get(iss, "")).strip()
-            if txt_:
-                intros[iss] = txt_
-                conn.execute(text("""INSERT INTO bond_issuer_intro(issuer, intro, source, updated_at)
-                                     VALUES (:i, :t, :s, NOW())
-                                     ON CONFLICT (issuer) DO UPDATE SET intro=EXCLUDED.intro, source=EXCLUDED.source, updated_at=NOW()"""),
-                             {"i": iss, "t": txt_, "s": source})
-            else:
-                intros[iss] = "（AI 未回傳此機構簡介）"
-    return intros
+            en_ = str(got.get(iss, "")).strip()
+            if en_:
+                conn.execute(text("UPDATE bond_rating_watch SET en_name=:e WHERE issuer=:i"), {"e": en_, "i": iss})
+                n += 1
+    return n
+
+def run_rating_news_check(days=2, use_llm=True):
+    """
+    掃監控名單的 Google News RSS，過濾已推過的連結，（可選）用 LLM 過濾出真正的評等動作並中文摘要。
+    回傳推播用文字（沒有新聞則空字串）。
+    """
+    from bond_rating_news import fetch_rating_news, format_news_block
+    ensure_en_names()
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT issuer, en_name FROM bond_rating_watch WHERE active=TRUE ORDER BY issuer")).fetchall()
+        seen = {r[0] for r in conn.execute(text("SELECT link FROM bond_rating_news_seen WHERE seen_at > NOW() - INTERVAL '30 days'")).fetchall()}
+    if not rows:
+        return ""
+    fresh = {}
+    for iss, en in rows:
+        items = fetch_rating_news(en or "", zh_name=iss if iss != (en or "") else "", days=days)
+        items = [it for it in items if it["link"] not in seen]
+        if items:
+            fresh[iss] = items
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE bond_rating_watch SET last_checked=NOW() WHERE issuer=:i"), {"i": iss})
+    if not fresh:
+        return ""
+    # LLM 二次過濾：只留「真的評等/展望動作」，順便中文一句話
+    keep = fresh
+    summary_map = {}
+    if use_llm:
+        flat = []
+        for iss, items in fresh.items():
+            for k, it in enumerate(items):
+                flat.append({"id": f"{iss}|{k}", "issuer": iss, "title": it["title"], "source": it["source"]})
+        prompt = ("以下是新聞標題清單。請只挑出『信評機構（Moody's/S&P/Fitch）對該發行機構做出的評等、展望或觀察名單動作』的標題，"
+                  "排除產品/財報/股價等無關新聞。回傳 JSON 物件，key 為 id，value 為 20 字內的繁體中文摘要（例如「穆迪將展望調為負向」）。沒有符合的回傳 {}。\n\n"
+                  + json.dumps(flat, ensure_ascii=False))
+        got, _, _ = llm_json_fallback(prompt, max_tokens=3000)
+        if isinstance(got, dict):
+            keep = {}
+            for iss, items in fresh.items():
+                sel = []
+                for k, it in enumerate(items):
+                    key = f"{iss}|{k}"
+                    if key in got:
+                        it["zh"] = str(got[key])
+                        sel.append(it)
+                if sel:
+                    keep[iss] = sel
+    if not keep:
+        # 全部被 LLM 判定為雜訊：仍記錄為已看過，避免明天重複評估
+        with engine.begin() as conn:
+            for iss, items in fresh.items():
+                for it in items:
+                    conn.execute(text("INSERT INTO bond_rating_news_seen(link, issuer, title) VALUES (:l,:i,:t) ON CONFLICT DO NOTHING"),
+                                 {"l": it["link"], "i": iss, "t": it["title"][:300]})
+        return ""
+    blocks = ["🚨 外部信評異動雷達（Google News，近 %d 天）" % days]
+    with engine.begin() as conn:
+        for iss, items in keep.items():
+            lines = [f"🏦 {iss}"]
+            for it in items[:4]:
+                d = it["published"].astimezone(TZ_TAIPEI).strftime("%m/%d") if it["published"] else ""
+                zh = f"｜{it['zh']}" if it.get("zh") else ""
+                src = f"（{it['source']}）" if it["source"] else ""
+                lines.append(f"▪ {d} {it['title']}{src}{zh}\n  {it['link']}")
+                conn.execute(text("INSERT INTO bond_rating_news_seen(link, issuer, title) VALUES (:l,:i,:t) ON CONFLICT DO NOTHING"),
+                             {"l": it["link"], "i": iss, "t": it["title"][:300]})
+            blocks.append("\n".join(lines))
+        # 未過濾但被排除的也記為已看過
+        for iss, items in fresh.items():
+            for it in items:
+                conn.execute(text("INSERT INTO bond_rating_news_seen(link, issuer, title) VALUES (:l,:i,:t) ON CONFLICT DO NOTHING"),
+                             {"l": it["link"], "i": iss, "t": it["title"][:300]})
+    blocks.append("※ 新聞為 AI 初篩，請點連結確認原文；本行報價檔的評等以總行更新為準")
+    return "\n\n".join(blocks)
+
+def job_bond_rating_news():
+    """每天 07:00 外部信評新聞掃描，推給配息雷達同一批對象"""
+    now = datetime.now(TZ_TAIPEI_PYTZ)
+    write_job_log("信評新聞雷達", "started", now.strftime('%Y-%m-%d %H:%M'))
+    user_id = os.getenv("LINE_USER_ID", "")
+    _t = load_targets() or {}
+    recipients = [t for t in dict.fromkeys([user_id, _t.get("bond", "")] + list(_t.get("bond_subscribers", []))) if t]
+    try:
+        msg = run_rating_news_check(days=2)
+        if not msg:
+            write_job_log("信評新聞雷達", "success", "無新評等新聞")
+            return
+        for rid in recipients:
+            try:
+                push_long_message(line_bot_api, rid, msg)
+            except Exception as e:
+                print(f"[RatingNews] push fail {e}")
+        write_job_log("信評新聞雷達", "success", f"推播 {len(recipients)} 個對象")
+    except Exception as e:
+        write_job_log("信評新聞雷達", "error", str(e))
 
 def job_bond_coupon_radar():
     """每天 06:45 推播海外債配息雷達給 Albert（週一～週五）"""
     now = datetime.now(TZ_TAIPEI_PYTZ)
     write_job_log("海外債配息雷達", "started", now.strftime('%Y-%m-%d %H:%M'))
     user_id = os.getenv("LINE_USER_ID", "")
-    if not user_id:
-        write_job_log("海外債配息雷達", "skipped", "缺少 LINE_USER_ID")
+    _t = load_targets() or {}
+    bond_target = _t.get("bond", "")
+    subscribers = _t.get("bond_subscribers", [])
+    # 推播對象：Albert 個人 ＋ 海外債群組（/coupon settarget）＋ 個人訂閱者（/coupon subscribe）；去重
+    recipients = [t for t in dict.fromkeys([user_id, bond_target] + list(subscribers)) if t]
+    if not recipients:
+        write_job_log("海外債配息雷達", "skipped", "缺少推播對象（LINE_USER_ID / /coupon settarget）")
         return
     try:
         if not _BOND_RADAR_OK:
             raise RuntimeError("bond_coupon_alert 模組未載入")
         if not BOND_PRICE_FILE.exists():
-            line_bot_api.push_message(user_id, TextSendMessage(text="📭 配息雷達：還沒有海外債報價檔，請把 Bond_Pricing Excel 傳給我。"))
+            if user_id:
+                line_bot_api.push_message(user_id, TextSendMessage(text="📭 配息雷達：還沒有海外債報價檔，請把 Bond_Pricing Excel 傳給我。"))
             write_job_log("海外債配息雷達", "skipped", "無報價檔")
             return
         msg = _bond_build_alert(str(BOND_PRICE_FILE), today=now.date(), lookahead=14, days_ahead=3)
@@ -2774,18 +3193,30 @@ def job_bond_coupon_radar():
         msg += f"\n📎 報價檔更新於 {mtime:%m/%d %H:%M}｜/coupon all 看全部｜/coupon table 出Excel"
         if age_days >= 3:
             msg += f"（已 {age_days} 天未更新，記得丟新檔）"
-        push_long_message(line_bot_api, user_id, msg)
-        write_job_log("海外債配息雷達", "success", "推播成功")
+        ok_n = 0
+        for rid in recipients:
+            try:
+                push_long_message(line_bot_api, rid, msg)
+                ok_n += 1
+            except Exception as e:
+                print(f"[BondRadar] push to {rid[:8]}… failed: {e}")
+        write_job_log("海外債配息雷達", "success", f"推播 {ok_n}/{len(recipients)} 個對象")
+        try:
+            check_bond_alerts(line_bot_api, source="daily")
+        except Exception as e:
+            print(f"[BondAlert daily ERROR] {e}")
     except Exception as e:
         write_job_log("海外債配息雷達", "error", str(e))
         try:
-            line_bot_api.push_message(user_id, TextSendMessage(text=f"❌ 配息雷達失敗：{str(e)[:200]}"))
+            if user_id:
+                line_bot_api.push_message(user_id, TextSendMessage(text=f"❌ 配息雷達失敗：{str(e)[:200]}"))
         except Exception:
             pass
 
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
     scheduler.add_job(job_bond_coupon_radar, CronTrigger(day_of_week="mon-fri", hour=6, minute=45, timezone=TZ_TAIPEI_PYTZ), id="bond_coupon_radar", name="海外債配息雷達")
+    scheduler.add_job(job_bond_rating_news, CronTrigger(day_of_week="mon-fri", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ), id="bond_rating_news", name="信評新聞雷達")
     scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
     scheduler.add_job(job_auto_tracking, CronTrigger(day_of_week="mon-sat", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ), id="auto_tracking", name="ELN自動追蹤")
     scheduler.add_job(job_alert_monitor, IntervalTrigger(minutes=15), id="alert_monitor", name="價格警示")
