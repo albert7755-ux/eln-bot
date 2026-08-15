@@ -316,7 +316,12 @@
   <div id="tabList" class="form-card hidden">
     <div class="list-header">
       <h2>商品清單</h2>
-      <button class="btn btn-primary btn-sm" onclick="loadProducts()">🔄 重新載入</button>
+      <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+        <button class="btn btn-sm" id="btnAll" style="background:#2d6cdf;color:white" onclick="setFilter('all')">全部</button>
+        <button class="btn btn-sm" id="btnToday" style="background:#f0f4f8;color:#4a6080" onclick="setFilter('today')">今天新增</button>
+        <button class="btn btn-sm" id="btnWeek" style="background:#f0f4f8;color:#4a6080" onclick="setFilter('week')">近7天</button>
+        <button class="btn btn-primary btn-sm" onclick="loadProducts()">🔄 重新載入</button>
+      </div>
     </div>
     <div class="search-row">
       <input type="text" id="searchInput" placeholder="搜尋代號或理專名稱..." oninput="filterTable()">
@@ -564,15 +569,43 @@ function renderTable(products) {
   document.getElementById('tableContainer').innerHTML = html;
 }
 
+let currentFilter = 'all';
+
+function setFilter(f) {
+  currentFilter = f;
+  ['btnAll','btnToday','btnWeek'].forEach(id => {
+    document.getElementById(id).style.background = '#f0f4f8';
+    document.getElementById(id).style.color = '#4a6080';
+  });
+  const map = {all:'btnAll', today:'btnToday', week:'btnWeek'};
+  document.getElementById(map[f]).style.background = '#2d6cdf';
+  document.getElementById(map[f]).style.color = 'white';
+  filterTable();
+}
+
 function filterTable() {
   const q = document.getElementById('searchInput').value.toLowerCase();
-  const filtered = allProducts.filter(p =>
+  const now = new Date();
+  let filtered = allProducts.filter(p =>
     (p.bond_id||'').toLowerCase().includes(q) ||
     (p.agent_name||'').toLowerCase().includes(q) ||
     (p.t1_code||'').toLowerCase().includes(q) ||
     (p.t2_code||'').toLowerCase().includes(q) ||
     (p.t3_code||'').toLowerCase().includes(q)
   );
+  if (currentFilter === 'today') {
+    filtered = filtered.filter(p => {
+      if (!p.created_at) return false;
+      const d = new Date(p.created_at);
+      return d.toDateString() === now.toDateString();
+    });
+  } else if (currentFilter === 'week') {
+    filtered = filtered.filter(p => {
+      if (!p.created_at) return false;
+      const d = new Date(p.created_at);
+      return (now - d) <= 7 * 24 * 60 * 60 * 1000;
+    });
+  }
   renderTable(filtered);
 }
 
