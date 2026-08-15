@@ -1136,7 +1136,7 @@ def handle_text_message(event):
                            "🔔 警示\n/alert add  /alert list  /alert del\n輸入 /help alert 看完整範例\n─────────────────\n"
                            "📚 文章庫\n/save  /unread  /read  /article  /del  /web\n直接傳圖片 → 自動儲存分析\n輸入 /help save 看完整說明\n─────────────────\n"
                            "📊 基金淨值 & 債券報價\n/fundnav → 手動更新基金淨值\n/bondnav → 手動觸發債券報價更新（94筆，約30分鐘）\n/tracklog → 查看執行記錄\n─────────────────\n"
-                           "💰 海外債配息雷達\n/coupon → 未來14天配息＆最晚下單日\n/coupon 30 → 未來30天\n上傳 Bond_Pricing Excel → 自動更新報價檔並重算\n（每天 06:45 自動推播）\n─────────────────\n"
+                           "💰 海外債配息雷達\n/coupon → 3個營業日內要下單的配息債\n/coupon 7 → 7個營業日內\n/coupon all → 未來14天全部\n/coupon table → Excel條件表＋發行機構簡介\n上傳 Bond_Pricing Excel → 自動更新報價檔並重算\n（每天 06:45 自動推播）\n─────────────────\n"
                            "📧 其他\n/mail  /invest  /forget  /spending\n上傳錄音 → 自動逐字稿 / 摘要\n上傳檔案 → 自動分析\n─────────────────\n"
                            "進階說明：/help alert、/help eln、/help report、/help save")
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
@@ -1797,8 +1797,10 @@ def handle_text_message(event):
             threading.Thread(target=_run_bondnav, daemon=True).start()
             return
         if cmd == "coupon":
-            # /coupon        → 未來14天
-            # /coupon 30     → 未來30天
+            # /coupon          → 最晚下單日在 3 個營業日內
+            # /coupon 7        → 7 個營業日內
+            # /coupon all      → 未來14天全部
+            # /coupon table    → 產出 Excel 條件表 + 發行機構簡介（Google Drive 連結）
             if not _BOND_RADAR_OK:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 配息雷達模組未載入，請確認 bond_coupon_alert.py 已部署。"))
                 return
@@ -1806,15 +1808,52 @@ def handle_text_message(event):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔。請直接把總行的 Bond_Pricing Excel 傳給我，我會自動存檔並產生配息雷達。"))
                 return
             parts = raw_cmd.split()
+            arg = parts[1].lower() if len(parts) > 1 else ""
+            _today = datetime.now(TZ_TAIPEI).date()
+            if arg in ("table", "表", "excel", "xlsx"):
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 正在整理配息債條件表＋發行機構簡介，約 30～60 秒，完成後傳連結給你..."))
+                def _run_coupon_table(chat_key, bot_api_ref, today_):
+                    try:
+                        from bond_coupon_alert import build_coupon_sheet
+                        from pdf_generator import upload_to_drive
+                        def _issuer_intro(issuers):
+                            prompt = ("你是台灣銀行財富管理部門的固定收益研究員。請針對下列債券發行機構各寫一段 60～100 字的繁體中文簡介，"
+                                      "內容包含：主要業務、總部所在國家、在產業中的地位、信用體質重點（例如投資等級/政府支持/主要風險）。"
+                                      "語氣專業中性，不要投資建議。只回傳 JSON 物件，key 為發行機構名稱（必須跟輸入完全一致），value 為簡介文字，不要任何其他文字或 markdown。\n\n發行機構名單：\n"
+                                      + "\n".join(f"- {x}" for x in issuers))
+                            resp = claude_client.messages.create(model="claude-sonnet-4-6", max_tokens=4000,
+                                                                 messages=[{"role": "user", "content": prompt}])
+                            raw = "".join(getattr(b, "text", "") for b in resp.content).strip()
+                            raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
+                            return json.loads(raw)
+                        out_path = f"/tmp/配息債條件表_{today_:%Y%m%d}.xlsx"
+                        _, n_bond, n_iss = build_coupon_sheet(str(BOND_PRICE_FILE), out_path, today=today_, lookahead=14, intro_fn=_issuer_intro)
+                        link = upload_to_drive(out_path, f"配息債條件表_{today_:%Y%m%d}.xlsx")
+                        try:
+                            os.remove(out_path)
+                        except Exception:
+                            pass
+                        bot_api_ref.push_message(chat_key.split(":", 1)[1], TextSendMessage(
+                            text=f"📎 配息債條件表已完成\n{today_:%m/%d} 起未來14天還來得及參與：{n_bond} 檔，發行機構 {n_iss} 家\n\n"
+                                 f"Sheet1 條件表（評等/順位/報價/YTM/備註）\nSheet2 發行機構簡介（AI 產生，對客請以公開資訊為準）\n\n🔗 {link}"))
+                    except Exception as e:
+                        print(f"[BondRadar TABLE ERROR] {e}")
+                        print(_traceback.format_exc())
+                        bot_api_ref.push_message(chat_key.split(":", 1)[1], TextSendMessage(text=f"❌ 條件表產生失敗：{str(e)[:200]}"))
+                import threading
+                threading.Thread(target=_run_coupon_table, args=(ck, _bot_api, _today), daemon=True).start()
+                return
+            if arg in ("all", "全部"):
+                days_ahead = None
+            else:
+                try:
+                    days_ahead = max(1, min(int(arg), 30)) if arg else 3
+                except ValueError:
+                    days_ahead = 3
             try:
-                look = int(parts[1]) if len(parts) > 1 else 14
-                look = max(1, min(look, 90))
-            except ValueError:
-                look = 14
-            try:
-                msg = _bond_build_alert(str(BOND_PRICE_FILE), today=datetime.now(TZ_TAIPEI).date(), lookahead=look)
+                msg = _bond_build_alert(str(BOND_PRICE_FILE), today=_today, lookahead=14, days_ahead=days_ahead)
                 mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI).strftime("%m/%d %H:%M")
-                msg += f"\n📎 報價檔更新於 {mtime}"
+                msg += f"\n📎 報價檔更新於 {mtime}｜/coupon all 看全部｜/coupon table 出Excel"
                 chunks_c = [msg[i:i+4900] for i in range(0, len(msg), 4900)]
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=chunks_c[0]))
                 for c in chunks_c[1:]:
@@ -2154,7 +2193,19 @@ def handle_file_message(event):
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 存入知識庫失敗：{str(e)[:200]}"))
             return
         # ── 海外債報價檔：存成最新檔 + 立刻重算配息雷達 ──
-        if ext == ".xlsx" and _BOND_RADAR_OK and _is_bond_pricing_file(str(tmp_path), filename):
+        _looks_like_bond = ext in (".xlsx", ".xlsm") and ("bond" in filename.lower())
+        _is_bond = False
+        if ext in (".xlsx", ".xlsm") and _BOND_RADAR_OK:
+            try:
+                _is_bond = _is_bond_pricing_file(str(tmp_path), filename)
+            except Exception as _e:
+                print(f"[BondRadar] 偵測失敗：{_e}")
+        print(f"[BondRadar] 模組OK={_BOND_RADAR_OK} 檔名像債券={_looks_like_bond} 偵測結果={_is_bond}")
+        if _looks_like_bond and not _BOND_RADAR_OK:
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="⚠️ 檔名看起來是海外債報價檔，但 bond_coupon_alert.py 模組沒有載入成功。\n請確認該檔案已放進 repo 根目錄並重新部署（Render Logs 搜尋 [BondRadar] 看錯誤原因）。"))
+            return
+        if _is_bond:
             db_set_await(ck, False)
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📥 收到海外債報價檔 {filename}，正在更新配息雷達..."))
             def _run_bond_update(tmp_path_str, chat_key, bot_api_ref, fname):
@@ -2623,10 +2674,10 @@ def job_bond_coupon_radar():
             line_bot_api.push_message(user_id, TextSendMessage(text="📭 配息雷達：還沒有海外債報價檔，請把 Bond_Pricing Excel 傳給我。"))
             write_job_log("海外債配息雷達", "skipped", "無報價檔")
             return
-        msg = _bond_build_alert(str(BOND_PRICE_FILE), today=now.date(), lookahead=14)
+        msg = _bond_build_alert(str(BOND_PRICE_FILE), today=now.date(), lookahead=14, days_ahead=3)
         mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI_PYTZ)
         age_days = (now.date() - mtime.date()).days
-        msg += f"\n📎 報價檔更新於 {mtime:%m/%d %H:%M}"
+        msg += f"\n📎 報價檔更新於 {mtime:%m/%d %H:%M}｜/coupon all 看全部｜/coupon table 出Excel"
         if age_days >= 3:
             msg += f"（已 {age_days} 天未更新，記得丟新檔）"
         push_long_message(line_bot_api, user_id, msg)
