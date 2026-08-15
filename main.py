@@ -254,6 +254,8 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 app = FastAPI()
 from articles import router as articles_router
 app.include_router(articles_router)
+from eln_form_router import router as eln_form_router
+app.include_router(eln_form_router)
 
 VERSION = "eln-autotracking-db-v3-2026-03-05"
 TZ_TAIPEI = timezone(timedelta(hours=8))
@@ -1238,6 +1240,21 @@ def handle_text_message(event):
                 return
             raw_cmd = text_raw
         parts = text_raw.split(" ", 1)
+
+        # ── 判斷是否為 Albert 本人（非本人只能用 ELN 四個指令）──
+        _albert_uid = os.getenv("LINE_USER_ID", "")
+        _sender_uid = event.source.user_id if hasattr(event.source, "user_id") else ""
+        is_albert = (_sender_uid == _albert_uid)
+        _agent_allowed = ("list", "detail", "nc")
+        if not is_albert and not is_group and tl.startswith("/"):
+            if cmd not in _agent_allowed:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="可用指令：\n/list 姓名\n/list detail 姓名\n/detail 商品代號\n/nc YYYYMM 姓名"
+                ))
+                return
+            ck = ELN_PERSONAL_CHAT_KEY
+        if not is_albert and not is_group and not tl.startswith("/"):
+            return
         
         if is_group and not tl.startswith("/"):
             return
