@@ -91,6 +91,8 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 app = FastAPI()
 from articles import router as articles_router
 app.include_router(articles_router)
+from eln_form_router import router as eln_form_router
+app.include_router(eln_form_router)
 
 VERSION = "eln-autotracking-db-v3-2026-03-05"
 TZ_TAIPEI = timezone(timedelta(hours=8))
