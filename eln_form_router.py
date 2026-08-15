@@ -74,7 +74,8 @@ async def get_products(agent: str = ""):
                        t1_code, t1_initial, t2_code, t2_initial, t3_code, t3_initial,
                        t4_code, t4_initial, t5_code, t5_initial,
                        coupon_pct, strike_pct, ko_pct, ko_type, ki_pct, ki_type,
-                       issue_date, valuation_date, maturity_date, agent_name, line_id
+                       issue_date, valuation_date, maturity_date, agent_name, line_id,
+                       created_at
                 FROM eln_products
                 WHERE agent_name ILIKE :a
                 ORDER BY trade_date DESC
@@ -85,7 +86,8 @@ async def get_products(agent: str = ""):
                        t1_code, t1_initial, t2_code, t2_initial, t3_code, t3_initial,
                        t4_code, t4_initial, t5_code, t5_initial,
                        coupon_pct, strike_pct, ko_pct, ko_type, ki_pct, ki_type,
-                       issue_date, valuation_date, maturity_date, agent_name, line_id
+                       issue_date, valuation_date, maturity_date, agent_name, line_id,
+                       created_at
                 FROM eln_products
                 ORDER BY trade_date DESC
             """)).fetchall()
@@ -94,12 +96,13 @@ async def get_products(agent: str = ""):
             "t1_code", "t1_initial", "t2_code", "t2_initial", "t3_code", "t3_initial",
             "t4_code", "t4_initial", "t5_code", "t5_initial",
             "coupon_pct", "strike_pct", "ko_pct", "ko_type", "ki_pct", "ki_type",
-            "issue_date", "valuation_date", "maturity_date", "agent_name", "line_id"]
+            "issue_date", "valuation_date", "maturity_date", "agent_name", "line_id",
+            "created_at"]
 
     result = []
     for row in rows:
         d = dict(zip(cols, row))
-        for k in ["trade_date", "issue_date", "valuation_date", "maturity_date"]:
+        for k in ["trade_date", "issue_date", "valuation_date", "maturity_date", "created_at"]:
             if d[k]:
                 d[k] = str(d[k])
         result.append(d)
