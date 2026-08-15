@@ -332,21 +332,30 @@ def search_issuers(path, keyword, max_issuers=3):
         out.append((iss, bl))
     return out
 
-def format_issuer_bonds(issuer, bonds, intro="", max_bonds=12):
-    """組成 LINE 文字：簡介 + 該機構架上債券摘要"""
-    lines = [f"🏦 {issuer}（架上 {len(bonds)} 檔）"]
+def format_issuer_bonds(issuer, bonds, intro="", max_bonds=None, today=None):
+    """
+    組成 LINE 文字：簡介 + 該機構架上債券摘要。
+    預設全部列出（LINE 訊息由 push_long_message 自動分段）；已到期的券會被濾掉並註明檔數。
+    """
+    today = today or date.today()
+    live = [b for b in bonds if not (b["maturity"] and b["maturity"] < today)]
+    expired = len(bonds) - len(live)
+    head = f"🏦 {issuer}（架上 {len(live)} 檔"
+    head += f"，另 {expired} 檔已到期未列）" if expired else "）"
+    lines = [head]
     if intro:
         lines.append(intro)
     lines.append("")
-    for b in bonds[:max_bonds]:
+    show = live if max_bonds is None else live[:max_bonds]
+    for b in show:
         offer = b["offer"] if b["offer"] not in (None, "", 0, "#VALUE!", "#N/A") else "-"
         ytm = b["ytm"] if b["ytm"] not in (None, "", 0, "#N/A") else "-"
         mat = f"{b['maturity']:%Y/%m/%d}" if b["maturity"] else "-"
         rt = " / ".join(x for x in str(b.get("ratings") or "").split(" / ") if x and x.upper() not in ("N/A", "NA", "NONE"))
         rating = f"｜{rt}" if rt else ""
         lines.append(f"▪ {b['name']} {b['ccy']} {b['coupon']}% {b['freq']}｜{pi_tag(b)}\n  到期{mat}｜Offer {offer}｜YTM {ytm}{rating}")
-    if len(bonds) > max_bonds:
-        lines.append(f"…另有 {len(bonds)-max_bonds} 檔")
+    if len(live) > len(show):
+        lines.append(f"…另有 {len(live)-len(show)} 檔")
     return "\n".join(lines)
 
 # ---------- Excel 條件表 ----------
