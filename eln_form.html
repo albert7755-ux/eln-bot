@@ -561,7 +561,7 @@ function renderTable(products) {
     html += `<td>${p.ki_pct||'-'}%</td>`;
     html += `<td>${p.valuation_date||'-'}</td>`;
     if (isAdmin) {
-      html += `<td><button class="btn btn-warning btn-sm" onclick="openEdit(${p.id})">✏️ 修改</button></td>`;
+      html += `<td style="white-space:nowrap"><button class="btn btn-warning btn-sm" onclick="openEdit(${p.id})">✏️ 修改</button> <button class="btn btn-sm" style="background:#c0392b;color:white" onclick="deleteProduct(${p.id}, '${p.bond_id}')">🗑️ 刪除</button></td>`;
     }
     html += '</tr>';
   });
@@ -610,6 +610,27 @@ function filterTable() {
 }
 
 // 修改（管理員）
+async function deleteProduct(id, bondId) {
+  if (!isAdmin) return;
+  if (!confirm(`確定要刪除 ${bondId} 嗎？此動作無法復原！`)) return;
+  try {
+    const res = await fetch('/eln-form/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: id, password: '0000' })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      alert('✅ 已刪除 ' + bondId);
+      loadProducts();
+    } else {
+      alert('❌ ' + (data.detail || '刪除失敗'));
+    }
+  } catch(e) {
+    alert('❌ 連線錯誤');
+  }
+}
+
 function openEdit(id) {
   if (!isAdmin) return;
   const p = allProducts.find(x => x.id === id);
