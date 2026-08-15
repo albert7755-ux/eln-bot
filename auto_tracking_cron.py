@@ -16,8 +16,11 @@ from linebot import LineBotApi
 from linebot.models import TextSendMessage
 from sqlalchemy import create_engine, text
 
-from autotracking_core import calculate_from_file
-from eln_storage import download_latest_eln
+from autotracking_core import calculate_from_file, calculate_from_db
+try:
+    from eln_storage import download_latest_eln
+except Exception:
+    download_latest_eln = None
 
 TZ_TAIPEI = timezone(timedelta(hours=8))
 
@@ -221,12 +224,22 @@ def main():
     group_chat_key = f"group:{group_id}" if group_id else ""
 
     try:
-        print("Downloading latest Excel from Supabase Storage...")
-        excel_path = download_latest_eln("/tmp/latest_eln.xlsx")
-        print(f"Downloaded latest Excel: {excel_path}")
+        # 優先從 eln_products 資料庫讀取，沒有資料才 fallback 到 Excel
+        out = None
+        try:
+            print("從 eln_products 資料庫讀取...")
+            out = calculate_from_db(engine, lookback_days=3, notify_ki_daily=True)
+            print("✅ 從資料庫計算完成")
+        except Exception as db_err:
+            print(f"[WARNING] DB 讀取失敗({db_err})，改用 Excel...")
+            if download_latest_eln:
+                excel_path = download_latest_eln("/tmp/latest_eln.xlsx")
+                print(f"Downloaded latest Excel: {excel_path}")
+                out = calculate_from_file(excel_path, lookback_days=3, notify_ki_daily=True)
+            else:
+                raise db_err
 
-        print("Running autotracking...")
-        out = calculate_from_file(excel_path, lookback_days=3, notify_ki_daily=True)
+        print("Running build_result...")
         summary, top5_lines, detail_map, agent_name_map = build_result(out)
 
         print("Saving result to database (personal)...")
