@@ -25,6 +25,26 @@ import urllib.request
 import urllib.error
 from openai import OpenAI
 
+# ===== 海外債配息雷達（bond_coupon_alert.py）=====
+try:
+    from bond_coupon_alert import build_alert_message as _bond_build_alert, is_bond_pricing_file as _is_bond_pricing_file
+    _BOND_RADAR_OK = True
+except Exception as _e:
+    print(f"[BondRadar] 模組載入失敗（不影響其他功能）：{_e}")
+    _BOND_RADAR_OK = False
+
+def _bond_price_dir() -> Path:
+    """報價檔存放位置：優先用 Render 持久磁碟 /data，沒有就退到 /tmp（重新部署會消失）"""
+    for d in (Path("/data/bond_pricing"), Path("/tmp/bond_pricing")):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+        except Exception:
+            continue
+    return Path("/tmp")
+
+BOND_PRICE_FILE = Path(os.getenv("BOND_PRICE_FILE", "")) if os.getenv("BOND_PRICE_FILE") else (_bond_price_dir() / "bond_pricing_latest.xlsx")
+
 # --- Alert ticker aliases ---
 ALERT_TICKER_ALIAS = {
     "dxy": "DX-Y.NYB", "spx": "^GSPC", "sp500": "^GSPC", "ndx": "^NDX",
@@ -1116,6 +1136,7 @@ def handle_text_message(event):
                            "🔔 警示\n/alert add  /alert list  /alert del\n輸入 /help alert 看完整範例\n─────────────────\n"
                            "📚 文章庫\n/save  /unread  /read  /article  /del  /web\n直接傳圖片 → 自動儲存分析\n輸入 /help save 看完整說明\n─────────────────\n"
                            "📊 基金淨值 & 債券報價\n/fundnav → 手動更新基金淨值\n/bondnav → 手動觸發債券報價更新（94筆，約30分鐘）\n/tracklog → 查看執行記錄\n─────────────────\n"
+                           "💰 海外債配息雷達\n/coupon → 未來14天配息＆最晚下單日\n/coupon 30 → 未來30天\n上傳 Bond_Pricing Excel → 自動更新報價檔並重算\n（每天 06:45 自動推播）\n─────────────────\n"
                            "📧 其他\n/mail  /invest  /forget  /spending\n上傳錄音 → 自動逐字稿 / 摘要\n上傳檔案 → 自動分析\n─────────────────\n"
                            "進階說明：/help alert、/help eln、/help report、/help save")
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
@@ -1775,6 +1796,32 @@ def handle_text_message(event):
             import threading
             threading.Thread(target=_run_bondnav, daemon=True).start()
             return
+        if cmd == "coupon":
+            # /coupon        → 未來14天
+            # /coupon 30     → 未來30天
+            if not _BOND_RADAR_OK:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 配息雷達模組未載入，請確認 bond_coupon_alert.py 已部署。"))
+                return
+            if not BOND_PRICE_FILE.exists():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔。請直接把總行的 Bond_Pricing Excel 傳給我，我會自動存檔並產生配息雷達。"))
+                return
+            parts = raw_cmd.split()
+            try:
+                look = int(parts[1]) if len(parts) > 1 else 14
+                look = max(1, min(look, 90))
+            except ValueError:
+                look = 14
+            try:
+                msg = _bond_build_alert(str(BOND_PRICE_FILE), today=datetime.now(TZ_TAIPEI).date(), lookahead=look)
+                mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI).strftime("%m/%d %H:%M")
+                msg += f"\n📎 報價檔更新於 {mtime}"
+                chunks_c = [msg[i:i+4900] for i in range(0, len(msg), 4900)]
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=chunks_c[0]))
+                for c in chunks_c[1:]:
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=c))
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 配息雷達產生失敗：{str(e)[:200]}"))
+            return
         if cmd == "fundnav":
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text="📊 手動更新基金淨值中...\n15 檔基金約需 2 分鐘，完成後會通知你 ✅"
@@ -2105,6 +2152,25 @@ def handle_file_message(event):
                 ))
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"❌ 存入知識庫失敗：{str(e)[:200]}"))
+            return
+        # ── 海外債報價檔：存成最新檔 + 立刻重算配息雷達 ──
+        if ext == ".xlsx" and _BOND_RADAR_OK and _is_bond_pricing_file(str(tmp_path), filename):
+            db_set_await(ck, False)
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📥 收到海外債報價檔 {filename}，正在更新配息雷達..."))
+            def _run_bond_update(tmp_path_str, chat_key, bot_api_ref, fname):
+                try:
+                    import shutil
+                    BOND_PRICE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy(tmp_path_str, str(BOND_PRICE_FILE))
+                    write_job_log("海外債配息雷達", "file_updated", fname)
+                    msg = _bond_build_alert(str(BOND_PRICE_FILE), today=datetime.now(TZ_TAIPEI).date())
+                    push_long_message(bot_api_ref, chat_key.split(":", 1)[1], "✅ 報價檔已更新\n\n" + msg)
+                except Exception as e:
+                    print(f"[BondRadar ERROR] {e}")
+                    print(_traceback.format_exc())
+                    bot_api_ref.push_message(chat_key.split(":", 1)[1], TextSendMessage(text=f"❌ 配息雷達更新失敗：{str(e)[:200]}"))
+            import threading
+            threading.Thread(target=_run_bond_update, args=(str(tmp_path), ck, _bot_api, filename), daemon=True).start()
             return
         if ext in (".xlsx", ".xls"):
             db_set_await(ck, False)
@@ -2542,8 +2608,39 @@ def job_auto_tracking():
     except Exception as e:
         write_job_log("ELN追蹤", "error", str(e))
 
+def job_bond_coupon_radar():
+    """每天 06:45 推播海外債配息雷達給 Albert（週一～週五）"""
+    now = datetime.now(TZ_TAIPEI_PYTZ)
+    write_job_log("海外債配息雷達", "started", now.strftime('%Y-%m-%d %H:%M'))
+    user_id = os.getenv("LINE_USER_ID", "")
+    if not user_id:
+        write_job_log("海外債配息雷達", "skipped", "缺少 LINE_USER_ID")
+        return
+    try:
+        if not _BOND_RADAR_OK:
+            raise RuntimeError("bond_coupon_alert 模組未載入")
+        if not BOND_PRICE_FILE.exists():
+            line_bot_api.push_message(user_id, TextSendMessage(text="📭 配息雷達：還沒有海外債報價檔，請把 Bond_Pricing Excel 傳給我。"))
+            write_job_log("海外債配息雷達", "skipped", "無報價檔")
+            return
+        msg = _bond_build_alert(str(BOND_PRICE_FILE), today=now.date(), lookahead=14)
+        mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI_PYTZ)
+        age_days = (now.date() - mtime.date()).days
+        msg += f"\n📎 報價檔更新於 {mtime:%m/%d %H:%M}"
+        if age_days >= 3:
+            msg += f"（已 {age_days} 天未更新，記得丟新檔）"
+        push_long_message(line_bot_api, user_id, msg)
+        write_job_log("海外債配息雷達", "success", "推播成功")
+    except Exception as e:
+        write_job_log("海外債配息雷達", "error", str(e))
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage(text=f"❌ 配息雷達失敗：{str(e)[:200]}"))
+        except Exception:
+            pass
+
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
+    scheduler.add_job(job_bond_coupon_radar, CronTrigger(day_of_week="mon-fri", hour=6, minute=45, timezone=TZ_TAIPEI_PYTZ), id="bond_coupon_radar", name="海外債配息雷達")
     scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
     scheduler.add_job(job_auto_tracking, CronTrigger(day_of_week="mon-sat", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ), id="auto_tracking", name="ELN自動追蹤")
     scheduler.add_job(job_alert_monitor, IntervalTrigger(minutes=15), id="alert_monitor", name="價格警示")
