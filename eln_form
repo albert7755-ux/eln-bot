@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ELN 商品登錄系統</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #f0f4f8;
+    color: #1a2332;
+    min-height: 100vh;
+  }
+  header {
+    background: linear-gradient(135deg, #1a2332 0%, #2d4a7a 100%);
+    color: white;
+    padding: 18px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+  header h1 { font-size: 1.2rem; font-weight: 600; letter-spacing: 0.5px; }
+  header span { font-size: 1.5rem; }
+  .container { max-width: 900px; margin: 0 auto; padding: 24px 16px; }
+
+  /* 身份選擇 */
+  .identity-card {
+    background: white;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  }
+  .identity-card h2 { font-size: 1rem; color: #4a6080; margin-bottom: 14px; }
+  .identity-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  select, input[type="text"], input[type="date"], input[type="number"], input[type="password"] {
+    border: 1.5px solid #d0dae8;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 0.9rem;
+    color: #1a2332;
+    background: white;
+    transition: border-color 0.2s;
+    outline: none;
+  }
+  select:focus, input:focus { border-color: #2d6cdf; }
+  select { cursor: pointer; }
+  .btn {
+    padding: 8px 18px;
+    border-radius: 8px;
+    border: none;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn-primary { background: #2d6cdf; color: white; }
+  .btn-primary:hover { background: #1d5cca; }
+  .btn-success { background: #18a85a; color: white; }
+  .btn-success:hover { background: #139048; }
+  .btn-warning { background: #e6840a; color: white; }
+  .btn-warning:hover { background: #c97009; }
+  .btn-sm { padding: 5px 12px; font-size: 0.82rem; }
+
+  /* Tab */
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+  .tab {
+    padding: 9px 20px;
+    border-radius: 8px 8px 0 0;
+    border: none;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    background: #d8e4f0;
+    color: #4a6080;
+    transition: all 0.2s;
+  }
+  .tab.active { background: white; color: #1a2332; font-weight: 600; }
+
+  /* 表單 */
+  .form-card {
+    background: white;
+    border-radius: 0 12px 12px 12px;
+    padding: 24px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  }
+  .section-title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: #2d6cdf;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin: 20px 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 2px solid #e8f0ff;
+  }
+  .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+  .form-group { display: flex; flex-direction: column; gap: 4px; }
+  .form-group label { font-size: 0.78rem; color: #6080a0; font-weight: 500; }
+  .form-group input, .form-group select { width: 100%; }
+  .ticker-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 8px;
+    align-items: end;
+  }
+  .ticker-label { font-size: 0.78rem; color: #6080a0; font-weight: 600; margin-bottom: 4px; }
+  .form-actions { margin-top: 24px; display: flex; gap: 10px; align-items: center; }
+  .msg { font-size: 0.88rem; padding: 8px 14px; border-radius: 8px; }
+  .msg-success { background: #e8f8ef; color: #18a85a; }
+  .msg-error { background: #fdecea; color: #c0392b; }
+
+  /* 列表 */
+  .list-card {
+    background: white;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    margin-top: 20px;
+  }
+  .list-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .list-header h2 { font-size: 1rem; color: #1a2332; }
+  .search-row { display: flex; gap: 8px; margin-bottom: 14px; }
+  .search-row input { flex: 1; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
+  th { background: #f0f4f8; color: #4a6080; font-weight: 600; padding: 9px 10px; text-align: left; }
+  td { padding: 8px 10px; border-bottom: 1px solid #edf2f7; color: #1a2332; }
+  tr:hover td { background: #f8faff; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .badge-fcn { background: #e8f0ff; color: #2d6cdf; }
+  .badge-dra { background: #fff0e8; color: #c97009; }
+  .badge-ben { background: #e8f8ef; color: #18a85a; }
+  .empty { text-align: center; color: #8090a8; padding: 40px; font-size: 0.9rem; }
+
+  /* 管理員模式 */
+  .admin-badge {
+    background: #fff3cd;
+    color: #856404;
+    font-size: 0.78rem;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-weight: 600;
+  }
+  .hidden { display: none !important; }
+
+  @media (max-width: 600px) {
+    .form-grid { grid-template-columns: 1fr 1fr; }
+    .ticker-row { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <span>📊</span>
+  <h1>ELN 商品登錄系統</h1>
+  <div id="adminBadge" class="admin-badge hidden" style="margin-left:auto">🔑 管理員模式</div>
+</header>
+
+<div class="container">
+
+  <!-- 身份選擇 -->
+  <div class="identity-card">
+    <h2>👤 請先選擇你的名字</h2>
+    <div class="identity-row">
+      <select id="agentSelect" onchange="onAgentChange()">
+        <option value="">-- 選擇理專 --</option>
+        <option value="__custom__">✏️ 自己輸入</option>
+      </select>
+      <input type="text" id="agentCustom" placeholder="輸入名字" style="display:none; width:140px">
+      <button class="btn btn-primary" onclick="confirmIdentity()">確認身份</button>
+      <span id="identityConfirmed" style="color:#18a85a; font-weight:600; display:none"></span>
+    </div>
+
+    <!-- 管理員密碼 -->
+    <div style="margin-top:14px; display:flex; gap:8px; align-items:center">
+      <input type="password" id="adminPwd" placeholder="管理員密碼（可選）" style="width:180px">
+      <button class="btn btn-warning btn-sm" onclick="loginAdmin()">管理員登入</button>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('add')">➕ 新增商品</button>
+    <button class="tab" onclick="switchTab('list')">📋 查看清單</button>
+  </div>
+
+  <!-- 新增表單 -->
+  <div id="tabAdd" class="form-card">
+    <div class="section-title">基本資料</div>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>債券代號 *</label>
+        <input type="text" id="f_bond_id" placeholder="WMGS26040252">
+      </div>
+      <div class="form-group">
+        <label>交易日 *</label>
+        <input type="date" id="f_trade_date">
+      </div>
+      <div class="form-group">
+        <label>商品類型</label>
+        <select id="f_product_type">
+          <option value="FCN">FCN</option>
+          <option value="DRA">DRA</option>
+          <option value="BEN">BEN</option>
+                  </select>
+      </div>
+      <div class="form-group">
+        <label>天期（月）</label>
+        <input type="number" id="f_tenure_months" placeholder="6" min="1" max="60">
+      </div>
+      <div class="form-group">
+        <label>幣別</label>
+        <select id="f_currency">
+          <option value="美元">美元</option>
+          <option value="台幣">台幣</option>
+          <option value="港幣">港幣</option>
+          <option value="日圓">日圓</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="section-title">日期設定</div>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>發行日</label>
+        <input type="date" id="f_issue_date">
+      </div>
+      <div class="form-group">
+        <label>最終評價日</label>
+        <input type="date" id="f_valuation_date">
+      </div>
+      <div class="form-group">
+        <label>到期日</label>
+        <input type="date" id="f_maturity_date">
+      </div>
+    </div>
+
+    <div class="section-title">標的（最多5個）</div>
+    <div id="tickersContainer">
+      <!-- 動態產生 -->
+    </div>
+
+    <div class="section-title">條件設定</div>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>收益率 Coupon (%)</label>
+        <input type="number" id="f_coupon_pct" placeholder="10.5" step="0.1">
+      </div>
+      <div class="form-group">
+        <label>執行價格 Strike (%)</label>
+        <input type="number" id="f_strike_pct" placeholder="100" value="100" step="1">
+      </div>
+      <div class="form-group">
+        <label>KO 價格 (%)</label>
+        <input type="number" id="f_ko_pct" placeholder="100" value="100" step="0.01">
+      </div>
+      <div class="form-group">
+        <label>KO 類型</label>
+        <select id="f_ko_type">
+          <option value="Daily Memory">Daily Memory</option>
+          <option value="NC1M Daily Memory">NC1M Daily Memory</option>
+          <option value="NC2M Daily Memory">NC2M Daily Memory</option>
+          <option value="NC3M Daily Memory">NC3M Daily Memory</option>
+          <option value="NC4M Daily Memory">NC4M Daily Memory</option>
+          <option value="NC6M Daily Memory">NC6M Daily Memory</option>
+          <option value="Period End Memory">Period End Memory</option>
+          <option value="NC1M Period End Memory">NC1M Period End Memory</option>
+          <option value="NC2M Period End Memory">NC2M Period End Memory</option>
+          <option value="NC3M Period End Memory">NC3M Period End Memory</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>KI 價格 (%)</label>
+        <input type="number" id="f_ki_pct" placeholder="70" value="70" step="1">
+      </div>
+      <div class="form-group">
+        <label>KI 類型</label>
+        <select id="f_ki_type">
+          <option value="AKI">AKI</option>
+          <option value="EKI">EKI</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="section-title">理專資訊</div>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>理專名稱 *</label>
+        <input type="text" id="f_agent_name" placeholder="小美、庚霖">
+      </div>
+      <div class="form-group">
+        <label>LINE ID（選填）</label>
+        <input type="text" id="f_line_id" placeholder="U1234...">
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button class="btn btn-success" onclick="submitAdd()">✅ 新增商品</button>
+      <button class="btn" style="background:#f0f4f8; color:#4a6080" onclick="clearForm()">🗑️ 清除</button>
+      <span id="addMsg"></span>
+    </div>
+  </div>
+
+  <!-- 清單 -->
+  <div id="tabList" class="form-card hidden">
+    <div class="list-header">
+      <h2>商品清單</h2>
+      <button class="btn btn-primary btn-sm" onclick="loadProducts()">🔄 重新載入</button>
+    </div>
+    <div class="search-row">
+      <input type="text" id="searchInput" placeholder="搜尋代號或理專名稱..." oninput="filterTable()">
+    </div>
+    <div id="tableContainer">
+      <div class="empty">請先選擇身份後載入</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- 修改 Modal（管理員專用）-->
+<div id="editModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; overflow-y:auto;">
+  <div style="background:white; max-width:700px; margin:40px auto; border-radius:16px; padding:28px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+      <h2 style="font-size:1.1rem">✏️ 修改商品</h2>
+      <button onclick="closeEdit()" style="background:none; border:none; font-size:1.4rem; cursor:pointer; color:#888">✕</button>
+    </div>
+    <div id="editFormContent"></div>
+    <div style="margin-top:20px; display:flex; gap:10px; align-items:center;">
+      <button class="btn btn-warning" onclick="submitEdit()">💾 儲存修改</button>
+      <button class="btn" style="background:#f0f4f8; color:#4a6080" onclick="closeEdit()">取消</button>
+      <span id="editMsg"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentAgent = "";
+let isAdmin = false;
+let allProducts = [];
+let editingId = null;
+
+// 已知理專清單（可動態從後端取）
+const knownAgents = [
+  "小美","庚霖","區長","Hank","怡雯","明湖","尚曄",
+  "張原","冠宏","馨怡","Rita","Dino","Alex",
+  "育嘉","人豪"
+];
+
+// 初始化理專選單
+function initAgentSelect() {
+  const sel = document.getElementById('agentSelect');
+  knownAgents.forEach(name => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    sel.insertBefore(opt, sel.lastElementChild);
+  });
+}
+
+function onAgentChange() {
+  const sel = document.getElementById('agentSelect');
+  const custom = document.getElementById('agentCustom');
+  if (sel.value === '__custom__') {
+    custom.style.display = 'block';
+    custom.focus();
+  } else {
+    custom.style.display = 'none';
+  }
+}
+
+function confirmIdentity() {
+  const sel = document.getElementById('agentSelect');
+  const custom = document.getElementById('agentCustom');
+  let name = sel.value === '__custom__' ? custom.value.trim() : sel.value;
+  if (!name) { alert('請選擇或輸入名字'); return; }
+  currentAgent = name;
+  document.getElementById('identityConfirmed').style.display = 'inline';
+  document.getElementById('identityConfirmed').textContent = `✅ 你好，${name}！`;
+  document.getElementById('f_agent_name').value = name;
+  loadProducts();
+}
+
+function loginAdmin() {
+  const pwd = document.getElementById('adminPwd').value;
+  if (pwd === '0000') {
+    isAdmin = true;
+    document.getElementById('adminBadge').classList.remove('hidden');
+    document.getElementById('adminPwd').value = '';
+    alert('✅ 管理員登入成功，可以修改所有商品');
+    loadProducts();
+  } else {
+    alert('❌ 密碼錯誤');
+  }
+}
+
+// Tab 切換
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    t.classList.toggle('active', (i === 0 && tab === 'add') || (i === 1 && tab === 'list'));
+  });
+  document.getElementById('tabAdd').classList.toggle('hidden', tab !== 'add');
+  document.getElementById('tabList').classList.toggle('hidden', tab !== 'list');
+  if (tab === 'list') loadProducts();
+}
+
+// 標的欄位動態產生
+function initTickers() {
+  const container = document.getElementById('tickersContainer');
+  container.innerHTML = '';
+  for (let i = 1; i <= 5; i++) {
+    const div = document.createElement('div');
+    div.style.marginBottom = '8px';
+    div.innerHTML = `
+      <div class="ticker-label">標的 ${i}</div>
+      <div class="ticker-row">
+        <div class="form-group">
+          <label>代號</label>
+          <input type="text" id="f_t${i}_code" placeholder="如 TSLA" style="text-transform:uppercase">
+        </div>
+        <div class="form-group">
+          <label>進場價</label>
+          <input type="number" id="f_t${i}_initial" placeholder="376.02" step="0.01">
+        </div>
+      </div>
+    `;
+    container.appendChild(div);
+  }
+}
+
+// 新增商品
+async function submitAdd() {
+  const bondId = document.getElementById('f_bond_id').value.trim();
+  const tradeDate = document.getElementById('f_trade_date').value;
+  const agentName = document.getElementById('f_agent_name').value.trim();
+  if (!bondId) { showMsg('addMsg', '❌ 請填寫債券代號', 'error'); return; }
+  if (!tradeDate) { showMsg('addMsg', '❌ 請填寫交易日', 'error'); return; }
+  if (!agentName) { showMsg('addMsg', '❌ 請填寫理專名稱', 'error'); return; }
+
+  const payload = {
+    bond_id: bondId,
+    trade_date: tradeDate,
+    product_type: document.getElementById('f_product_type').value,
+    tenure_months: document.getElementById('f_tenure_months').value || null,
+    currency: document.getElementById('f_currency').value,
+    t1_code: document.getElementById('f_t1_code').value.toUpperCase().trim(),
+    t1_initial: document.getElementById('f_t1_initial').value,
+    t2_code: document.getElementById('f_t2_code').value.toUpperCase().trim(),
+    t2_initial: document.getElementById('f_t2_initial').value,
+    t3_code: document.getElementById('f_t3_code').value.toUpperCase().trim(),
+    t3_initial: document.getElementById('f_t3_initial').value,
+    t4_code: document.getElementById('f_t4_code').value.toUpperCase().trim(),
+    t4_initial: document.getElementById('f_t4_initial').value,
+    t5_code: document.getElementById('f_t5_code').value.toUpperCase().trim(),
+    t5_initial: document.getElementById('f_t5_initial').value,
+    coupon_pct: document.getElementById('f_coupon_pct').value,
+    strike_pct: document.getElementById('f_strike_pct').value || 100,
+    ko_pct: document.getElementById('f_ko_pct').value || 100,
+    ko_type: document.getElementById('f_ko_type').value,
+    ki_pct: document.getElementById('f_ki_pct').value || 70,
+    ki_type: document.getElementById('f_ki_type').value,
+    issue_date: document.getElementById('f_issue_date').value || null,
+    valuation_date: document.getElementById('f_valuation_date').value || null,
+    maturity_date: document.getElementById('f_maturity_date').value || null,
+    agent_name: agentName,
+    line_id: document.getElementById('f_line_id').value.trim(),
+  };
+
+  try {
+    const res = await fetch('/eln-form/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showMsg('addMsg', data.message, 'success');
+      clearForm();
+    } else {
+      showMsg('addMsg', '❌ ' + (data.detail || '新增失敗'), 'error');
+    }
+  } catch(e) {
+    showMsg('addMsg', '❌ 連線錯誤', 'error');
+  }
+}
+
+function clearForm() {
+  ['f_bond_id','f_trade_date','f_tenure_months','f_issue_date','f_valuation_date',
+   'f_maturity_date','f_coupon_pct','f_ko_type','f_line_id'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('f_product_type').value = 'FCN';
+  document.getElementById('f_currency').value = '美元';
+  document.getElementById('f_strike_pct').value = '100';
+  document.getElementById('f_ko_pct').value = '100';
+  document.getElementById('f_ki_pct').value = '70';
+  document.getElementById('f_ki_type').value = 'AKI';
+  document.getElementById('f_ko_type').value = 'Daily Memory';
+  for (let i = 1; i <= 5; i++) {
+    document.getElementById(`f_t${i}_code`).value = '';
+    document.getElementById(`f_t${i}_initial`).value = '';
+  }
+  document.getElementById('f_agent_name').value = currentAgent;
+}
+
+// 載入清單
+async function loadProducts() {
+  if (!currentAgent && !isAdmin) return;
+  const query = isAdmin ? '' : `?agent=${encodeURIComponent(currentAgent)}`;
+  try {
+    const res = await fetch('/eln-form/products' + query);
+    const data = await res.json();
+    allProducts = data.products || [];
+    renderTable(allProducts);
+  } catch(e) {
+    document.getElementById('tableContainer').innerHTML = '<div class="empty">❌ 載入失敗</div>';
+  }
+}
+
+function renderTable(products) {
+  if (!products.length) {
+    document.getElementById('tableContainer').innerHTML = '<div class="empty">目前沒有商品資料</div>';
+    return;
+  }
+  const cols = isAdmin
+    ? ['代號','類型','理專','交易日','標的','KO%','KI%','最終評價日','操作']
+    : ['代號','類型','交易日','標的','KO%','KI%','最終評價日'];
+
+  let html = '<div style="overflow-x:auto"><table><thead><tr>';
+  cols.forEach(c => { html += `<th>${c}</th>`; });
+  html += '</tr></thead><tbody>';
+
+  products.forEach(p => {
+    const tickers = [p.t1_code, p.t2_code, p.t3_code, p.t4_code, p.t5_code]
+      .filter(Boolean).join(', ');
+    const badge = `badge-${(p.product_type||'fcn').toLowerCase()}`;
+    html += '<tr>';
+    html += `<td style="font-weight:600">${p.bond_id}</td>`;
+    html += `<td><span class="badge ${badge}">${p.product_type||'-'}</span></td>`;
+    if (isAdmin) html += `<td>${p.agent_name||'-'}</td>`;
+    html += `<td>${p.trade_date||'-'}</td>`;
+    html += `<td style="font-size:0.8rem">${tickers||'-'}</td>`;
+    html += `<td>${p.ko_pct||'-'}%</td>`;
+    html += `<td>${p.ki_pct||'-'}%</td>`;
+    html += `<td>${p.valuation_date||'-'}</td>`;
+    if (isAdmin) {
+      html += `<td><button class="btn btn-warning btn-sm" onclick="openEdit(${p.id})">✏️ 修改</button></td>`;
+    }
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+  document.getElementById('tableContainer').innerHTML = html;
+}
+
+function filterTable() {
+  const q = document.getElementById('searchInput').value.toLowerCase();
+  const filtered = allProducts.filter(p =>
+    (p.bond_id||'').toLowerCase().includes(q) ||
+    (p.agent_name||'').toLowerCase().includes(q) ||
+    (p.t1_code||'').toLowerCase().includes(q) ||
+    (p.t2_code||'').toLowerCase().includes(q) ||
+    (p.t3_code||'').toLowerCase().includes(q)
+  );
+  renderTable(filtered);
+}
+
+// 修改（管理員）
+function openEdit(id) {
+  if (!isAdmin) return;
+  const p = allProducts.find(x => x.id === id);
+  if (!p) return;
+  editingId = id;
+  document.getElementById('editFormContent').innerHTML = buildEditForm(p);
+  document.getElementById('editModal').style.display = 'block';
+}
+
+function buildEditForm(p) {
+  const field = (label, id, val, type='text') =>
+    `<div class="form-group" style="margin-bottom:10px">
+      <label style="font-size:0.78rem; color:#6080a0">${label}</label>
+      <input type="${type}" id="e_${id}" value="${val||''}" style="width:100%">
+    </div>`;
+  const sel = (label, id, val, opts) =>
+    `<div class="form-group" style="margin-bottom:10px">
+      <label style="font-size:0.78rem; color:#6080a0">${label}</label>
+      <select id="e_${id}" style="width:100%">
+        ${opts.map(o => `<option value="${o}" ${o===val?'selected':''}>${o}</option>`).join('')}
+      </select>
+    </div>`;
+  let html = '<div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">';
+  html += field('債券代號', 'bond_id', p.bond_id);
+  html += field('交易日', 'trade_date', p.trade_date, 'date');
+  html += sel('商品類型', 'product_type', p.product_type, ['FCN','DRA','BEN']);
+  html += sel('幣別', 'currency', p.currency, ['美元','台幣','港幣','日圓']);
+  html += field('發行日', 'issue_date', p.issue_date, 'date');
+  html += field('最終評價日', 'valuation_date', p.valuation_date, 'date');
+  html += field('到期日', 'maturity_date', p.maturity_date, 'date');
+  html += field('KO%', 'ko_pct', p.ko_pct, 'number');
+  html += sel('KO類型', 'ko_type', p.ko_type, [
+        'Daily Memory','NC1M Daily Memory','NC2M Daily Memory','NC3M Daily Memory',
+        'NC4M Daily Memory','NC6M Daily Memory',
+        'Period End Memory','NC1M Period End Memory','NC2M Period End Memory','NC3M Period End Memory'
+      ]);
+  html += field('KI%', 'ki_pct', p.ki_pct, 'number');
+  html += sel('KI類型', 'ki_type', p.ki_type, ['AKI','EKI']);
+  html += field('Coupon%', 'coupon_pct', p.coupon_pct, 'number');
+  html += field('Strike%', 'strike_pct', p.strike_pct, 'number');
+  html += field('理專', 'agent_name', p.agent_name);
+  html += field('LINE ID', 'line_id', p.line_id);
+  html += '</div>';
+  html += '<div style="margin-top:12px"><div style="font-size:0.78rem; color:#2d6cdf; font-weight:700; margin-bottom:8px">標的進場價</div><div style="display:grid; grid-template-columns:1fr 1fr; gap:8px">';
+  for (let i = 1; i <= 5; i++) {
+    html += `<div style="display:flex; gap:6px; align-items:center; font-size:0.82rem">
+      <span style="color:#6080a0; width:40px">T${i}:</span>
+      <input type="text" id="e_t${i}_code" value="${p['t'+i+'_code']||''}" placeholder="代號" style="flex:1">
+      <input type="number" id="e_t${i}_initial" value="${p['t'+i+'_initial']||''}" placeholder="進場價" step="0.01" style="flex:1.5">
+    </div>`;
+  }
+  html += '</div></div>';
+  return html;
+}
+
+async function submitEdit() {
+  const g = id => document.getElementById(id)?.value;
+  const payload = {
+    id: editingId,
+    password: '0000',
+    bond_id: g('e_bond_id'), trade_date: g('e_trade_date'),
+    product_type: g('e_product_type'), currency: g('e_currency'),
+    issue_date: g('e_issue_date') || null,
+    valuation_date: g('e_valuation_date') || null,
+    maturity_date: g('e_maturity_date') || null,
+    ko_pct: g('e_ko_pct'), ko_type: g('e_ko_type'),
+    ki_pct: g('e_ki_pct'), ki_type: g('e_ki_type'),
+    coupon_pct: g('e_coupon_pct'), strike_pct: g('e_strike_pct'),
+    agent_name: g('e_agent_name'), line_id: g('e_line_id'),
+  };
+  for (let i = 1; i <= 5; i++) {
+    payload[`t${i}_code`] = (g(`e_t${i}_code`)||'').toUpperCase().trim();
+    payload[`t${i}_initial`] = g(`e_t${i}_initial`) || null;
+  }
+  try {
+    const res = await fetch('/eln-form/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showMsg('editMsg', '✅ 修改成功', 'success');
+      setTimeout(() => { closeEdit(); loadProducts(); }, 1200);
+    } else {
+      showMsg('editMsg', '❌ ' + (data.detail||'失敗'), 'error');
+    }
+  } catch(e) {
+    showMsg('editMsg', '❌ 連線錯誤', 'error');
+  }
+}
+
+function closeEdit() {
+  document.getElementById('editModal').style.display = 'none';
+  editingId = null;
+}
+
+function showMsg(id, text, type) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = `msg msg-${type}`;
+  setTimeout(() => { el.textContent = ''; el.className = 'msg'; }, 4000);
+}
+
+// 初始化
+initAgentSelect();
+initTickers();
+</script>
+</body>
+</html>
