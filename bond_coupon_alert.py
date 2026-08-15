@@ -26,6 +26,24 @@ from openpyxl import load_workbook
 FREQ_MONTHS = {"每月": 1, "每季": 3, "每半年": 6, "每年": 12}
 LOOKAHEAD_DAYS = 14
 
+DISCLAIMER = (
+    "\n⚠️ 已知限制\n"
+    "1. 配息日是從「到期日＋配息頻率」倒推的，少數債券付息日與到期日不同號，請以實際配息日為主\n"
+    "2. 營業日只避開週六日，未避開台美假日，假日前後請人工再確認"
+)
+
+def is_bond_pricing_file(path, filename=""):
+    """判斷上傳的 Excel 是不是總行的海外債報價檔（跟 ELN 檔區分開）"""
+    if "bond" in str(filename).lower() and "pric" in str(filename).lower():
+        return True
+    try:
+        wb = load_workbook(path, read_only=True)
+        names = wb.sheetnames
+        wb.close()
+        return any(("海外債券資訊" in n) or ("加碼標的" in n) for n in names)
+    except Exception:
+        return False
+
 # ---------- 小工具 ----------
 def to_date(v):
     if v is None or v == "":
@@ -152,7 +170,8 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, max_lines=30
     wd = "一二三四五六日"
     if not ok:
         return (f"📅 {today:%m/%d} 海外債配息雷達\n"
-                f"未來{lookahead}天有 {len(alerts)} 檔配息，但最晚下單日皆已過，今日無可搶配息標的。")
+                f"未來{lookahead}天有 {len(alerts)} 檔配息，但最晚下單日皆已過，今日無可搶配息標的。"
+                + DISCLAIMER)
     ok.sort(key=lambda a: (a["last_trade"], -a["lag"], a["name"]))
     lines = [f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達",
              f"未來{lookahead}天 {len(alerts)} 檔配息｜還來得及 {len(ok)} 檔｜已過 {gone} 檔",
@@ -173,7 +192,7 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, max_lines=30
         if i + 1 >= max_lines and i + 1 < len(ok):
             lines.append(f"…另有 {len(ok)-i-1} 檔，見Excel")
             break
-    lines.append("\n※配息日由到期日+頻率倒推；營業日未含假日；下單前以系統為準")
+    lines.append(DISCLAIMER)
     return "\n".join(lines)
 
 if __name__ == "__main__":
