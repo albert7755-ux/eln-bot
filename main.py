@@ -46,7 +46,7 @@ def _bond_price_dir() -> Path:
 BOND_PRICE_FILE = Path(os.getenv("BOND_PRICE_FILE", "")) if os.getenv("BOND_PRICE_FILE") else (_bond_price_dir() / "bond_pricing_latest.xlsx")
 
 # 海外債群組白名單：在該群裡龍蝦只回這些指令，其餘一律不理（比照 ELN 群）
-BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "alert", "rating", "help"}
+BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "bondalert", "rating", "move", "help"}
 
 def is_bond_group_chat(chat_key: str) -> bool:
     """這個 chat 是不是用 /coupon settarget 設定的海外債群組"""
@@ -57,20 +57,102 @@ def is_bond_group_chat(chat_key: str) -> bool:
         return False
 
 BOND_GROUP_HELP = (
-    "💰 海外債配息雷達（本群專用指令）\n"
-    "/coupon → 3個營業日內要下單的配息債\n"
-    "/coupon 7 → 7個營業日內\n"
-    "/coupon all → 未來14天全部\n"
-    "/coupon table → Excel條件表＋發行機構簡介\n"
-    "/issuer 蘋果 → 發行機構簡介＋架上債券（模糊搜尋，可用英文/ISIN）\n"
-    "/alert 蘋果 2043 ytm>5.2 → 到價通知（list 查看 / del 刪除）\n"
-    "/rating → 立即掃描外部信評新聞（list / watch / unwatch）\n"
-    "上傳 Bond_Pricing Excel → 更新報價檔並重算（自動比對信評異動/新上架）\n"
-    "（每天 06:45 自動推播）\n"
-    "\n🔒專投＝限專業投資人；💎高資產＝高資產客戶專屬"
+    "💰 海外債專區指令（/help bond）\n"
+    "━━━━━━━━━━━━━━━\n"
+    "📅 配息雷達（每天 06:45 自動推）\n"
+    "/coupon → 3個營業日內要下單的配息債＋30天內到期\n"
+    "/coupon 7 → 7個營業日內　/coupon all → 未來14天全部\n"
+    "/coupon table → Excel條件表＋發行機構簡介（未來14天）\n"
+    "\n🏦 發行機構\n"
+    "/issuer 蘋果 → 簡介＋架上所有債券（可用英文/ISIN/代碼）\n"
+    "\n📊 報價異動\n"
+    "/move → 全架 vs 上一份報價，變動 ≥1%\n"
+    "/move 7 3 → vs 7天前，≥3%（上傳報價檔時自動推 ≥2%/≥3%）\n"
+    "/bondalert 蘋果 2043 ytm>5.2 → 單檔到價通知（list / del）\n"
+    "\n🚨 信評\n"
+    "/rating → 掃外部信評新聞（每天 07:00 自動；list / watch / unwatch）\n"
+    "上傳報價檔時自動比對：信評異動／新上架／下架\n"
+    "\n📥 報價檔\n"
+    "直接把 Bond_Pricing Excel 傳給我 → 更新＋自動跑上面全部\n"
+    "\n📣 推播設定\n"
+    "/coupon subscribe → 訂閱每日推播（unsubscribe 取消）\n"
+    "/coupon settarget → 群組推播（off 取消）\n"
+    "━━━━━━━━━━━━━━━\n"
+    "🔒專投＝限專業投資人；💎高資產＝高資產客戶專屬"
 )
 
 BOND_SNAPSHOT_FILE = BOND_PRICE_FILE.parent / "bond_snapshot.json"
+
+def save_price_history(snap_date=None):
+    """把目前報價檔的 Offer / YTM 存進 bond_price_history（同一天重覆上傳會覆蓋）"""
+    from bond_coupon_alert import read_bonds, first_num
+    snap_date = snap_date or datetime.now(TZ_TAIPEI).date()
+    rows = []
+    for b in read_bonds(str(BOND_PRICE_FILE)):
+        rows.append({"d": snap_date, "i": b["isin"], "n": b["name"], "c": b["ccy"],
+                     "o": first_num(b["offer"]), "y": first_num(b["ytm"]), "m": b["maturity"]})
+    with engine.begin() as conn:
+        conn.execute(text("""INSERT INTO bond_price_history(snap_date, isin, bond_name, ccy, offer, ytm, maturity)
+                             VALUES (:d,:i,:n,:c,:o,:y,:m)
+                             ON CONFLICT (snap_date, isin) DO UPDATE SET bond_name=EXCLUDED.bond_name, ccy=EXCLUDED.ccy,
+                             offer=EXCLUDED.offer, ytm=EXCLUDED.ytm, maturity=EXCLUDED.maturity"""), rows)
+    return len(rows)
+
+def price_movers(days_back=1, threshold_pct=2.0, top_n=15):
+    """
+    最新快照 vs N 天前（取 ≤ 該日最近的一份快照）Offer 變動 ≥ threshold% 的債券。
+    days_back=1 代表「上一份快照」（通常是昨天）。回傳 (text, base_date, latest_date)。
+    """
+    from bond_coupon_alert import pi_tag
+    with engine.begin() as conn:
+        latest = conn.execute(text("SELECT MAX(snap_date) FROM bond_price_history")).scalar()
+        if not latest:
+            return "", None, None
+        if days_back <= 1:
+            base = conn.execute(text("SELECT MAX(snap_date) FROM bond_price_history WHERE snap_date < :l"), {"l": latest}).scalar()
+        else:
+            target = latest - timedelta(days=days_back)
+            base = conn.execute(text("SELECT MAX(snap_date) FROM bond_price_history WHERE snap_date <= :t"), {"t": target}).scalar()
+            if base is None:  # 歷史不夠長，就拿最早那一份
+                base = conn.execute(text("SELECT MIN(snap_date) FROM bond_price_history WHERE snap_date < :l"), {"l": latest}).scalar()
+        if not base or base == latest:
+            return "", base, latest
+        rows = conn.execute(text("""
+            SELECT n.isin, n.bond_name, n.ccy, o.offer, n.offer, o.ytm, n.ytm
+            FROM bond_price_history n JOIN bond_price_history o ON o.isin = n.isin AND o.snap_date = :b
+            WHERE n.snap_date = :l AND n.offer IS NOT NULL AND o.offer IS NOT NULL AND o.offer > 0
+        """), {"b": base, "l": latest}).fetchall()
+    movers = []
+    for isin, name, ccy, o_off, n_off, o_ytm, n_ytm in rows:
+        chg = (n_off - o_off) / o_off * 100
+        if abs(chg) >= threshold_pct:
+            movers.append((chg, isin, name, ccy, o_off, n_off, o_ytm, n_ytm))
+    if not movers:
+        return "", base, latest
+    # 用最新報價檔補專投標籤
+    tags = {}
+    try:
+        from bond_coupon_alert import read_bonds
+        tags = {b["isin"]: pi_tag(b) for b in read_bonds(str(BOND_PRICE_FILE))}
+    except Exception:
+        pass
+    downs = sorted([m for m in movers if m[0] < 0], key=lambda x: x[0])[:top_n]
+    ups = sorted([m for m in movers if m[0] > 0], key=lambda x: -x[0])[:top_n]
+    span = "上一份報價" if days_back <= 1 else f"{days_back} 天前"
+    lines = [f"📊 報價異動 ≥ {threshold_pct:g}%（{base:%m/%d} → {latest:%m/%d}，vs {span}）",
+             f"跌 {len([m for m in movers if m[0] < 0])} 檔｜漲 {len([m for m in movers if m[0] > 0])} 檔"]
+    def _fmt(m):
+        chg, isin, name, ccy, o_off, n_off, o_ytm, n_ytm = m
+        y = f"｜YTM {o_ytm:g}→{n_ytm:g}" if (o_ytm is not None and n_ytm is not None) else ""
+        return f"▪ {name} {ccy}｜{tags.get(isin, '')}\n  Offer {o_off:g}→{n_off:g}（{chg:+.1f}%）{y}"
+    if downs:
+        lines.append("\n📉 跌幅")
+        lines += [_fmt(m) for m in downs]
+    if ups:
+        lines.append("\n📈 漲幅")
+        lines += [_fmt(m) for m in ups]
+    lines.append("\n※ 依本行報價檔 Offer 計算，跌多可能是買點也可能是信用事件，請搭配 /rating 與 /issuer 查看")
+    return "\n".join(lines), base, latest
 
 def check_bond_alerts(bot_api=None, source="upload"):
     """
@@ -100,7 +182,7 @@ def check_bond_alerts(bot_api=None, source="upload"):
             fname = "YTM" if field == "ytm" else "Offer"
             msg = (f"🎯 到價通知 #{aid}\n{bname}\n{fname} {cur} 已 {op} {thr}（設定條件）\n"
                    f"目前 Offer {b.get('offer')}｜YTM {b.get('ytm')}\n"
-                   f"（本條件已自動關閉，要繼續追請重新 /alert 設定；來源：{'新報價檔' if source=='upload' else '每日檢查'}）")
+                   f"（本條件已自動關閉，要繼續追請重新 /bondalert 設定；來源：{'新報價檔' if source=='upload' else '每日檢查'}）")
             try:
                 bot_api.push_message(chat_id, TextSendMessage(text=msg))
             except Exception as e:
@@ -183,6 +265,12 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 def init_db():
     with engine.begin() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS bond_price_history (
+            snap_date DATE NOT NULL, isin TEXT NOT NULL, bond_name TEXT, ccy TEXT,
+            offer DOUBLE PRECISION, ytm DOUBLE PRECISION, maturity DATE,
+            PRIMARY KEY (snap_date, isin)
+        );"""))
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS bond_rating_watch (
             issuer TEXT PRIMARY KEY, en_name TEXT, added_by TEXT, active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -1204,6 +1292,9 @@ def handle_text_message(event):
             if is_group:
                 msg = "群組可用指令：\n/detail <商品代號>：查詢標的完整狀況（支援模糊搜尋）\n/list：列出所有可查商品代號\n/list <姓名>：查詢該理專的持倉\n/nc YYYYMM：查詢該月閉鎖期打開的商品\n/nc YYYYMM <姓名>：查詢該理專的閉鎖期商品\n/end YYYYMM：查詢該月到期商品\n"
             else:
+                if help_arg in ("bond", "債", "海外債", "coupon", "固收"):
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=BOND_GROUP_HELP))
+                    return
                 if help_arg in ("alert", "警示"):
                     msg = ("🔔 Alert 指令說明\n─────────────────\n"
                            "/alert add <標的> <價格> above/below\n/alert add <標的> above/below <價格>\n"
@@ -1245,9 +1336,9 @@ def handle_text_message(event):
                            "🔔 警示\n/alert add  /alert list  /alert del\n輸入 /help alert 看完整範例\n─────────────────\n"
                            "📚 文章庫\n/save  /unread  /read  /article  /del  /web\n直接傳圖片 → 自動儲存分析\n輸入 /help save 看完整說明\n─────────────────\n"
                            "📊 基金淨值 & 債券報價\n/fundnav → 手動更新基金淨值\n/bondnav → 手動觸發債券報價更新（94筆，約30分鐘）\n/tracklog → 查看執行記錄\n─────────────────\n"
-                           "💰 海外債配息雷達\n/coupon → 3個營業日內要下單的配息債\n/coupon 7 → 7個營業日內\n/coupon all → 未來14天全部\n/coupon table → Excel條件表＋發行機構簡介（未來14天）\n/issuer 蘋果 → 單一發行機構簡介＋架上債券（模糊搜尋）\n/alert 蘋果 2043 ytm>5.2 → YTM/Offer 到價通知（list / del）\n/rating → 外部信評新聞掃描（Google News）；list / watch / unwatch；每天 07:00 自動\n/coupon subscribe → 理專私訊訂閱每日推播（unsubscribe 取消）\n/coupon settarget → 在海外債群組打一次，每日推播也推到該群（off 取消）\n上傳 Bond_Pricing Excel → 自動更新報價檔並重算（比對信評異動/新上架/下架）\n（每天 06:45 自動推播，含30天內到期提醒）\n─────────────────\n"
+                           "💰 海外債專區\n/help bond → 配息雷達、發行機構、報價異動、信評、到價通知…全部指令\n─────────────────\n"
                            "📧 其他\n/mail  /invest  /forget  /spending\n上傳錄音 → 自動逐字稿 / 摘要\n上傳檔案 → 自動分析\n─────────────────\n"
-                           "進階說明：/help alert、/help eln、/help report、/help save")
+                           "進階說明：/help bond、/help alert、/help eln、/help report、/help save")
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
             return
         transcript_cache = db_get_transcript_cache(ck)
@@ -1947,17 +2038,43 @@ def handle_text_message(event):
                 threading.Thread(target=_run_rating, args=(chat_id, _bot_api), daemon=True).start()
                 return
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="用法：/rating（立即掃描）\n/rating list\n/rating watch 蘋果\n/rating unwatch 蘋果")); return
-        if cmd == "alert":
-            # /alert 蘋果 2043 ytm>5.2   → 設定到價條件（YTM 或 Offer）
-            # /alert US037833 offer<90
-            # /alert list  /alert del 3
+        if cmd in ("move", "movers", "異動"):
+            # /move        → vs 上一份報價，變動 ≥ 1%
+            # /move 7      → vs 7 天前，≥ 2%
+            # /move 7 3    → vs 7 天前，≥ 3%
+            # /move 30 5   → vs 30 天前，≥ 5%
+            parts = raw_cmd.split()
+            try:
+                db_ = int(parts[1]) if len(parts) > 1 else 1
+                th_ = float(parts[2]) if len(parts) > 2 else (1.0 if db_ <= 1 else 2.0)
+            except ValueError:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="用法：/move（vs 上一份，≥1%）\n/move 7（vs 7天前，≥2%）\n/move 7 3（vs 7天前，≥3%）")); return
+            try:
+                mv, base, latest = price_movers(days_back=db_, threshold_pct=th_)
+                if not latest:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="還沒有報價歷史，上傳一次報價檔後就會開始累積（每天上傳一次，隔天起可比對）。")); return
+                if not base:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"目前只有 {latest:%m/%d} 一份報價歷史，明天上傳新檔後就能比對。")); return
+                if not mv:
+                    mv = f"📊 {base:%m/%d} → {latest:%m/%d} 沒有 Offer 變動 ≥ {th_:g}% 的債券。\n（可調低門檻，例：/move {db_} 0.5）"
+                chunks_m = [mv[i:i+4900] for i in range(0, len(mv), 4900)]
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=chunks_m[0]))
+                for c in chunks_m[1:]:
+                    _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=c))
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 異動查詢失敗：{str(e)[:200]}"))
+            return
+        if cmd == "bondalert":
+            # /bondalert 蘋果 2043 ytm>5.2   → 設定到價條件（YTM 或 Offer）
+            # /bondalert US037833 offer<90
+            # /bondalert list  /bondalert del 3
             if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔，請先把 Bond_Pricing Excel 傳給我。"))
                 return
             arg = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
             chat_id = ck.split(":", 1)[1]
-            usage = ("🎯 到價通知用法：\n/alert 蘋果 2043 ytm>5.2\n/alert US037833 offer<90\n/alert 蘋果9 ytm>=5\n"
-                     "/alert list → 我的條件\n/alert del 3 → 刪除 #3\n（每次更新報價檔＋每天 06:45 檢查，命中推播一次後自動關閉）")
+            usage = ("🎯 到價通知用法：\n/bondalert 蘋果 2043 ytm>5.2\n/bondalert US037833 offer<90\n/bondalert 蘋果9 ytm>=5\n"
+                     "/bondalert list → 我的條件\n/bondalert del 3 → 刪除 #3\n（每次更新報價檔＋每天 06:45 檢查，命中推播一次後自動關閉）")
             if not arg:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=usage)); return
             al = arg.lower()
@@ -1975,7 +2092,7 @@ def handle_text_message(event):
                 try:
                     aid = int(al.split()[1])
                 except Exception:
-                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="請給編號，例：/alert del 3")); return
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="請給編號，例：/bondalert del 3")); return
                 with engine.begin() as conn:
                     n = conn.execute(text("UPDATE bond_price_alert SET active=FALSE WHERE id=:i AND chat_id=:c AND active=TRUE"), {"i": aid, "c": chat_id}).rowcount
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已刪除 #{aid}" if n else f"找不到 #{aid}")); return
@@ -1986,7 +2103,7 @@ def handle_text_message(event):
             field = "ytm" if field_raw in ("ytm", "殖利率", "yield") else "offer"
             keyword = arg[:m.start()].strip()
             if not keyword:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請指定債券，例：/alert 蘋果 2043 ytm>5.2")); return
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請指定債券，例：/bondalert 蘋果 2043 ytm>5.2")); return
             from bond_coupon_alert import find_bonds, first_num
             hits = find_bonds(str(BOND_PRICE_FILE), keyword)
             if not hits:
@@ -2004,7 +2121,7 @@ def handle_text_message(event):
                                    {"c": chat_id, "i": b["isin"], "n": b["name"], "f": field, "o": op, "t": thr, "v": cur}).scalar()
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text=f"✅ 已設定到價通知 #{aid}\n{b['name']}（{b['isin']}）\n條件：{field.upper()} {op} {thr}\n目前：Offer {b['offer']}｜YTM {b['ytm']}\n"
-                     f"每次更新報價檔＋每天 06:45 檢查，命中會推播一次。/alert list 查看"))
+                     f"每次更新報價檔＋每天 06:45 檢查，命中會推播一次。/bondalert list 查看"))
             return
         if cmd == "issuer" or cmd.startswith("issuer "):
             # /issuer 蘋果   → 該發行機構簡介 + 架上所有債券（模糊搜尋，不限配息中）
@@ -2516,6 +2633,15 @@ def handle_file_message(event):
                             push_long_message(bot_api_ref, chat_key.split(":", 1)[1], "📋 與上一份報價檔比對\n" + diff_txt)
                     except Exception as e:
                         print(f"[BondSnapshot ERROR] {e}")
+                    # 報價歷史 + 異動（vs 上一份 ≥2%；vs 7天前 ≥3%）
+                    try:
+                        save_price_history()
+                        for db_, th_ in ((1, 2.0), (7, 3.0)):
+                            mv, _, _ = price_movers(days_back=db_, threshold_pct=th_)
+                            if mv:
+                                push_long_message(bot_api_ref, chat_key.split(":", 1)[1], mv)
+                    except Exception as e:
+                        print(f"[BondMovers ERROR] {e}")
                     # 到價通知
                     try:
                         n_hit = check_bond_alerts(bot_api_ref, source="upload")
