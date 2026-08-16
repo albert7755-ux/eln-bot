@@ -1347,7 +1347,7 @@ def handle_text_message(event):
                     msg = ("🦞 龍蝦指令清單\n─────────────────\n"
                            "📊 ELN\n/calc  /list  /detail\n/eln upload  /eln run  /eln history  /eln result\n"
                            "/runnow  /tracklog  /end\n─────────────────\n"
-                           "📰 財經\n/daily  /daily cache  /market\n─────────────────\n"
+                           "📰 財經\n/daily  /daily cache  /market\n/bonddaily  /bonddaily cache → 債券市場日報\n─────────────────\n"
                            "📑 報告\n/report  /pdf\n─────────────────\n"
                            "📚 知識庫\n/內規 <問題> → 查詢 內部法規\n/kb <問題> → 查詢 Chroma 知識庫\n/kb上傳 → 上傳檔案\n/kb清單 → 查看文件清單\n─────────────────\n"
                            "🔔 警示\n/alert add  /alert list  /alert del\n輸入 /help alert 看完整範例\n─────────────────\n"
@@ -1441,6 +1441,29 @@ def handle_text_message(event):
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=posts[:4900]))
             except Exception as e:
                 _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"生成失敗：{str(e)[:200]}"))
+            return
+        if cmd.startswith("bonddaily"):
+            parts = text_raw.split(" ", 1)
+            use_cache = len(parts) > 1 and parts[1].strip().lower() == "cache"
+            if use_cache:
+                try:
+                    with engine.begin() as conn:
+                        row = conn.execute(text("SELECT report_text FROM bond_daily_report_cache ORDER BY created_at DESC LIMIT 1")).fetchone()
+                    if row:
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(text=row[0][:4900]))
+                    else:
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(text="尚無快取債券日報，請用 /bonddaily 產生最新版本。"))
+                except Exception as e:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"讀取快取失敗: {e}"))
+                return
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="債券日報產生中，請稍候約30-60秒..."))
+            try:
+                from bond_daily_report import generate_report as bond_generate_report, save_report_to_db as bond_save_report_to_db
+                bond_report = bond_generate_report()
+                bond_save_report_to_db(bond_report)
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=bond_report[:4900]))
+            except Exception as e:
+                _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=f"債券日報產生失敗: {e}"))
             return
         if cmd.startswith("daily"):
             parts = text_raw.split(" ", 1)
@@ -3020,6 +3043,19 @@ def job_daily_report():
     except Exception as e:
         write_job_log("財經日報", "error", str(e))
 
+def job_bond_daily_report():
+    now = datetime.now(TZ_TAIPEI_PYTZ)
+    if now.weekday() >= 6:  # 只跳過週日
+        write_job_log("債券日報", "skipped", "週日跳過")
+        return
+    write_job_log("債券日報", "started", now.strftime('%Y-%m-%d %H:%M'))
+    try:
+        from bond_daily_report import main as bond_report_main
+        bond_report_main()
+        write_job_log("債券日報", "success", "推播成功")
+    except Exception as e:
+        write_job_log("債券日報", "error", str(e))
+
 def job_alert_monitor():
     try:
         from alert_monitor import main as alert_main
@@ -3361,6 +3397,7 @@ def start_scheduler():
     scheduler.add_job(job_bond_coupon_radar, CronTrigger(day_of_week="mon-fri", hour=6, minute=45, timezone=TZ_TAIPEI_PYTZ), id="bond_coupon_radar", name="海外債配息雷達")
     scheduler.add_job(job_bond_rating_news, CronTrigger(day_of_week="mon-fri", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ), id="bond_rating_news", name="信評新聞雷達")
     scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
+    scheduler.add_job(job_bond_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=50, timezone=TZ_TAIPEI_PYTZ), id="bond_daily_report", name="債券日報")
     scheduler.add_job(job_auto_tracking, CronTrigger(day_of_week="mon-sat", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ), id="auto_tracking", name="ELN自動追蹤")
     scheduler.add_job(job_alert_monitor, IntervalTrigger(minutes=15), id="alert_monitor", name="價格警示")
     scheduler.add_job(job_spending_report, CronTrigger(hour=9, minute=0, timezone=TZ_TAIPEI_PYTZ), id="spending_report", name="月度消費明細")
