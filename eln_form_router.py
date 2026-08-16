@@ -162,6 +162,53 @@ async def add_product(request: Request):
         raise HTTPException(status_code=400, detail=f"新增失敗：{str(e)}")
 
 
+@router.get("/eln-form/export")
+async def export_products(password: str = ""):
+    """匯出全部商品為 Excel（需密碼）"""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=403, detail="密碼錯誤")
+    import pandas as pd
+    import io
+    from fastapi.responses import StreamingResponse
+    from datetime import datetime as _dt
+
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT bond_id, trade_date, product_type, tenure_months, currency,
+                   t1_code, t1_initial, t2_code, t2_initial, t3_code, t3_initial,
+                   t4_code, t4_initial, t5_code, t5_initial,
+                   coupon_pct, strike_pct, ko_pct, ko_type, ki_pct, ki_type,
+                   issue_date, valuation_date, maturity_date, agent_name, line_id,
+                   created_at
+            FROM eln_products
+            ORDER BY trade_date ASC
+        """)).fetchall()
+
+    records = []
+    for r in rows:
+        records.append({
+            "債券代號": r[0], "交易日": r[1], "商品類型": r[2], "天期 (月)": r[3], "幣別": r[4],
+            "標的1": r[5], "標的1.1": r[6], "標的2": r[7], "標的2.1": r[8],
+            "標的3": r[9], "標的3.1": r[10], "標的4": r[11], "標的4.1": r[12],
+            "標的5": r[13], "標的5.1": r[14],
+            "收益率(年化%)/": r[15], "執行價格(%)": r[16],
+            "KO 價格(%)": r[17], "KO 類型": r[18], "KI 價格(%)": r[19], "KI 類型": r[20],
+            "發行日": r[21], "最終評價日": r[22], "到期日": r[23],
+            "理專": r[24], "LINE_ID": r[25], "建立時間": str(r[26])[:19] if r[26] else "",
+        })
+
+    df = pd.DataFrame(records)
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False, engine="openpyxl")
+    buf.seek(0)
+    filename = f"ELN_products_{_dt.now().strftime('%Y%m%d')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
 @router.post("/eln-form/delete")
 async def delete_product(request: Request):
     """刪除商品（需密碼）"""
