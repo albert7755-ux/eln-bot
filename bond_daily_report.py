@@ -72,38 +72,63 @@ def get_fred_yield(series_id: str):
         return None
 
 
+JGB_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+
+def _parse_jgb_10y_csv(text: str):
+    """從 MOF CSV 內容解析出 10 年期欄位的所有數值(自動偵測 10Y/10年 在第幾欄)"""
+    rows = [r for r in csv.reader(io.StringIO(text)) if len(r) >= 11]
+    col = 10  # 預設:日期(0), 1年(1)...10年(10)
+    for r in rows:
+        cells = [c.strip() for c in r]
+        if "10Y" in cells:
+            col = cells.index("10Y")
+            break
+        if "10年" in cells:
+            col = cells.index("10年")
+            break
+    values = []
+    for r in rows:
+        if len(r) <= col:
+            continue
+        try:
+            values.append(float(r[col].strip()))
+        except ValueError:
+            continue  # 跳過表頭、"-"、註解列
+    return values
+
+
 def get_jgb_10y():
     """
-    日本10年期公債殖利率:日本財務省(MOF)每天公佈官方 CSV,免費且穩定。
-    CSV 是 Shift-JIS 編碼,欄位順序:日期,1年,2年,...,9年,10年,...
+    日本10年期公債殖利率(財務省官方資料),依序嘗試三個來源:
+    1. 英文版當月 CSV(jgbcme.csv,注意檔名有個 e)
+    2. 日文版當月 CSV(jgbcm.csv,Shift-JIS 編碼)
+    3. 英文版完整歷史 CSV(每月1號當月檔只有一筆資料時的備援)
     """
-    try:
-        url = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcm.csv"
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        text = resp.content.decode("shift_jis", errors="ignore")
-        rows = [r for r in csv.reader(io.StringIO(text)) if len(r) >= 11]
-
-        # 10年期在第 11 欄(index 10):日期(0), 1年(1)...10年(10)
-        values = []
-        for r in rows:
-            v = r[10].strip()
-            try:
-                values.append(float(v))
-            except ValueError:
-                continue  # 跳過表頭或 "-" 的列
-
-        if len(values) < 2:
-            return None
-        prev, last = values[-2], values[-1]
-        return {
-            "price": round(last, 3),
-            "change": round(last - prev, 3),
-            "pct": 0.0,
-        }
-    except Exception as e:
-        print(f"[BondDaily] MOF 日債抓取失敗: {e}")
-        return None
+    sources = [
+        ("https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv", "utf-8"),
+        ("https://www.mof.go.jp/jgbs/reference/interest_rate/jgbcm.csv", "shift_jis"),
+        ("https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv", "utf-8"),
+    ]
+    for url, enc in sources:
+        fname = url.rsplit("/", 1)[-1]
+        try:
+            resp = requests.get(url, headers=JGB_HEADERS, timeout=20)
+            if resp.status_code != 200:
+                print(f"[BondDaily] MOF {fname} HTTP {resp.status_code},換下一個來源")
+                continue
+            values = _parse_jgb_10y_csv(resp.content.decode(enc, errors="ignore"))
+            if len(values) >= 2:
+                prev, last = values[-2], values[-1]
+                return {
+                    "price": round(last, 3),
+                    "change": round(last - prev, 3),
+                    "pct": 0.0,
+                }
+            print(f"[BondDaily] MOF {fname} 有效數值不足({len(values)}筆),換下一個來源")
+        except Exception as e:
+            print(f"[BondDaily] MOF {fname} 抓取失敗: {e}")
+    return None
 
 
 def get_bond_market_data():
@@ -209,7 +234,65 @@ def build_bond_snapshot(data):
 
 
 # ==============================
-# 三、Claude 評論 + 每日輪替專題
+# 三、配息雷達候選債(給「今日操作思維」用)
+# ==============================
+
+def _find_bond_price_file():
+    """報價檔位置:跟 main.py 的邏輯一致,優先環境變數,再找 Render 磁碟"""
+    from pathlib import Path
+    env_path = os.getenv("BOND_PRICE_FILE", "")
+    if env_path and Path(env_path).exists():
+        return env_path
+    for d in ("/data/bond_pricing", "/tmp/bond_pricing"):
+        p = Path(d) / "bond_pricing_latest.xlsx"
+        if p.exists():
+            return str(p)
+    return None
+
+
+def get_coupon_candidates(days_ahead=3, max_n=8) -> str:
+    """
+    從配息雷達邏輯撈出「最晚下單日在 N 個營業日內、還來得及買」的債券,
+    整理成清單文字餵給 Claude,讓它挑 1-2 支跟當天市場主題最搭的。
+    抓不到報價檔或沒有候選時回傳空字串(日報照常運作,只是不帶商品)。
+    """
+    try:
+        from bond_coupon_alert import build_alerts, biz_days_after, pi_tag, first_num
+
+        price_file = _find_bond_price_file()
+        if not price_file:
+            print("[BondDaily] 找不到債券報價檔,今日操作思維只寫市場面")
+            return ""
+
+        tw_tz = pytz.timezone("Asia/Taipei")
+        today = datetime.now(tw_tz).date()
+
+        alerts = build_alerts(price_file, today=today, lookahead=14)
+        cutoff = biz_days_after(today, days_ahead)
+        ok = [a for a in alerts if a["status"].startswith("✅") and a["last_trade"] <= cutoff]
+        if not ok:
+            return ""
+        ok.sort(key=lambda a: (a["last_trade"], a["name"]))
+
+        lines = []
+        for a in ok[:max_n]:
+            ytm = first_num(a.get("ytm"))
+            ytm_txt = f"{ytm:.2f}%" if ytm else "-"
+            mat = a.get("maturity")
+            mat_txt = f"{mat:%Y/%m}" if mat else "-"
+            lines.append(
+                f"- {a['name']}｜{a['ccy']}｜票面 {a['coupon']}%｜{a['freq']}配息"
+                f"｜YTM {ytm_txt}｜到期 {mat_txt}"
+                f"｜配息日 {a['coupon_date']:%m/%d}｜最晚下單 {a['last_trade']:%m/%d}｜{pi_tag(a)}"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[BondDaily] 配息候選抓取失敗: {e}")
+        return ""
+
+
+# ==============================
+# 四、Claude 評論 + 每日輪替專題
 # ==============================
 
 def get_weekday_topic() -> str:
@@ -228,18 +311,46 @@ def get_weekday_topic() -> str:
     return topics[weekday]
 
 
-def generate_bond_commentary(snapshot_text: str) -> str:
+def generate_bond_commentary(snapshot_text: str, coupon_candidates: str = "") -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     tw_tz = pytz.timezone("Asia/Taipei")
     today_str = datetime.now(tw_tz).strftime("%Y年%m月%d日")
     topic = get_weekday_topic()
 
+    if coupon_candidates:
+        coupon_block = (
+            "以下是本行架上「最晚下單日在3個營業日內、還來得及參與這次配息」的債券清單:\n"
+            f"{coupon_candidates}\n\n"
+        )
+        action_instruction = (
+            "5.【今日操作思維】分成兩層,共3-4句:\n"
+            "  (市場面)1-2句,今天跟客戶談債券的切入思維。每天換不同角度:"
+            "具體數字鉤子、模擬客戶提問、歷史對比、或即將發生的事件,挑最適合今天新聞的一種。\n"
+            "  (商品面)從上面的配息債清單中,挑1至2支跟今天市場主題最呼應的"
+            "(例如長端殖利率創高的日子,優先挑長天期高票面的;信用利差收窄的日子,可挑高YTM的),"
+            "說明為什麼今天適合跟客戶聊這支,並列出客觀事實:幣別、票面、YTM、到期、最晚下單日,"
+            "以及原清單中的🔒專投或💎高資產標籤(若有,必須保留,提醒理專確認客戶資格)。\n"
+            "  商品面只能陳述客觀數字與「可與客戶討論」的角度,"
+            "絕對禁止「建議買進」「必買」「錯過可惜」等勸誘字眼,禁止任何報酬保證。"
+            "只能挑清單裡有的債券,不可自行編造商品。\n\n"
+        )
+    else:
+        coupon_block = ""
+        action_instruction = (
+            "5.【今日操作思維】1-2句,今天跟客戶談債券的切入思維。每天換不同角度:"
+            "具體數字鉤子、模擬客戶提問、歷史對比、或即將發生的事件,挑最適合今天新聞的一種。"
+            "避免固定句型,不要每天都用「值得留意」「建議關注」這類結尾;"
+            "只能是市場觀察,不可以是投資建議或報酬保證。今天沒有提供商品清單,"
+            "不要提及任何具體債券商品。\n\n"
+        )
+
     prompt = (
         "你是銀行固定收益科的債券晨報編輯,讀者是分行理財專員,"
         "他們服務的高資產客戶持有海外債券、債券基金與結構型商品。\n\n"
         f"今天台北時間是 {today_str}。以下是昨晚(美國時間)收盤的債券市場數據:\n\n"
         f"{snapshot_text}\n\n"
+        f"{coupon_block}"
         f"請上網搜尋 {today_str} 前後最新的債券與利率相關新聞(優先最近24小時),"
         "重點關注:美債殖利率變動原因、Fed 官員談話、通膨與就業數據、"
         "日銀與日債動向、公司債利差與新發行、重要國債標售結果。\n\n"
@@ -253,8 +364,7 @@ def generate_bond_commentary(snapshot_text: str) -> str:
         "3.【日債觀察】1-2句,說明日債與日圓的最新動態;若沒有明確新聞,誠實寫目前市場關注焦點。\n"
         f"4.【今日專題】用150-250字寫一則小專題,今天的主題是:{topic}。"
         "要有具體事件或數據,不要空泛。\n"
-        "5.【給理專的一句話】1句,把今天的資訊轉成理專跟客戶對話時可以用的觀察角度,"
-        "只能是市場觀察,不可以是投資建議或報酬保證。\n\n"
+        f"{action_instruction}"
         "要求:\n"
         "- 一定要具體,引用真實新聞事件,沒有事件就誠實說市場在等什麼。\n"
         "- 不要亂編新聞或數字。\n"
@@ -265,7 +375,7 @@ def generate_bond_commentary(snapshot_text: str) -> str:
         "【殖利率動向解讀】\n(內容)\n\n"
         "【日債觀察】\n(內容)\n\n"
         "【今日專題】\n(內容)\n\n"
-        "【給理專的一句話】\n(內容)\n"
+        "【今日操作思維】\n(內容)\n"
     )
 
     try:
@@ -299,13 +409,14 @@ def extract_section(text: str, title: str) -> str:
 
 def build_final_bond_report(data: dict) -> str:
     snapshot = build_bond_snapshot(data)
-    commentary = generate_bond_commentary(snapshot)
+    coupon_candidates = get_coupon_candidates()
+    commentary = generate_bond_commentary(snapshot, coupon_candidates)
 
     intro = extract_section(commentary, "前言")
     yields = extract_section(commentary, "殖利率動向解讀")
     jgb = extract_section(commentary, "日債觀察")
     topic = extract_section(commentary, "今日專題")
-    one_liner = extract_section(commentary, "給理專的一句話")
+    action = extract_section(commentary, "今日操作思維")
 
     tw_tz = pytz.timezone("Asia/Taipei")
     weekday = datetime.now(tw_tz).weekday()
@@ -328,9 +439,11 @@ def build_final_bond_report(data: dict) -> str:
     final_text += f"\n\n六、{topic_titles[weekday]}\n"
     final_text += topic if topic else "(今日專題生成失敗,明日再會)"
 
-    if one_liner:
-        final_text += "\n\n💬 給理專的一句話\n"
-        final_text += one_liner
+    if action:
+        final_text += "\n\n🧭 今日操作思維\n"
+        final_text += action
+        if coupon_candidates:
+            final_text += "\n(商品資訊以最新報價檔為準;內部參考,非投資建議)"
 
     return final_text.strip()
 
