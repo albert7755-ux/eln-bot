@@ -205,9 +205,6 @@ def build_bond_snapshot(data):
     if d2 and d10:
         spread_2s10s = (d10["price"] - d2["price"]) * 100
         lines.append(f"2年/10年利差:{spread_2s10s:+.0f}bp")
-    if d10 and d30:
-        spread_10s30s = (d30["price"] - d10["price"]) * 100
-        lines.append(f"10年/30年利差:{spread_10s30s:+.0f}bp")
     if d20 and d30:
         spread_20s30s = (d30["price"] - d20["price"]) * 100
         shape = "正斜率" if spread_20s30s > 0 else "倒掛(20Y高於30Y)"
@@ -295,6 +292,16 @@ def get_coupon_candidates(days_ahead=3, max_n=8) -> str:
 # 四、Claude 評論 + 每日輪替專題
 # ==============================
 
+# 日債觀察每週只出現一次:0=週一, 1=週二, 2=週三, 3=週四, 4=週五
+# 想換天只要改這個數字(週五已有日債專題,建議避開)
+JGB_SECTION_WEEKDAY = 2
+
+
+def show_jgb_section_today() -> bool:
+    tw_tz = pytz.timezone("Asia/Taipei")
+    return datetime.now(tw_tz).weekday() == JGB_SECTION_WEEKDAY
+
+
 def get_weekday_topic() -> str:
     """星期幾決定專題主題,一週輪一圈"""
     tw_tz = pytz.timezone("Asia/Taipei")
@@ -324,26 +331,39 @@ def generate_bond_commentary(snapshot_text: str, coupon_candidates: str = "") ->
             f"{coupon_candidates}\n\n"
         )
         action_instruction = (
-            "5.【今日操作思維】分成兩層,共3-4句:\n"
-            "  (市場面)1-2句,今天跟客戶談債券的切入思維。每天換不同角度:"
-            "具體數字鉤子、模擬客戶提問、歷史對比、或即將發生的事件,挑最適合今天新聞的一種。\n"
-            "  (商品面)從上面的配息債清單中,挑1至2支跟今天市場主題最呼應的"
-            "(例如長端殖利率創高的日子,優先挑長天期高票面的;信用利差收窄的日子,可挑高YTM的),"
-            "說明為什麼今天適合跟客戶聊這支,並列出客觀事實:幣別、票面、YTM、到期、最晚下單日,"
-            "以及原清單中的🔒專投或💎高資產標籤(若有,必須保留,提醒理專確認客戶資格)。\n"
-            "  商品面只能陳述客觀數字與「可與客戶討論」的角度,"
-            "絕對禁止「建議買進」「必買」「錯過可惜」等勸誘字眼,禁止任何報酬保證。"
+            "5.【今日操作思維】語氣定位:這是給理專的「觀察與提醒」,不是判斷與指令。共2-4句:\n"
+            "  (市場面)1-2句,用觀察角度切入,從以下挑一種最適合今天新聞的:"
+            "(a)具體數字當開場鉤子 (b)模擬客戶今天最可能問的問題,給理專回答方向 "
+            "(c)歷史對比 (d)點出即將發生的事件與觀察心態。"
+            "對市場方向必須保留不確定性,禁止「正是時機」「趨勢已確立」「必然」這類果決斷言,"
+            "行情永遠可能反向,語氣要留餘地。\n"
+            "  (商品面)語氣是「順帶一提」,不是推銷:從上面清單挑1-2支跟今天話題自然相關的,"
+            "以「若客戶本來就有配置需求」的角度帶到,說明這幾天是這一期配息的最後下單窗口,"
+            "列出客觀事實:幣別、票面、YTM、最晚下單日,"
+            "並保留原清單中的🔒專投或💎高資產標籤(若有,提醒理專確認客戶資格)。"
+            "禁止「建議買進」「必買」「錯過可惜」等勸誘字眼,禁止報酬保證,"
             "只能挑清單裡有的債券,不可自行編造商品。\n\n"
         )
     else:
         coupon_block = ""
         action_instruction = (
-            "5.【今日操作思維】1-2句,今天跟客戶談債券的切入思維。每天換不同角度:"
+            "5.【今日操作思維】1-2句,給理專的觀察與提醒,不是判斷與指令。每天換不同角度:"
             "具體數字鉤子、模擬客戶提問、歷史對比、或即將發生的事件,挑最適合今天新聞的一種。"
-            "避免固定句型,不要每天都用「值得留意」「建議關注」這類結尾;"
+            "對市場方向保留不確定性,禁止果決斷言;避免固定句型,"
+            "不要每天都用「值得留意」「建議關注」這類結尾;"
             "只能是市場觀察,不可以是投資建議或報酬保證。今天沒有提供商品清單,"
             "不要提及任何具體債券商品。\n\n"
         )
+
+    if show_jgb_section_today():
+        jgb_instruction = (
+            "3.【日債觀察】1-2句,說明日債與日圓的最新動態;"
+            "若沒有明確新聞,誠實寫目前市場關注焦點。\n"
+        )
+        jgb_format = "【日債觀察】\n(內容)\n\n"
+    else:
+        jgb_instruction = ""
+        jgb_format = ""
 
     prompt = (
         "你是銀行固定收益科的債券晨報編輯,讀者是分行理財專員,"
@@ -360,20 +380,24 @@ def generate_bond_commentary(snapshot_text: str, coupon_candidates: str = "") ->
         "務必區分短天期(反映Fed政策預期)與長天期(反映通膨與期限溢酬)的不同邏輯,"
         "不可把單一天期的變化泛化成整條曲線。"
         "另外請留意20年/30年利差:過去幾年20年期因供需因素長期高於30年期(曲線扭曲),"
-        "若數據顯示20年已低於30年(正斜率),代表扭曲修復,值得一提;若利差有明顯變化也請說明。\n"
-        "3.【日債觀察】1-2句,說明日債與日圓的最新動態;若沒有明確新聞,誠實寫目前市場關注焦點。\n"
-        f"4.【今日專題】用150-250字寫一則小專題,今天的主題是:{topic}。"
-        "要有具體事件或數據,不要空泛。\n"
+        "若數據顯示20年已低於30年(正斜率),代表扭曲修復,值得一提;若利差有明顯變化也請說明。"
+        "【極重要】描述漲跌與比較時,必須逐項核對上方表格的實際數字與箭頭(🔺=升、▼=降),"
+        "先確認方向再下筆;與其寫「長端比短端如何」這種容易寫反的比較句,"
+        "寧可直接引用數字,例如「10年升6bp、2年降5bp」。寫錯方向是嚴重錯誤。\n"
+        f"{jgb_instruction}"
+        f"4.【今日專題】用100-150字寫一則小專題,今天的主題是:{topic}。"
+        "只挑1-2個最重要的事件講,寧短勿長,不要條列式流水帳。\n"
         f"{action_instruction}"
         "要求:\n"
         "- 一定要具體,引用真實新聞事件,沒有事件就誠實說市場在等什麼。\n"
         "- 不要亂編新聞或數字。\n"
         "- 語氣專業但口語化,像晨會上講給理專聽。\n"
+        "- 純文字輸出,禁用任何markdown符號(**粗體**、#標題、-條列),LINE不支援會變亂碼。\n"
         "- 總長度精簡,適合手機閱讀。\n\n"
         "輸出格式必須完全如下:\n\n"
         "【前言】\n(內容)\n\n"
         "【殖利率動向解讀】\n(內容)\n\n"
-        "【日債觀察】\n(內容)\n\n"
+        f"{jgb_format}"
         "【今日專題】\n(內容)\n\n"
         "【今日操作思維】\n(內容)\n"
     )
@@ -382,6 +406,7 @@ def generate_bond_commentary(snapshot_text: str, coupon_candidates: str = "") ->
         message = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1600,
+            temperature=0.3,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt}]
         )
@@ -390,6 +415,7 @@ def generate_bond_commentary(snapshot_text: str, coupon_candidates: str = "") ->
         message = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1600,
+            temperature=0.3,
             messages=[{"role": "user", "content": prompt}]
         )
 
@@ -433,10 +459,12 @@ def build_final_bond_report(data: dict) -> str:
     final_text += "\n\n四、殖利率動向解讀\n"
     final_text += yields if yields else "美債殖利率變化反映市場對利率路徑的最新定價,建議留意後續數據。"
 
-    final_text += "\n\n五、日債觀察\n"
-    final_text += jgb if jgb else "日債與日圓走勢持續受日銀政策預期影響,為觀察重點。"
+    section_nums = iter(["五", "六"])
+    if show_jgb_section_today():
+        final_text += f"\n\n{next(section_nums)}、日債觀察\n"
+        final_text += jgb if jgb else "日債與日圓走勢持續受日銀政策預期影響,為觀察重點。"
 
-    final_text += f"\n\n六、{topic_titles[weekday]}\n"
+    final_text += f"\n\n{next(section_nums)}、{topic_titles[weekday]}\n"
     final_text += topic if topic else "(今日專題生成失敗,明日再會)"
 
     if action:
