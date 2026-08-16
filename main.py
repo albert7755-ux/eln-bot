@@ -3395,9 +3395,9 @@ def job_bond_coupon_radar():
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
     scheduler.add_job(job_bond_coupon_radar, CronTrigger(day_of_week="mon-fri", hour=6, minute=45, timezone=TZ_TAIPEI_PYTZ), id="bond_coupon_radar", name="海外債配息雷達")
-    scheduler.add_job(job_bond_rating_news, CronTrigger(day_of_week="mon-fri", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ), id="bond_rating_news", name="信評新聞雷達")
+    scheduler.add_job(job_bond_rating_news, CronTrigger(day_of_week="mon-fri", hour=6, minute=50, timezone=TZ_TAIPEI_PYTZ), id="bond_rating_news", name="信評新聞雷達")
     scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
-    scheduler.add_job(job_bond_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=50, timezone=TZ_TAIPEI_PYTZ), id="bond_daily_report", name="債券日報")
+    scheduler.add_job(job_bond_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=38, timezone=TZ_TAIPEI_PYTZ), id="bond_daily_report", name="債券日報")
     scheduler.add_job(job_auto_tracking, CronTrigger(day_of_week="mon-sat", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ), id="auto_tracking", name="ELN自動追蹤")
     scheduler.add_job(job_alert_monitor, IntervalTrigger(minutes=15), id="alert_monitor", name="價格警示")
     scheduler.add_job(job_spending_report, CronTrigger(hour=9, minute=0, timezone=TZ_TAIPEI_PYTZ), id="spending_report", name="月度消費明細")
