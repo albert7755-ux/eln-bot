@@ -216,14 +216,40 @@ def is_auto_push_event(status: str) -> bool:
     return any(k in s for k in AUTO_PUSH_KEYWORDS)
 
 
-def auto_push_important(line_bot_api, individual_messages: list):
+def load_agent_line_ids(engine) -> dict:
+    """讀取理專 LINE ID 對照表"""
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text("SELECT agent_name, line_id FROM agent_line_ids")).fetchall()
+        return {r[0]: r[1] for r in rows}
+    except Exception as e:
+        print(f"[WARN] 讀取 agent_line_ids 失敗: {e}")
+        return {}
+
+
+def resolve_target(msg: dict, agent_ids: dict) -> str:
+    """優先用商品的 line_id，沒有就用理專名查對照表（支援多理專名）"""
+    import re as _re
+    target = (msg.get("target", "") or "").strip()
+    if target:
+        return target
+    name_raw = (msg.get("name", "") or "").strip()
+    for n in _re.split(r"[,，、/]", name_raw):
+        n = n.strip()
+        if n and n in agent_ids:
+            return agent_ids[n]
+    return ""
+
+
+def auto_push_important(line_bot_api, individual_messages: list, agent_ids: dict = None):
     """自動推播重要事件給理專本人（有 LINE ID 才發）
     回傳 (已自動發送清單, 剩餘待確認清單)"""
+    agent_ids = agent_ids or {}
     auto_sent = []
     remaining = []
     for msg in individual_messages:
         status = msg.get("status", "")
-        target = (msg.get("target", "") or "").strip()
+        target = resolve_target(msg, agent_ids)
         if is_auto_push_event(status) and target:
             try:
                 push_long_message(line_bot_api, target, msg.get("msg", ""))
@@ -306,7 +332,9 @@ def main():
         individual_messages = out.get("individual_messages", []) or []
 
         # ── 自動推播重要事件（提前出場/到期）給理專，其餘保留手動 /send ──
-        auto_sent, remaining_messages = auto_push_important(line_bot_api, individual_messages)
+        agent_ids = load_agent_line_ids(engine)
+        print(f"[INFO] 理專對照表 {len(agent_ids)} 位")
+        auto_sent, remaining_messages = auto_push_important(line_bot_api, individual_messages, agent_ids)
 
         auto_sent_text = build_auto_sent_text(auto_sent)
         if auto_sent_text:
