@@ -207,6 +207,45 @@ def build_pending_text(individual_messages: list) -> str:
     return "\n\n".join(lines)
 
 
+# ── 自動推播的重要事件關鍵字（其他保留手動 /send）──
+AUTO_PUSH_KEYWORDS = ["提前出場", "到期獲利", "到期接股", "到期保本"]
+
+
+def is_auto_push_event(status: str) -> bool:
+    s = str(status or "")
+    return any(k in s for k in AUTO_PUSH_KEYWORDS)
+
+
+def auto_push_important(line_bot_api, individual_messages: list):
+    """自動推播重要事件給理專本人（有 LINE ID 才發）
+    回傳 (已自動發送清單, 剩餘待確認清單)"""
+    auto_sent = []
+    remaining = []
+    for msg in individual_messages:
+        status = msg.get("status", "")
+        target = (msg.get("target", "") or "").strip()
+        if is_auto_push_event(status) and target:
+            try:
+                push_long_message(line_bot_api, target, msg.get("msg", ""))
+                auto_sent.append(msg)
+                print(f"[AUTO PUSH] {msg.get('name','')} | {msg.get('id','')} | {status}")
+            except Exception as e:
+                print(f"[AUTO PUSH FAIL] {msg.get('name','')} | {e}")
+                remaining.append(msg)
+        else:
+            remaining.append(msg)
+    return auto_sent, remaining
+
+
+def build_auto_sent_text(auto_sent: list) -> str:
+    if not auto_sent:
+        return ""
+    lines = [f"📤 已自動推播給理專（{len(auto_sent)}筆）"]
+    for msg in auto_sent:
+        lines.append(f"   ✅ {msg.get('name','')} | {msg.get('id','')} | {msg.get('status','')}")
+    return "\n".join(lines)
+
+
 def main():
     now = datetime.now(TZ_TAIPEI)
     print(f"[{now.strftime('%Y/%m/%d %H:%M')}] auto_tracking_cron starting...")
@@ -266,17 +305,24 @@ def main():
 
         individual_messages = out.get("individual_messages", []) or []
 
-        print("Saving pending notifications...")
-        save_pending_notifications(engine, personal_chat_key, individual_messages)
+        # ── 自動推播重要事件（提前出場/到期）給理專，其餘保留手動 /send ──
+        auto_sent, remaining_messages = auto_push_important(line_bot_api, individual_messages)
 
-        pending_text = build_pending_text(individual_messages)
+        auto_sent_text = build_auto_sent_text(auto_sent)
+        if auto_sent_text:
+            push_long_message(line_bot_api, user_id, auto_sent_text)
+
+        print("Saving pending notifications...")
+        save_pending_notifications(engine, personal_chat_key, remaining_messages)
+
+        pending_text = build_pending_text(remaining_messages)
         push_long_message(line_bot_api, user_id, pending_text)
 
         save_job_log(
             engine,
             job_name="auto_tracking_cron",
             status="success",
-            detail=f"Saved {len(detail_map)} bonds, pending={len(individual_messages)}"
+            detail=f"Saved {len(detail_map)} bonds, auto_sent={len(auto_sent)}, pending={len(remaining_messages)}"
         )
 
         print("Done!")
