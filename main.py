@@ -56,6 +56,27 @@ def is_bond_group_chat(chat_key: str) -> bool:
     except Exception:
         return False
 
+def get_bond_query_groups():
+    try:
+        return list((load_targets() or {}).get("bond_query_groups", []))
+    except Exception:
+        return []
+
+def is_bond_query_group(chat_key: str) -> bool:
+    """這個群是不是「只開放查價」的海外債查詢群（/price settarget 設定，可多個群）"""
+    try:
+        return chat_key.split(":", 1)[1] in get_bond_query_groups()
+    except Exception:
+        return False
+
+BOND_QUERY_HELP = (
+    "💵 本群可用指令（查價專用）\n"
+    "/price 蘋果 2043 → 單檔完整報價\n"
+    "/price 26070003 → 用產品代碼查（免打WMBB）\n"
+    "/price US037833EN → 用ISIN查\n"
+    "（名稱片段＋到期年份／代碼／ISIN 皆可模糊搜尋）"
+)
+
 BOND_GROUP_HELP = (
     "💰 海外債專區指令（/help bond）\n"
     "━━━━━━━━━━━━━━━\n"
@@ -1232,6 +1253,16 @@ def handle_text_message(event):
             raw_cmd = text_raw[1:]
         else:
             cmd = tl.split()[0] if tl.split() else tl
+        # ── 海外債「查價群」：只回 /price 與 /help，其他一律靜默 ──
+        if is_group and is_bond_query_group(ck):
+            if not tl.startswith("/"):
+                return
+            if cmd == "help":
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=BOND_QUERY_HELP))
+                return
+            if cmd not in ("price", "p", "價格", "報價"):
+                return
+            # /price 放行，往下走到 price 指令處理
         # ── 海外債群組：只回白名單指令，一般聊天/其他指令一律靜默 ──
         if is_group and is_bond_group_chat(ck):
             if not tl.startswith("/") or cmd not in BOND_GROUP_ALLOWED_CMDS:
@@ -2083,6 +2114,29 @@ def handle_text_message(event):
             # /price 蘋果 2043   → 單檔完整報價（模糊搜尋，同 /bondalert 的找法）
             # /price US037833EN
             kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
+            if kw.lower() in ("settarget", "設定查價"):
+                # 在群組裡打 /price settarget → 該群開放查價（僅 /price，不含每日推播）
+                if event.source.type not in ("group", "room"):
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="請在要開放查價的群組裡打 /price settarget。"))
+                    return
+                gid = event.source.group_id if event.source.type == "group" else event.source.room_id
+                targets = load_targets()
+                groups = targets.get("bond_query_groups", [])
+                if gid not in groups:
+                    groups.append(gid)
+                targets["bond_query_groups"] = groups
+                save_targets(targets)
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="✅ 本群已開放海外債查價。\n群裡任何人打 /price 都能查，其他指令與訊息我不會回應，也不會有每日推播。\n取消請打 /price settarget off\n\n" + BOND_QUERY_HELP))
+                return
+            if kw.lower() in ("settarget off", "off"):
+                if event.source.type in ("group", "room"):
+                    gid = event.source.group_id if event.source.type == "group" else event.source.room_id
+                    targets = load_targets()
+                    targets["bond_query_groups"] = [g for g in targets.get("bond_query_groups", []) if g != gid]
+                    save_targets(targets)
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 本群已關閉查價功能。"))
+                return
             if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔，請先把 Bond_Pricing Excel 傳給我。"))
                 return
@@ -2656,6 +2710,8 @@ def handle_file_message(event):
         ext = Path(filename).suffix.lower()
         print("[FILE]", ck, filename)
         # ── 海外債群組：只收 Bond_Pricing 報價檔（.xlsx），其他檔案不理 ──
+        if event.source.type in ("group", "room") and is_bond_query_group(ck):
+            return  # 查價群不收任何檔案
         _bond_group = event.source.type in ("group", "room") and is_bond_group_chat(ck)
         if _bond_group and ext not in (".xlsx", ".xlsm"):
             return
@@ -2814,7 +2870,7 @@ def handle_image_message(event):
     try:
         ck = chat_key_of(event)
         print("[IMAGE]", ck)
-        if event.source.type in ("group", "room") and is_bond_group_chat(ck):
+        if event.source.type in ("group", "room") and (is_bond_group_chat(ck) or is_bond_query_group(ck)):
             return  # 海外債群組不處理圖片
         message_id = event.message.id
         content = _bot_api.get_message_content(message_id)
@@ -2878,7 +2934,7 @@ def handle_audio_message(event, _override_bot_api=None):
     _bot_api = _override_bot_api or line_bot_api
     ck = chat_key_of(event)
     print(f"[AUDIO] {ck}")
-    if event.source.type in ("group", "room") and is_bond_group_chat(ck):
+    if event.source.type in ("group", "room") and (is_bond_group_chat(ck) or is_bond_query_group(ck)):
         return  # 海外債群組不處理語音
     try:
         _bot_api.reply_message(event.reply_token, TextSendMessage(text="🎙️ 收到語音，轉文字中，請稍候..."))
