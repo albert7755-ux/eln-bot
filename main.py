@@ -46,7 +46,7 @@ def _bond_price_dir() -> Path:
 BOND_PRICE_FILE = Path(os.getenv("BOND_PRICE_FILE", "")) if os.getenv("BOND_PRICE_FILE") else (_bond_price_dir() / "bond_pricing_latest.xlsx")
 
 # 海外債群組白名單：在該群裡龍蝦只回這些指令，其餘一律不理（比照 ELN 群）
-BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "bondalert", "rating", "move", "help"}
+BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "bondalert", "rating", "move", "price", "help"}
 
 def is_bond_group_chat(chat_key: str) -> bool:
     """這個 chat 是不是用 /coupon settarget 設定的海外債群組"""
@@ -65,7 +65,8 @@ BOND_GROUP_HELP = (
     "/coupon table → Excel條件表＋發行機構簡介（未來14天）\n"
     "\n🏦 發行機構\n"
     "/issuer 蘋果 → 簡介＋架上所有債券（可用英文/ISIN/代碼）\n"
-    "\n📊 報價異動\n"
+    "\n📊 報價查詢與異動\n"
+    "/price 蘋果 2043 或 /price 26070003 → 單檔完整報價＋近期走勢\n"
     "/move → 全架 vs 上一份報價，變動 ≥1%\n"
     "/move 7 3 → vs 7天前，≥3%（上傳報價檔時自動推 ≥2%/≥3%）\n"
     "/bondalert 蘋果 2043 ytm>5.2 → 單檔到價通知（list / del）\n"
@@ -2078,6 +2079,65 @@ def handle_text_message(event):
                 threading.Thread(target=_run_rating, args=(chat_id, _bot_api), daemon=True).start()
                 return
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="用法：/rating（立即掃描）\n/rating list\n/rating watch 蘋果\n/rating unwatch 蘋果")); return
+        if cmd in ("price", "p", "價格", "報價"):
+            # /price 蘋果 2043   → 單檔完整報價（模糊搜尋，同 /bondalert 的找法）
+            # /price US037833EN
+            kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
+            if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔，請先把 Bond_Pricing Excel 傳給我。"))
+                return
+            if not kw:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="🔎 用法：/price 蘋果 2043\n/price 美林 2029\n/price US037833EN\n（名稱片段＋到期年份，或 ISIN／產品代碼）"))
+                return
+            try:
+                from bond_coupon_alert import find_bonds, first_num, pi_tag
+                hits = find_bonds(str(BOND_PRICE_FILE), kw, max_hits=5)
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 查詢失敗：{str(e)[:200]}"))
+                return
+            if not hits:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🔎 找不到「{kw}」，可用 /issuer 查發行機構名稱。"))
+                return
+            mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI).strftime("%m/%d %H:%M")
+            if len(hits) > 1:
+                lines = [f"🔎 「{kw}」對到 {len(hits)} 檔（報價檔 {mtime}）："]
+                for b in hits:
+                    offer = b["offer"] if b["offer"] not in (None, "", 0, "#VALUE!", "#N/A") else "-"
+                    ytm = b["ytm"] if b["ytm"] not in (None, "", 0, "#N/A") else "-"
+                    mat = f"{b['maturity']:%Y/%m/%d}" if b["maturity"] else "-"
+                    lines.append(f"▪ {b['name']} {b['ccy']}｜Offer {offer}｜YTM {ytm}｜到期 {mat}")
+                lines.append("\n加到期年份可看單檔完整資訊，例：/price 蘋果 2043")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900]))
+                return
+            b = hits[0]
+            offer = b["offer"] if b["offer"] not in (None, "", 0, "#VALUE!", "#N/A") else "-"
+            ytm = b["ytm"] if b["ytm"] not in (None, "", 0, "#N/A") else "-"
+            mat = f"{b['maturity']:%Y/%m/%d}" if b["maturity"] else "-"
+            rt = " / ".join(x for x in str(b.get("ratings") or "").split(" / ") if x and x.upper() not in ("N/A", "NA", "NONE"))
+            lines = [f"💵 {b['name']}",
+                     f"ISIN {b['isin']}｜代碼 {b['code'] or '-'}",
+                     f"{b['ccy']}｜票面 {b['coupon']}%｜{b['freq']}配息｜{pi_tag(b)}",
+                     f"Offer {offer}｜YTM/YTC {ytm}",
+                     f"到期 {mat}" + (f"｜評等 {rt}" if rt else ""),
+                     f"順位 {b.get('seniority') or '-'}｜最低申購 {b.get('min_amt') or '-'}｜本日額度 {b.get('avail') or '-'}"]
+            if str(b.get("remark") or "").strip():
+                lines.append(f"備註：{str(b['remark']).strip()[:150]}")
+            # 歷史走勢（bond_price_history 最近 5 筆）
+            try:
+                with engine.begin() as conn:
+                    rows = conn.execute(text("""SELECT snap_date, offer, ytm FROM bond_price_history
+                                               WHERE isin=:i ORDER BY snap_date DESC LIMIT 5"""), {"i": b["isin"]}).fetchall()
+                if len(rows) >= 2:
+                    hist = "｜".join(f"{d:%m/%d} {o:g}" for d, o, y in reversed(rows) if o is not None)
+                    lines.append(f"近期Offer：{hist}")
+                    o_new, o_old = rows[0][1], rows[-1][1]
+                    if o_new and o_old:
+                        lines.append(f"（{rows[-1][0]:%m/%d} 以來 {((o_new-o_old)/o_old*100):+.1f}%）")
+            except Exception as e:
+                print(f"[BondPrice hist] {e}")
+            lines.append(f"\n📎 報價檔 {mtime}｜到價追蹤：/bondalert {kw} ytm>{ytm if isinstance(ytm,(int,float)) else 5}")
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(str(x) for x in lines)[:4900]))
+            return
         if cmd in ("move", "movers", "異動"):
             # /move        → vs 上一份報價，變動 ≥ 1%
             # /move 7      → vs 7 天前，≥ 2%
