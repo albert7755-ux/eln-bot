@@ -166,7 +166,7 @@ def updown_mark(value: float):
 
 
 def _yield_line(label: str, d: dict) -> str:
-    """殖利率專用格式:變化用 bp(基點)表示,理專比較好講"""
+    """殖利率專用格式:變化用 bp(基點)表示,同仁們比較好講"""
     if not d:
         return f"{label}:數據抓取失敗"
     arrow = updown_mark(d["change"])
@@ -231,76 +231,8 @@ def build_bond_snapshot(data):
 
 
 # ==============================
-# 三、配息雷達候選債(給「今日操作思維」用)
-# ==============================
-
-def _find_bond_price_file():
-    """報價檔位置:跟 main.py 的邏輯一致,優先環境變數,再找 Render 磁碟"""
-    from pathlib import Path
-    env_path = os.getenv("BOND_PRICE_FILE", "")
-    if env_path and Path(env_path).exists():
-        return env_path
-    for d in ("/data/bond_pricing", "/tmp/bond_pricing"):
-        p = Path(d) / "bond_pricing_latest.xlsx"
-        if p.exists():
-            return str(p)
-    return None
-
-
-def get_coupon_candidates(days_ahead=3, max_n=8) -> str:
-    """
-    從配息雷達邏輯撈出「最晚下單日在 N 個營業日內、還來得及買」的債券,
-    整理成清單文字餵給 Claude,讓它挑 1-2 支跟當天市場主題最搭的。
-    抓不到報價檔或沒有候選時回傳空字串(日報照常運作,只是不帶商品)。
-    """
-    try:
-        from bond_coupon_alert import build_alerts, biz_days_after, pi_tag, first_num
-
-        price_file = _find_bond_price_file()
-        if not price_file:
-            print("[BondDaily] 找不到債券報價檔,今日操作思維只寫市場面")
-            return ""
-
-        tw_tz = pytz.timezone("Asia/Taipei")
-        today = datetime.now(tw_tz).date()
-
-        alerts = build_alerts(price_file, today=today, lookahead=14)
-        cutoff = biz_days_after(today, days_ahead)
-        ok = [a for a in alerts if a["status"].startswith("✅") and a["last_trade"] <= cutoff]
-        if not ok:
-            return ""
-        ok.sort(key=lambda a: (a["last_trade"], a["name"]))
-
-        lines = []
-        for a in ok[:max_n]:
-            ytm = first_num(a.get("ytm"))
-            ytm_txt = f"{ytm:.2f}%" if ytm else "-"
-            mat = a.get("maturity")
-            mat_txt = f"{mat:%Y/%m}" if mat else "-"
-            lines.append(
-                f"- {a['name']}｜{a['ccy']}｜票面 {a['coupon']}%｜{a['freq']}配息"
-                f"｜YTM {ytm_txt}｜到期 {mat_txt}"
-                f"｜配息日 {a['coupon_date']:%m/%d}｜最晚下單 {a['last_trade']:%m/%d}｜{pi_tag(a)}"
-            )
-        return "\n".join(lines)
-    except Exception as e:
-        print(f"[BondDaily] 配息候選抓取失敗: {e}")
-        return ""
-
-
-# ==============================
 # 四、Claude 評論 + 每日輪替專題
 # ==============================
-
-# 日債觀察每週只出現一次:0=週一, 1=週二, 2=週三, 3=週四, 4=週五
-# 想換天只要改這個數字(週五已有日債專題,建議避開)
-JGB_SECTION_WEEKDAY = 2
-
-
-def show_jgb_section_today() -> bool:
-    tw_tz = pytz.timezone("Asia/Taipei")
-    return datetime.now(tw_tz).weekday() == JGB_SECTION_WEEKDAY
-
 
 def get_weekday_topic() -> str:
     """星期幾決定專題主題,一週輪一圈"""
@@ -311,69 +243,28 @@ def get_weekday_topic() -> str:
         1: "美債專題:美債供需、財政部發債、Fed 縮表或官員談話等結構性議題",
         2: "通膨專題:最新 CPI/PCE/薪資數據與通膨預期,對利率路徑的意義",
         3: "信用債專題:投資等級與非投資等級債利差變化、大型新發行、值得注意的評等事件",
-        4: "日債與日銀專題:日銀政策動向、日債殖利率變化、日圓走勢,以及對全球債市的外溢影響",
+        4: "各國央行貨幣政策專題:本週 Fed、ECB、日銀、英國央行等主要央行的決策、官員談話與市場定價變化,挑當週最有戲的央行來談",
         5: "本週債市回顧:這一週殖利率與債市發生了什麼,一段話總結",
         6: "本週債市回顧:這一週殖利率與債市發生了什麼,一段話總結",
     }
     return topics[weekday]
 
 
-def generate_bond_commentary(snapshot_text: str, coupon_candidates: str = "") -> str:
+def generate_bond_commentary(snapshot_text: str) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     tw_tz = pytz.timezone("Asia/Taipei")
     today_str = datetime.now(tw_tz).strftime("%Y年%m月%d日")
     topic = get_weekday_topic()
 
-    if coupon_candidates:
-        coupon_block = (
-            "以下是本行架上「最晚下單日在3個營業日內、還來得及參與這次配息」的債券清單:\n"
-            f"{coupon_candidates}\n\n"
-        )
-        action_instruction = (
-            "5.【今日操作思維】語氣定位:這是給理專的「觀察與提醒」,不是判斷與指令。共2-4句:\n"
-            "  (市場面)1-2句,用觀察角度切入,從以下挑一種最適合今天新聞的:"
-            "(a)具體數字當開場鉤子 (b)模擬客戶今天最可能問的問題,給理專回答方向 "
-            "(c)歷史對比 (d)點出即將發生的事件與觀察心態。"
-            "對市場方向必須保留不確定性,禁止「正是時機」「趨勢已確立」「必然」這類果決斷言,"
-            "行情永遠可能反向,語氣要留餘地。\n"
-            "  (商品面)語氣是「順帶一提」,不是推銷:從上面清單挑1-2支跟今天話題自然相關的,"
-            "以「若客戶本來就有配置需求」的角度帶到,說明這幾天是這一期配息的最後下單窗口,"
-            "列出客觀事實:幣別、票面、YTM、最晚下單日,"
-            "並保留原清單中的🔒專投或💎高資產標籤(若有,提醒理專確認客戶資格)。"
-            "禁止「建議買進」「必買」「錯過可惜」等勸誘字眼,禁止報酬保證,"
-            "只能挑清單裡有的債券,不可自行編造商品。\n\n"
-        )
-    else:
-        coupon_block = ""
-        action_instruction = (
-            "5.【今日操作思維】1-2句,給理專的觀察與提醒,不是判斷與指令。每天換不同角度:"
-            "具體數字鉤子、模擬客戶提問、歷史對比、或即將發生的事件,挑最適合今天新聞的一種。"
-            "對市場方向保留不確定性,禁止果決斷言;避免固定句型,"
-            "不要每天都用「值得留意」「建議關注」這類結尾;"
-            "只能是市場觀察,不可以是投資建議或報酬保證。今天沒有提供商品清單,"
-            "不要提及任何具體債券商品。\n\n"
-        )
-
-    if show_jgb_section_today():
-        jgb_instruction = (
-            "3.【日債觀察】1-2句,說明日債與日圓的最新動態;"
-            "若沒有明確新聞,誠實寫目前市場關注焦點。\n"
-        )
-        jgb_format = "【日債觀察】\n(內容)\n\n"
-    else:
-        jgb_instruction = ""
-        jgb_format = ""
-
     prompt = (
-        "你是銀行固定收益科的債券晨報編輯,讀者是分行理財專員,"
+        "你是銀行固定收益科的債券晨報編輯,讀者是分行的理財同仁,"
         "他們服務的高資產客戶持有海外債券、債券基金與結構型商品。\n\n"
         f"今天台北時間是 {today_str}。以下是昨晚(美國時間)收盤的債券市場數據:\n\n"
         f"{snapshot_text}\n\n"
-        f"{coupon_block}"
         f"請上網搜尋 {today_str} 前後最新的債券與利率相關新聞(優先最近24小時),"
         "重點關注:美債殖利率變動原因、Fed 官員談話、通膨與就業數據、"
-        "日銀與日債動向、公司債利差與新發行、重要國債標售結果。\n\n"
+        "各國央行動向、公司債利差與新發行、重要國債標售結果。\n\n"
         "請完成以下段落:\n"
         "1.【前言】1-2句,點出昨晚債市最重要的主線。\n"
         "2.【殖利率動向解讀】2-3句,解釋美債各天期為什麼這樣動,"
@@ -384,20 +275,25 @@ def generate_bond_commentary(snapshot_text: str, coupon_candidates: str = "") ->
         "【極重要】描述漲跌與比較時,必須逐項核對上方表格的實際數字與箭頭(🔺=升、▼=降),"
         "先確認方向再下筆;與其寫「長端比短端如何」這種容易寫反的比較句,"
         "寧可直接引用數字,例如「10年升6bp、2年降5bp」。寫錯方向是嚴重錯誤。\n"
-        f"{jgb_instruction}"
-        f"4.【今日專題】用100-150字寫一則小專題,今天的主題是:{topic}。"
+        f"3.【今日專題】用100-150字寫一則小專題,今天的主題是:{topic}。"
         "只挑1-2個最重要的事件講,寧短勿長,不要條列式流水帳。\n"
-        f"{action_instruction}"
+        "4.【今日操作思維】1-2句,給同仁們的觀察與提醒,不是判斷與指令。每天換不同角度:"
+        "具體數字鉤子、模擬客戶提問並給同仁們一個回答方向、歷史對比、或即將發生的事件,"
+        "挑最適合今天新聞的一種。"
+        "對市場方向保留不確定性,禁止「正是時機」「趨勢已確立」「必然」這類果決斷言,"
+        "行情永遠可能反向,語氣要留餘地;避免固定句型,"
+        "不要每天都用「值得留意」「建議關注」這類結尾;"
+        "只能是市場觀察,不可以是投資建議或報酬保證,不要提及任何具體債券商品。\n\n"
         "要求:\n"
         "- 一定要具體,引用真實新聞事件,沒有事件就誠實說市場在等什麼。\n"
         "- 不要亂編新聞或數字。\n"
-        "- 語氣專業但口語化,像晨會上講給理專聽。\n"
+        "- 語氣專業但口語化,像晨會上講給同仁們聽。\n"
+        "- 稱呼讀者一律用「同仁們」,絕對不要出現「理專」兩個字。\n"
         "- 純文字輸出,禁用任何markdown符號(**粗體**、#標題、-條列),LINE不支援會變亂碼。\n"
         "- 總長度精簡,適合手機閱讀。\n\n"
         "輸出格式必須完全如下:\n\n"
         "【前言】\n(內容)\n\n"
         "【殖利率動向解讀】\n(內容)\n\n"
-        f"{jgb_format}"
         "【今日專題】\n(內容)\n\n"
         "【今日操作思維】\n(內容)\n"
     )
@@ -435,12 +331,10 @@ def extract_section(text: str, title: str) -> str:
 
 def build_final_bond_report(data: dict) -> str:
     snapshot = build_bond_snapshot(data)
-    coupon_candidates = get_coupon_candidates()
-    commentary = generate_bond_commentary(snapshot, coupon_candidates)
+    commentary = generate_bond_commentary(snapshot)
 
     intro = extract_section(commentary, "前言")
     yields = extract_section(commentary, "殖利率動向解讀")
-    jgb = extract_section(commentary, "日債觀察")
     topic = extract_section(commentary, "今日專題")
     action = extract_section(commentary, "今日操作思維")
 
@@ -448,7 +342,7 @@ def build_final_bond_report(data: dict) -> str:
     weekday = datetime.now(tw_tz).weekday()
     topic_titles = {
         0: "本週債市展望", 1: "美債專題", 2: "通膨專題",
-        3: "信用債專題", 4: "日債與日銀專題", 5: "本週債市回顧", 6: "本週債市回顧",
+        3: "信用債專題", 4: "央行政策專題", 5: "本週債市回顧", 6: "本週債市回顧",
     }
 
     final_text = snapshot.replace(
@@ -459,19 +353,12 @@ def build_final_bond_report(data: dict) -> str:
     final_text += "\n\n四、殖利率動向解讀\n"
     final_text += yields if yields else "美債殖利率變化反映市場對利率路徑的最新定價,建議留意後續數據。"
 
-    section_nums = iter(["五", "六"])
-    if show_jgb_section_today():
-        final_text += f"\n\n{next(section_nums)}、日債觀察\n"
-        final_text += jgb if jgb else "日債與日圓走勢持續受日銀政策預期影響,為觀察重點。"
-
-    final_text += f"\n\n{next(section_nums)}、{topic_titles[weekday]}\n"
+    final_text += f"\n\n五、{topic_titles[weekday]}\n"
     final_text += topic if topic else "(今日專題生成失敗,明日再會)"
 
     if action:
         final_text += "\n\n🧭 今日操作思維\n"
         final_text += action
-        if coupon_candidates:
-            final_text += "\n(商品資訊以最新報價檔為準;內部參考,非投資建議)"
 
     return final_text.strip()
 
