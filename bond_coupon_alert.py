@@ -303,6 +303,9 @@ def find_bonds(path, keyword, max_hits=8):
     toks = [t for t in re.split(r"\s+", str(keyword).strip()) if t]
     if not toks:
         return []
+    # 產品代碼縮寫：純數字（或數字片段）自動補 WMBB 前綴試比對
+    # 例：26070003 → WMBB26070003；2607 → WMBB2607（片段）
+    toks = ["WMBB" + t if re.fullmatch(r"\d{4,10}", t) and not re.fullmatch(r"20\d\d", t) else t for t in toks]
     years = {int(t) for t in toks if re.fullmatch(r"20\d\d", t)}
     words = [t.lower() for t in toks if not re.fullmatch(r"20\d\d", t)]
     hits = []
