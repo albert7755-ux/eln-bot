@@ -285,6 +285,14 @@ def main():
     engine = create_engine(db_url, pool_pre_ping=True)
     line_bot_api = LineBotApi(line_token)
 
+    # ── 推播給理專要用 ELN Autotracking bot 的 token（user ID 綁定該 bot）──
+    agent_token = os.environ.get("AGENT_LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    agent_bot_api = LineBotApi(agent_token) if agent_token else line_bot_api
+    if agent_token:
+        print("[INFO] 理專推播使用 AGENT bot token")
+    else:
+        print("[WARN] 未設定 AGENT_LINE_CHANNEL_ACCESS_TOKEN，改用個人 bot token")
+
     personal_chat_key = f"user:{user_id}"
     group_chat_key = f"group:{group_id}" if group_id else ""
 
@@ -334,7 +342,7 @@ def main():
         # ── 自動推播重要事件（提前出場/到期）給理專，其餘保留手動 /send ──
         agent_ids = load_agent_line_ids(engine)
         print(f"[INFO] 理專對照表 {len(agent_ids)} 位")
-        auto_sent, remaining_messages = auto_push_important(line_bot_api, individual_messages, agent_ids)
+        auto_sent, remaining_messages = auto_push_important(agent_bot_api, individual_messages, agent_ids)
 
         auto_sent_text = build_auto_sent_text(auto_sent)
         if auto_sent_text:
