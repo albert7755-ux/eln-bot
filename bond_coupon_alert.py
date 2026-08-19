@@ -275,7 +275,7 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
         avail = "" if str(a["avail"]) == "有" else f"｜額度:{a['avail']}"
         lines.append(
             f"{a['name']} {a['ccy']} {a['coupon']}% {a['freq']}｜{pi_tag(a)}\n"
-            f"  配息{a['coupon_date']:%m/%d}｜T+{a['lag']}｜Offer {offer}｜YTM {ytm}{avail}"
+            f"  配息{a['coupon_date']:%m/%d}｜Offer {offer}｜YTM {ytm}{avail}"
         )
         if i + 1 >= max_lines and i + 1 < len(ok):
             lines.append(f"…另有 {len(ok)-i-1} 檔，見Excel")
