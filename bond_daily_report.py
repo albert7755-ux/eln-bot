@@ -66,6 +66,7 @@ def get_fred_yield(series_id: str):
             "price": round(last, 3),
             "change": round(last - prev, 3),
             "pct": 0.0,
+            "date": values[-1][0],
         }
     except Exception as e:
         print(f"[BondDaily] FRED {series_id} 抓取失敗: {e}")
@@ -97,6 +98,44 @@ def _parse_jgb_10y_csv(text: str):
             continue  # 跳過表頭、"-"、註解列
     return values
 
+
+def get_jgb_10y_month():
+    """
+    近一個月日本10年期殖利率走勢:抓 MOF 當月 CSV 的全部日資料,
+    不足 15 筆時(月初)再併上完整歷史檔補足。回傳最近約 22 筆 float。
+    """
+    urls = [
+        ("https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv", "utf-8"),
+        ("https://www.mof.go.jp/jgbs/reference/interest_rate/jgbcm.csv", "shift_jis"),
+        ("https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv", "utf-8"),
+    ]
+    series = []
+    for url, enc in urls:
+        try:
+            resp = requests.get(url, headers=JGB_HEADERS, timeout=20)
+            if resp.status_code != 200:
+                continue
+            vals = _parse_jgb_10y_csv(resp.content.decode(enc, errors="ignore"))
+            if not vals:
+                continue
+            if not series:
+                series = vals
+            else:
+                series = vals[-(30):] + series  # 歷史檔在前
+            if len(series) >= 15:
+                break
+        except Exception as e:
+            print(f"[BondDaily] JGB month {url} 失敗: {e}")
+    return series[-22:] if series else []
+
+def jgb_month_line(series):
+    """把近一月序列壓成一行:月初/兩週前/一週前/最新 四個點＋總變化"""
+    if len(series) < 6:
+        return ""
+    pts = [series[0], series[max(0, len(series)//2 - 1)], series[-6], series[-1]]
+    chg_bp = (series[-1] - series[0]) * 100
+    trail = " → ".join(f"{v:.2f}" for v in pts)
+    return f"近一月走勢:{trail}%(約{chg_bp:+.0f}bp)"
 
 def get_jgb_10y():
     """
@@ -153,7 +192,15 @@ def get_bond_market_data():
 
     results["US2Y"] = get_fred_yield("DGS2")
     results["US20Y"] = get_fred_yield("DGS20")
+    # 利差專用:2/10/20/30 全部用 FRED 同一天的官方收盤,避免與 yfinance 混用造成日期錯位
+    results["FRED10Y"] = get_fred_yield("DGS10")
+    results["FRED30Y"] = get_fred_yield("DGS30")
     results["JGB10Y"] = get_jgb_10y()
+    try:
+        results["JGB10Y_MONTH"] = get_jgb_10y_month()
+    except Exception as e:
+        print(f"[BondDaily] JGB month fail: {e}")
+        results["JGB10Y_MONTH"] = []
     return results
 
 
@@ -199,21 +246,30 @@ def build_bond_snapshot(data):
     lines.append(_yield_line("20年期*", data.get("US20Y")))
     lines.append(_yield_line("30年期", data.get("US30Y")))
 
-    # 利差計算:2s10s 是市場最常講的曲線指標
-    # 20s30s 則觀察 20 年券的「凸包」是否修復(過去幾年 20Y 長期高於 30Y,屬曲線扭曲)
-    d2, d10, d20, d30 = data.get("US2Y"), data.get("US10Y"), data.get("US20Y"), data.get("US30Y")
-    if d2 and d10:
-        spread_2s10s = (d10["price"] - d2["price"]) * 100
+    # 利差計算:全部用 FRED(美國財政部官方收盤)同一天的數字,
+    # 不與 yfinance 混算——之前 20Y(FRED,T-1) 配 30Y(yfinance,T) 日期錯位,利差會跟行情軟體對不起來
+    d2, f10, d20, f30 = data.get("US2Y"), data.get("FRED10Y"), data.get("US20Y"), data.get("FRED30Y")
+    spread_date = ""
+    if d2 and f10 and d2.get("date") == f10.get("date"):
+        spread_2s10s = (f10["price"] - d2["price"]) * 100
         lines.append(f"2年/10年利差:{spread_2s10s:+.0f}bp")
-    if d20 and d30:
-        spread_20s30s = (d30["price"] - d20["price"]) * 100
+        spread_date = d2.get("date", "")
+    if d20 and f30 and d20.get("date") == f30.get("date"):
+        spread_20s30s = (f30["price"] - d20["price"]) * 100
         shape = "正斜率" if spread_20s30s > 0 else "倒掛(20Y高於30Y)"
         lines.append(f"20年/30年利差:{spread_20s30s:+.0f}bp({shape})")
-    lines.append("(*2年期與20年期為FRED資料,更新較慢一日)")
+        spread_date = d20.get("date", spread_date)
+    note = "(*2年期與20年期為FRED資料,更新較慢一日"
+    if spread_date:
+        note += f";利差以FRED {spread_date} 同日收盤計算"
+    lines.append(note + ")")
 
     lines.append("")
     lines.append("二、日債與匯率")
     lines.append(_yield_line("日本10年期公債", data.get("JGB10Y")))
+    _jm = jgb_month_line(data.get("JGB10Y_MONTH") or [])
+    if _jm:
+        lines.append(_jm)
     d_jpy = data.get("USDJPY")
     if d_jpy:
         arrow = updown_mark(d_jpy["change"])
@@ -242,7 +298,7 @@ def get_weekday_topic() -> str:
         0: "本週債市展望:本週有哪些重要經濟數據、央行事件、國債標售,對殖利率可能有什麼影響",
         1: "美債專題:美債供需、財政部發債、Fed 縮表或官員談話等結構性議題",
         2: "通膨專題:最新 CPI/PCE/薪資數據與通膨預期,對利率路徑的意義",
-        3: "信用債專題:投資等級與非投資等級債利差變化、大型新發行、值得注意的評等事件",
+        3: "投資等級公司債專題:投資等級(IG)利差變化、指標性大型企業新發行與需求狀況、重要評等動態;我們的客戶持有的是投資等級債,非投資等級(高收益)市場只在影響IG時順帶一提即可",
         4: "各國央行貨幣政策專題:本週 Fed、ECB、日銀、英國央行等主要央行的決策、官員談話與市場定價變化,挑當週最有戲的央行來談",
         5: "本週債市回顧:這一週殖利率與債市發生了什麼,一段話總結",
         6: "本週債市回顧:這一週殖利率與債市發生了什麼,一段話總結",
@@ -259,7 +315,7 @@ def generate_bond_commentary(snapshot_text: str) -> str:
 
     prompt = (
         "你是銀行固定收益科的債券晨報編輯,讀者是分行的理財同仁,"
-        "他們服務的高資產客戶持有海外債券、債券基金與結構型商品。\n\n"
+        "他們服務的高資產客戶持有海外債券(以投資等級債為主)、債券基金與結構型商品。\n\n"
         f"今天台北時間是 {today_str}。以下是昨晚(美國時間)收盤的債券市場數據:\n\n"
         f"{snapshot_text}\n\n"
         f"請上網搜尋 {today_str} 前後最新的債券與利率相關新聞(優先最近24小時),"
@@ -277,12 +333,12 @@ def generate_bond_commentary(snapshot_text: str) -> str:
         "寧可直接引用數字,例如「10年升6bp、2年降5bp」。寫錯方向是嚴重錯誤。\n"
         f"3.【今日專題】用100-150字寫一則小專題,今天的主題是:{topic}。"
         "只挑1-2個最重要的事件講,寧短勿長,不要條列式流水帳。\n"
-        "4.【今日操作思維】2-3句,給同仁們的觀察與提醒,不是判斷與指令。"
+        "4.【今日操作思維】2-3句,寫給「我們」的觀察與提醒,不是判斷與指令。"
         "基調要正面、有建設性:同樣的市況,優先從「機會與可著力之處」的角度切入,"
         "例如殖利率處於高位代表新資金的進場收益率具吸引力、波動代表客戶更需要專業陪伴、"
-        "事件前的觀望期正是盤點客戶配置與需求的好時機——把市況轉譯成同仁們今天「可以做什麼」,"
+        "事件前的觀望期正是盤點客戶配置與需求的好時機——把市況轉譯成我們今天「可以做什麼」,"
         "而不是渲染風險或潑冷水;若市場確實偏空,誠實陳述之餘仍要給一個正面的行動視角。"
-        "每天換不同角度:具體數字鉤子、模擬客戶提問並給同仁們一個回答方向、歷史對比、或即將發生的事件,"
+        "每天換不同角度:具體數字鉤子、模擬客戶提問並給一個回答方向、歷史對比、或即將發生的事件,"
         "挑最適合今天新聞的一種。"
         "正面不等於樂觀喊多:對市場方向仍要保留不確定性,禁止「正是時機」「趨勢已確立」「必然」"
         "這類果決斷言,行情永遠可能反向,語氣要留餘地;避免固定句型,"
@@ -291,8 +347,11 @@ def generate_bond_commentary(snapshot_text: str) -> str:
         "要求:\n"
         "- 一定要具體,引用真實新聞事件,沒有事件就誠實說市場在等什麼。\n"
         "- 不要亂編新聞或數字。\n"
-        "- 語氣專業但口語化,像晨會上講給同仁們聽。\n"
-        "- 稱呼讀者一律用「同仁們」,絕對不要出現「理專」兩個字。\n"
+        "- 語氣專業但口語化,像晨會上自己人之間的分享。\n"
+        "- 稱呼一律用「我們」(第一人稱複數,把作者和讀者放在同一邊),"
+        "絕對不要出現「理專」「同仁們」「各位」這類把讀者隔開的稱呼。\n"
+        "- 禁止空泛的呼籲句和集體喊話,例如「大家來想想」「不妨思考」「讓我們一起」「值得我們深思」;"
+        "要嘛給具體的觀察或做法,要嘛不寫。\n"
         "- 純文字輸出,禁用任何markdown符號(**粗體**、#標題、-條列),LINE不支援會變亂碼。\n"
         "- 總長度精簡,適合手機閱讀。\n\n"
         "輸出格式必須完全如下:\n\n"
@@ -346,7 +405,7 @@ def build_final_bond_report(data: dict) -> str:
     weekday = datetime.now(tw_tz).weekday()
     topic_titles = {
         0: "本週債市展望", 1: "美債專題", 2: "通膨專題",
-        3: "信用債專題", 4: "央行政策專題", 5: "本週債市回顧", 6: "本週債市回顧",
+        3: "投資等級債專題", 4: "央行政策專題", 5: "本週債市回顧", 6: "本週債市回顧",
     }
 
     final_text = snapshot.replace(
