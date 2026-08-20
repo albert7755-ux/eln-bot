@@ -30,7 +30,8 @@ DISCLAIMER = (
     "\n⚠️ 已知限制\n"
     "1. 配息日是從「到期日＋配息頻率」倒推的，少數債券付息日與到期日不同號，請以實際配息日為主\n"
     "2. 營業日只避開週六日，未避開台美假日，假日前後請人工再確認\n"
-    "3. 🔒專投＝限專業投資人（依報價檔分頁或備註判斷）；💎高資產＝高資產客戶專屬"
+    "3. 🔒專投＝限專業投資人（依報價檔分頁或備註判斷）；💎高資產＝高資產客戶專屬\n"
+    "4. 本表僅列示配息時點資訊，非投資建議，亦非鼓勵於特定時點進場"
 )
 
 def is_bond_pricing_file(path, filename=""):
@@ -228,7 +229,7 @@ def build_alerts(path, today=None, lookahead=LOOKAHEAD_DAYS):
             last_settle = biz_days_before(cd, 1)
             lag = settle_lag(b["isin"])
             last_trade = biz_days_before(last_settle, lag)
-            status = "✅ 可買" if last_trade >= today else "⛔ 已過"
+            status = "✅ 配息前可申購" if last_trade >= today else "⛔ 本期已截止"
             alerts.append(dict(
                 b, coupon_date=cd, last_settle=last_settle,
                 last_trade=last_trade, lag=lag, status=status,
@@ -253,22 +254,24 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
     else:
         cutoff = biz_days_after(today, days_ahead)
         ok = [a for a in ok_all if a["last_trade"] <= cutoff]
-    scope = f"最晚下單日在 {days_ahead} 個營業日內（～{cutoff:%m/%d}）" if cutoff else f"未來{lookahead}天全部"
+    scope = f"配息前申購截止日在 {days_ahead} 個營業日內（～{cutoff:%m/%d}）" if cutoff else f"未來{lookahead}天全部"
     mat_txt = format_maturities(maturing_soon(path, today, maturity_days), today, maturity_days) if maturity_days else ""
     if not ok:
         return (f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達\n"
-                f"{scope}沒有需要搶進的配息債。\n"
-                f"（未來{lookahead}天共 {len(alerts)} 檔配息，還來得及 {len(ok_all)} 檔，可打 /coupon all 看全部）"
+                f"{scope}無配息前申購截止的債券。\n"
+                f"（未來{lookahead}天共 {len(alerts)} 檔配息，配息前尚可申購 {len(ok_all)} 檔，可打 /coupon all 看全部）"
                 + mat_txt + DISCLAIMER)
     ok.sort(key=lambda a: (a["last_trade"], -a["lag"], a["name"]))
     lines = [f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達",
              f"{scope}：{len(ok)} 檔",
-             f"（未來{lookahead}天共 {len(alerts)} 檔配息｜還來得及 {len(ok_all)}｜已過 {gone}）\n"]
+             f"（未來{lookahead}天共 {len(alerts)} 檔配息｜配息前可申購 {len(ok_all)}｜本期已截止 {gone}）",
+             "📌 配息前申購需墊付較高前手息，領回利息計入海外利息所得；配息後申購前手息較低。",
+             "兩者經濟價值相當，請依客戶資金與稅務情況評估，本表僅為時點資訊。\n"]
     cur = None
     for i, a in enumerate(ok):
         if a["last_trade"] != cur:
             cur = a["last_trade"]
-            tag = "🔥 今天最後一天" if cur == today else f"⏰ 最晚下單 {cur:%m/%d}({wd[cur.weekday()]})"
+            tag = "⏳ 今日為配息前最後申購日" if cur == today else f"⏰ 配息前最後申購日 {cur:%m/%d}({wd[cur.weekday()]})"
             lines.append(f"── {tag} ──")
         offer = a["offer"] if a["offer"] not in (None, "", 0, "#VALUE!") else "-"
         ytm = a["ytm"] if a["ytm"] not in (None, "", 0) else "-"
@@ -504,12 +507,13 @@ def build_coupon_sheet(path, out_path, today=None, lookahead=LOOKAHEAD_DAYS, int
     wrap = Alignment(vertical="top", wrap_text=True)
 
     ws = wb.active; ws.title = "配息債條件表"
-    cols = ["最晚下單日", "配息日", "交割", "申購資格", "發行機構", "債券名稱", "ISIN", "產品代碼", "幣別",
+    cols = ["配息前最後申購日", "配息日", "交割", "申購資格", "發行機構", "債券名稱", "ISIN", "產品代碼", "幣別",
             "票面利率%", "配息頻率", "評等(S&P/Moody's/Fitch)", "債券順位", "Offer", "YTM/YTC",
             "到期日", "剩餘年期", "存續期間", "風險屬性", "最低申購面額", "本日額度", "備註", "發行機構簡介(AI)", "來源Sheet"]
-    ws["A1"] = f"海外債配息雷達 — 還來得及參與（{today:%Y/%m/%d} 起未來{lookahead}天，共 {len(alerts)} 檔）"
+    ws["A1"] = f"海外債配息雷達 — 配息日前可申購（{today:%Y/%m/%d} 起未來{lookahead}天，共 {len(alerts)} 檔）"
     ws["A1"].font = Font(name="Arial", bold=True, size=13, color="0B2A4A")
     ws["A2"] = ("最晚交割日=配息日前1營業日；US/CA T+1、其他 T+2；營業日僅排除週六日；配息日由到期日+頻率倒推，請以實際為準。"
+                "配息前申購需墊付較高前手息且利息計入海外所得，配息後申購前手息較低，兩者經濟價值相當；本表僅列時點資訊，非投資建議。"
                 "發行機構簡介為 AI 產生，僅供內部參考，對客說明請以公開資訊為準。")
     ws["A2"].font = Font(name="Arial", size=9, italic=True, color="666666")
     for j, c in enumerate(cols, 1):
