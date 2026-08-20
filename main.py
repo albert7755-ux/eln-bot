@@ -6,7 +6,7 @@ import re
 import json
 import traceback as _traceback
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -105,12 +105,39 @@ BOND_GROUP_HELP = (
 
 BOND_SNAPSHOT_FILE = BOND_PRICE_FILE.parent / "bond_snapshot.json"
 
-def save_price_history(snap_date=None):
-    """把目前報價檔的 Offer / YTM 存進 bond_price_history（同一天重覆上傳會覆蓋）"""
+def parse_pricing_file_date(filename):
+    """
+    從報價檔檔名解析報價日期,支援 08-20-2026 / 2026-08-20 / 20260820 等格式。
+    解析失敗回 None(呼叫端改用今天)。
+    """
+    st = str(filename)
+    m = re.search(r"(\d{2})[-_.](\d{2})[-_.](\d{4})", st)   # MM-DD-YYYY
+    if m:
+        mm, dd, yyyy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(yyyy, mm, dd)
+        except ValueError:
+            pass
+    m = re.search(r"(\d{4})[-_.](\d{2})[-_.](\d{2})", st)   # YYYY-MM-DD
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+    m = re.search(r"(20\d{2})(\d{2})(\d{2})", st)            # YYYYMMDD
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+    return None
+
+def save_price_history(snap_date=None, path=None):
+    """把報價檔的 Offer / YTM 存進 bond_price_history（同一天重覆上傳會覆蓋）。path 未指定時用最新報價檔"""
     from bond_coupon_alert import read_bonds, first_num
     snap_date = snap_date or datetime.now(TZ_TAIPEI).date()
     rows = []
-    for b in read_bonds(str(BOND_PRICE_FILE)):
+    for b in read_bonds(str(path or BOND_PRICE_FILE)):
         rows.append({"d": snap_date, "i": b["isin"], "n": b["name"], "c": b["ccy"],
                      "o": first_num(b["offer"]), "y": first_num(b["ytm"]), "m": b["maturity"]})
     with engine.begin() as conn:
@@ -2798,6 +2825,24 @@ def handle_file_message(event):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📥 收到海外債報價檔 {filename}，正在更新配息雷達..."))
             def _run_bond_update(tmp_path_str, chat_key, bot_api_ref, fname):
                 try:
+                    # ── 歷史回填:檔名日期比今天舊 3 天以上 → 只存歷史快照,不動最新報價檔、不跑雷達 ──
+                    _snap0 = parse_pricing_file_date(fname)
+                    _today0 = datetime.now(TZ_TAIPEI).date()
+                    if _snap0 and (_today0 - _snap0).days >= 3:
+                        n_hist = save_price_history(snap_date=_snap0, path=tmp_path_str)
+                        with engine.begin() as conn:
+                            n_days, d_min, d_max = conn.execute(text(
+                                "SELECT COUNT(DISTINCT snap_date), MIN(snap_date), MAX(snap_date) FROM bond_price_history")).fetchone()
+                        bot_api_ref.push_message(chat_key.split(":", 1)[1], TextSendMessage(
+                            text=f"📚 已補入 {_snap0:%Y/%m/%d} 歷史報價快照（{n_hist} 檔）\n"
+                                 f"最新報價檔與配息雷達未變更。\n"
+                                 f"目前歷史庫:{n_days} 個交易日（{d_min:%m/%d}～{d_max:%m/%d}），"
+                                 f"可用 /move 30 5 之類的指令比較。"))
+                        try:
+                            os.remove(tmp_path_str)
+                        except Exception:
+                            pass
+                        return
                     import shutil
                     BOND_PRICE_FILE.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy(tmp_path_str, str(BOND_PRICE_FILE))
@@ -2813,7 +2858,10 @@ def handle_file_message(event):
                         print(f"[BondSnapshot ERROR] {e}")
                     # 報價歷史 + 異動（vs 上一份 ≥2%；vs 7天前 ≥3%）
                     try:
-                        save_price_history()
+                        _snap = parse_pricing_file_date(fname)
+                        if _snap and _snap > datetime.now(TZ_TAIPEI).date():
+                            _snap = None  # 未來日期視為解析錯誤,退回今天
+                        save_price_history(snap_date=_snap)
                         for db_, th_ in ((1, 2.0), (7, 3.0)):
                             mv, _, _ = price_movers(days_back=db_, threshold_pct=th_)
                             if mv:
