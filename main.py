@@ -542,7 +542,29 @@ def db_find_detail(chat_key: str, query: str) -> tuple[str | None, str | None, l
 # Optional: store default push target
 # ==============================
 BASE_DIR = Path("/tmp")
-TARGET_FILE = BASE_DIR / "targets.json"
+def _persistent_dir():
+    """優先用 Render 持久磁碟 /data（重新部署不會消失），沒有才退回 /tmp"""
+    for d in (Path("/data"), Path("/tmp")):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            probe = d / ".write_test"
+            probe.write_text("ok")
+            probe.unlink()
+            return d
+        except Exception:
+            continue
+    return Path("/tmp")
+
+TARGET_FILE = _persistent_dir() / "targets.json"
+
+# 一次性搬遷：舊版存在 /tmp，若持久位置還沒有檔案就把舊的搬過來
+_old_target = Path("/tmp") / "targets.json"
+try:
+    if TARGET_FILE != _old_target and _old_target.exists() and not TARGET_FILE.exists():
+        import shutil as _sh
+        _sh.copy(str(_old_target), str(TARGET_FILE))
+except Exception as _e:
+    print(f"[targets migrate] {_e}")
 
 def _read_json(path: Path, default):
     if path.exists():
