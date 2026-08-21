@@ -46,7 +46,7 @@ def _bond_price_dir() -> Path:
 BOND_PRICE_FILE = Path(os.getenv("BOND_PRICE_FILE", "")) if os.getenv("BOND_PRICE_FILE") else (_bond_price_dir() / "bond_pricing_latest.xlsx")
 
 # 海外債群組白名單：在該群裡龍蝦只回這些指令，其餘一律不理（比照 ELN 群）
-BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "bondalert", "rating", "move", "price", "help"}
+BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "bondalert", "rating", "move", "price", "sheet", "help"}
 
 def is_bond_group_chat(chat_key: str) -> bool:
     """這個 chat 是不是用 /coupon settarget 設定的海外債群組"""
@@ -86,6 +86,7 @@ BOND_GROUP_HELP = (
     "/coupon table → Excel條件表＋發行機構簡介（未來14天）\n"
     "\n🏦 發行機構\n"
     "/issuer 蘋果 → 簡介＋架上所有債券（可用英文/ISIN/代碼）\n"
+    "/sheet 蘋果 → 銷售資訊一頁通（簡介+信評+財務+標的,文字+PDF）\n"
     "\n📊 報價查詢與異動\n"
     "/price 蘋果 2043 或 /price 26070003 → 單檔完整報價＋近期走勢\n"
     "/move → 全架 vs 上一份報價，變動 ≥1%\n"
@@ -321,6 +322,16 @@ def init_db():
             snap_date DATE NOT NULL, isin TEXT NOT NULL, bond_name TEXT, ccy TEXT,
             offer DOUBLE PRECISION, ytm DOUBLE PRECISION, maturity DATE,
             PRIMARY KEY (snap_date, isin)
+        );"""))
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS bond_issuer_profile (
+            issuer TEXT PRIMARY KEY, profile TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );"""))
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS bond_issuer_ticker (
+            issuer TEXT PRIMARY KEY, parent TEXT, ticker TEXT,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );"""))
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS bond_rating_watch (
@@ -2117,6 +2128,60 @@ def handle_text_message(event):
             import threading
             threading.Thread(target=_run_bondnav, daemon=True).start()
             return
+        if cmd == "sheet":
+            # /sheet 蘋果  → 發行機構銷售資訊(LINE文字 + PDF連結)
+            kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
+            if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔,請先把 Bond_Pricing Excel 傳給我。"))
+                return
+            if not kw:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📋 用法:/sheet 蘋果\n/sheet 威瑞森\n產出發行機構銷售資訊(簡介+信評+財務重點+架上標的),文字版+PDF"))
+                return
+            try:
+                from bond_coupon_alert import search_issuers
+                hits = search_issuers(str(BOND_PRICE_FILE), kw, max_issuers=3)
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 搜尋失敗:{str(e)[:200]}"))
+                return
+            if not hits:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🔎 找不到「{kw}」,可用 /issuer 查名稱。"))
+                return
+            if len(hits) > 1:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=f"「{kw}」對到 {len(hits)} 家:{'、'.join(h[0] for h in hits)}\n請用更精確的名稱再打一次 /sheet"))
+                return
+            iss, bl = hits[0]
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📋 整理 {iss} 銷售資訊中(簡介+財務+架上標的),約 30~60 秒..."))
+            def _run_sheet(chat_id, bot_api_ref, iss_, bl_):
+                try:
+                    from bond_sheet import get_financials, build_sheet_text, build_sheet_pdf
+                    from pdf_generator import upload_to_drive
+                    today_ = datetime.now(TZ_TAIPEI).date()
+                    parent, ticker = get_issuer_ticker(iss_)
+                    intro = get_issuer_profile(iss_, parent or "")
+                    parent_note = parent if (parent and parent != iss_) else ""
+                    fin = get_financials(ticker) if ticker else None
+                    if parent_note and fin:
+                        parent_note = f"財報為母集團 {parent_note}"
+                    fin_comment = get_fin_comment(iss_, fin)
+                    hist = build_issuer_hist_map([b["isin"] for b in bl_])
+                    txt = build_sheet_text(iss_, intro, bl_, fin=fin, parent_note=parent_note, hist_map=hist, fin_comment=fin_comment, today=today_)
+                    push_long_message(bot_api_ref, chat_id, txt)
+                    pdf_path = f"/tmp/銷售資訊_{iss_}_{today_:%Y%m%d}.pdf"
+                    build_sheet_pdf(pdf_path, iss_, intro, bl_, fin=fin, parent_note=parent_note, hist_map=hist, fin_comment=fin_comment, today=today_)
+                    link = upload_to_drive(pdf_path, f"銷售資訊_{iss_}_{today_:%Y%m%d}.pdf")
+                    try:
+                        os.remove(pdf_path)
+                    except Exception:
+                        pass
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"📎 {iss_} 銷售資訊 PDF\n🔗 {link}"))
+                except Exception as e:
+                    print(f"[BondSheet ERROR] {e}")
+                    print(_traceback.format_exc())
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 銷售資訊產生失敗:{str(e)[:200]}"))
+            import threading
+            threading.Thread(target=_run_sheet, args=(ck.split(":", 1)[1], _bot_api, iss, bl), daemon=True).start()
+            return
         if cmd == "rating":
             # /rating              → 立刻掃一次監控名單的信評新聞
             # /rating list         → 監控名單
@@ -3540,6 +3605,79 @@ def job_bond_rating_news():
         write_job_log("信評新聞雷達", "success", f"推播 {len(recipients)} 個對象")
     except Exception as e:
         write_job_log("信評新聞雷達", "error", str(e))
+
+def get_issuer_ticker(issuer):
+    """發行機構 → (母集團/上市主體名, 股票代碼)。先查快取,缺的問 AI。抓不到回 (None, None)"""
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT parent, ticker FROM bond_issuer_ticker WHERE issuer=:i"), {"i": issuer}).fetchone()
+    if row:
+        return row[0], row[1]
+    prompt = ("債券發行機構「" + issuer + "」(台灣銀行架上海外債的發行人)。請判斷其財報應追溯到哪一家上市公司:"
+              "若發行主體是子公司/SPV(如美林私人→美國銀行、高盛金融國際→高盛集團),給母集團;若本身就是上市公司,給它自己。"
+              "只回傳 JSON:{\"parent\": 上市主體中文名, \"ticker\": 美股或主要市場代碼(如 AAPL、BAC、8306.T),無法對應上市公司則 ticker 給 null}")
+    got, _, _ = llm_json_fallback(prompt, max_tokens=300)
+    parent = (got or {}).get("parent") or None
+    ticker = (got or {}).get("ticker") or None
+    if isinstance(ticker, str) and ticker.lower() in ("null", "none", ""):
+        ticker = None
+    with engine.begin() as conn:
+        conn.execute(text("""INSERT INTO bond_issuer_ticker(issuer, parent, ticker) VALUES (:i,:p,:t)
+                             ON CONFLICT (issuer) DO UPDATE SET parent=EXCLUDED.parent, ticker=EXCLUDED.ticker, updated_at=NOW()"""),
+                     {"i": issuer, "p": parent, "t": ticker})
+    return parent, ticker
+
+def get_issuer_profile(issuer, parent=""):
+    """
+    /sheet 用的加長版簡介(150~200字):營運概況、主要營收分佈、產業地位、信用重點。
+    先查快取,缺的問 AI(依模型知識,禁止捏造精確比例)。
+    """
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT profile FROM bond_issuer_profile WHERE issuer=:i"), {"i": issuer}).fetchone()
+    if row:
+        return row[0]
+    subject = issuer + (f"(母集團為{parent})" if parent and parent != issuer else "")
+    prompt = ("你是銀行固定收益研究員。請為債券發行機構「" + subject + "」寫一段 150~200 字的繁體中文簡介,"
+              "依序涵蓋:1.主要業務與營運概況 2.主要營收分佈(以部門或地區描述;依你的知識用「主要來自…、其次為…」的寫法,"
+              "不確定的比例不要寫出精確數字) 3.產業地位 4.信用體質重點。"
+              "語氣專業中性,不做投資建議。只回傳 JSON:{\"profile\": 簡介文字}")
+    got, _, _ = llm_json_fallback(prompt, max_tokens=800)
+    profile = str((got or {}).get("profile") or "").strip()
+    if profile:
+        with engine.begin() as conn:
+            conn.execute(text("""INSERT INTO bond_issuer_profile(issuer, profile) VALUES (:i,:p)
+                                 ON CONFLICT (issuer) DO UPDATE SET profile=EXCLUDED.profile, updated_at=NOW()"""),
+                         {"i": issuer, "p": profile})
+        return profile
+    # 退回短版簡介
+    return (get_issuer_intros([issuer]) or {}).get(issuer, "")
+
+def get_fin_comment(issuer, fin):
+    """對五大財務比率做 2~3 句的信用角度 AI 解讀"""
+    if not fin:
+        return ""
+    facts = {k: fin.get(k) for k in ("market_cap", "eps", "roe", "debt_ratio", "net_debt_ebitda", "currency")}
+    prompt = ("以下是債券發行機構「" + issuer + "」(或其母集團)的財務指標:" + json.dumps(facts, ensure_ascii=False) +
+              "。請從『債權人/信用分析』角度用 2~3 句繁體中文解讀(60~120字):獲利與規模代表什麼、"
+              "槓桿(負債比、淨負債/EBITDA)在該產業屬於什麼水準、對償債能力的意義。"
+              "語氣中性,不評價股票、不做買賣建議、不用果決斷言。只回傳 JSON:{\"comment\": 解讀文字}")
+    got, _, _ = llm_json_fallback(prompt, max_tokens=500)
+    return str((got or {}).get("comment") or "").strip()
+
+def build_issuer_hist_map(isins, days=30):
+    """{isin: '｜近30日±x.x%'} 由 bond_price_history 計算"""
+    out = {}
+    try:
+        with engine.begin() as conn:
+            for isin in isins:
+                rows = conn.execute(text("""SELECT snap_date, offer FROM bond_price_history
+                                           WHERE isin=:i AND offer IS NOT NULL AND snap_date >= CURRENT_DATE - :d * INTERVAL '1 day'
+                                           ORDER BY snap_date"""), {"i": isin, "d": days}).fetchall()
+                if len(rows) >= 2 and rows[0][1]:
+                    chg = (rows[-1][1] - rows[0][1]) / rows[0][1] * 100
+                    out[isin] = f"｜近30日{chg:+.1f}%"
+    except Exception as e:
+        print(f"[BondSheet hist] {e}")
+    return out
 
 def job_bond_coupon_radar():
     """每天 06:45 推播海外債配息雷達給 Albert（週一～週五）"""
