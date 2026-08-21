@@ -14,6 +14,7 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage, ImageMessage, AudioMessage
 from sqlalchemy import create_engine, text
+from sqlalchemy import text as sql_text  # 別名:避免被函式內的區域變數 text 遮蔽
 from autotracking_core import calculate_from_file
 from market_content_generator import generate_market_content
 import anthropic
@@ -2854,7 +2855,7 @@ def handle_file_message(event):
         if invest_mode_now == "kb_upload" and ext in (".pdf", ".pptx", ".ppt", ".docx", ".doc", ".jpg", ".jpeg", ".png", ".gif", ".webp"):
             db_set_await(ck, False)
             with engine.begin() as conn:
-                conn.execute(text("UPDATE eln_session SET invest_mode='', await_file=FALSE WHERE chat_key=:k"), {"k": ck})
+                conn.execute(sql_text("UPDATE eln_session SET invest_mode='', await_file=FALSE WHERE chat_key=:k"), {"k": ck})
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📚 收到！正在處理 {filename} 並存入知識庫，請稍候..."))
             try:
                 with open(tmp_path, "rb") as f:
@@ -2896,7 +2897,7 @@ def handle_file_message(event):
                     if _snap0 and (_today0 - _snap0).days >= 3:
                         n_hist = save_price_history(snap_date=_snap0, path=tmp_path_str)
                         with engine.begin() as conn:
-                            n_days, d_min, d_max = conn.execute(text(
+                            n_days, d_min, d_max = conn.execute(sql_text(
                                 "SELECT COUNT(DISTINCT snap_date), MIN(snap_date), MAX(snap_date) FROM bond_price_history")).fetchone()
                         bot_api_ref.push_message(chat_key.split(":", 1)[1], TextSendMessage(
                             text=f"📚 已補入 {_snap0:%Y/%m/%d} 歷史報價快照（{n_hist} 檔）\n"
