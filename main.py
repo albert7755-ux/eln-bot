@@ -3450,8 +3450,14 @@ def run_rating_news_check(days=2, use_llm=True):
     if not rows:
         return ""
     fresh = {}
+    _AGENCY_QUERY = {  # 評等機構自己也是發行機構時,用公司主體名搜尋,避免抓到它對別人的評等動作
+        "moody's": '"Moody\'s Corporation"', "moodys": '"Moody\'s Corporation"',
+        "s&p": '"S&P Global Inc"', "s&p global": '"S&P Global Inc"', "standard & poor's": '"S&P Global Inc"',
+        "fitch": '"Fitch Group"', "msci": '"MSCI Inc"',
+    }
     for iss, en in rows:
-        items = fetch_rating_news(en or "", zh_name=iss if iss != (en or "") else "", days=days)
+        en_q = _AGENCY_QUERY.get((en or "").strip().lower(), en or "")
+        items = fetch_rating_news(en_q, zh_name=iss if iss != (en or "") else "", days=days)
         items = [it for it in items if it["link"] not in seen]
         if items:
             fresh[iss] = items
@@ -3467,8 +3473,12 @@ def run_rating_news_check(days=2, use_llm=True):
         for iss, items in fresh.items():
             for k, it in enumerate(items):
                 flat.append({"id": f"{iss}|{k}", "issuer": iss, "title": it["title"], "source": it["source"]})
-        prompt = ("以下是新聞標題清單。請只挑出『信評機構（Moody's/S&P/Fitch）對該發行機構做出的評等、展望或觀察名單動作』的標題，"
-                  "排除產品/財報/股價等無關新聞。回傳 JSON 物件，key 為 id，value 為 20 字內的繁體中文摘要（例如「穆迪將展望調為負向」）。沒有符合的回傳 {}。\n\n"
+        prompt = ("以下是新聞標題清單，每則附有我們關注的發行機構名稱(issuer)。"
+                  "請只挑出『信評機構(Moody's/S&P/Fitch)對【該 issuer 本身】做出的評等、展望或觀察名單動作』的標題。"
+                  "嚴格規則:被評等的對象必須就是 issuer 這家公司;若 issuer 本身是評等機構(例如穆迪、標準普爾、惠譽)，"
+                  "則只收錄『它自己被評等或其公司債相關』的新聞，它對其他公司做的評等動作一律排除。"
+                  "也排除產品/財報/股價等無關新聞。"
+                  "回傳 JSON 物件，key 為 id，value 為 20 字內的繁體中文摘要（例如「穆迪將展望調為負向」）。沒有符合的回傳 {}。\n\n"
                   + json.dumps(flat, ensure_ascii=False))
         got, _, _ = llm_json_fallback(prompt, max_tokens=3000)
         if isinstance(got, dict):
