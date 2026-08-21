@@ -2165,11 +2165,17 @@ def handle_text_message(event):
                     if parent_note and fin:
                         parent_note = f"財報為母集團 {parent_note}"
                     fin_comment = get_fin_comment(iss_, fin)
+                    peers = get_peer_comparison(iss_, parent or "", fin)
+                    rating_note = get_rating_outlook(iss_)
+                    from bond_sheet import get_ust_curve
+                    curve = get_ust_curve()
                     hist = build_issuer_hist_map([b["isin"] for b in bl_])
-                    txt = build_sheet_text(iss_, intro, bl_, fin=fin, parent_note=parent_note, hist_map=hist, fin_comment=fin_comment, today=today_)
+                    kw_ = dict(fin=fin, parent_note=parent_note, hist_map=hist, fin_comment=fin_comment,
+                               peers=peers, rating_note=rating_note, ust_curve=curve, today=today_)
+                    txt = build_sheet_text(iss_, intro, bl_, **kw_)
                     push_long_message(bot_api_ref, chat_id, txt)
                     pdf_path = f"/tmp/銷售資訊_{iss_}_{today_:%Y%m%d}.pdf"
-                    build_sheet_pdf(pdf_path, iss_, intro, bl_, fin=fin, parent_note=parent_note, hist_map=hist, fin_comment=fin_comment, today=today_)
+                    build_sheet_pdf(pdf_path, iss_, intro, bl_, **kw_)
                     link = upload_to_drive(pdf_path, f"銷售資訊_{iss_}_{today_:%Y%m%d}.pdf")
                     try:
                         os.remove(pdf_path)
@@ -3663,6 +3669,53 @@ def get_fin_comment(issuer, fin):
               "語氣中性,不評價股票、不做買賣建議、不用果決斷言。只回傳 JSON:{\"comment\": 解讀文字}")
     got, _, _ = llm_json_fallback(prompt, max_tokens=500)
     return str((got or {}).get("comment") or "").strip()
+
+def get_peer_comparison(issuer, parent, fin):
+    """同業比較:AI 給 2~3 家同業代碼,實際數字用 yfinance 抓,避免捏造"""
+    if not fin:
+        return ""
+    subject = parent or issuer
+    prompt = ("公司「" + subject + "」的主要同業(相同產業、規模相近的上市公司)請給 2~3 家。"
+              "只回傳 JSON:{\"peers\":[{\"name\":中文名,\"ticker\":代碼}]}")
+    got, _, _ = llm_json_fallback(prompt, max_tokens=300)
+    peers = (got or {}).get("peers") or []
+    from bond_sheet import get_financials
+    out = []
+    for p_ in peers[:3]:
+        tk = str(p_.get("ticker") or "").strip()
+        nm = str(p_.get("name") or tk).strip()
+        if not tk:
+            continue
+        pf = get_financials(tk)
+        if not pf:
+            continue
+        roe = f"ROE {pf['roe']*100:.0f}%" if pf.get("roe") is not None else "ROE -"
+        dr = f"負債比 {pf['debt_ratio']:.0f}%" if pf.get("debt_ratio") is not None else "負債比 -"
+        nd = f"淨負債/EBITDA {pf['net_debt_ebitda']}x" if pf.get("net_debt_ebitda") is not None else ""
+        out.append(f"{nm}（{tk}）{roe}、{dr}" + (f"、{nd}" if nd else ""))
+    if not out:
+        return ""
+    return "；".join(out) + "（資料來源：公開財報，僅供比較參考）"
+
+def get_rating_outlook(issuer):
+    """評等展望/最近一次評等動作:用近 180 天的信評新聞讓 AI 歸納,查不到回空字串"""
+    try:
+        from bond_rating_news import fetch_rating_news
+        with engine.begin() as conn:
+            row = conn.execute(text("SELECT en_name FROM bond_rating_watch WHERE issuer=:i"), {"i": issuer}).fetchone()
+        en = row[0] if row and row[0] else ""
+        items = fetch_rating_news(en, zh_name=issuer, days=180)[:8]
+        if not items:
+            return ""
+        titles = [{"t": it["title"], "d": it["published"].strftime("%Y/%m") if it["published"] else ""} for it in items]
+        prompt = ("以下是關於「" + issuer + "」的信評相關新聞標題。請歸納出目前的評等展望與最近一次評等動作,"
+                  "格式如:『展望：穩定（S&P，2026/03）』或『2026/05 穆迪確認 A2 評等，展望穩定』。"
+                  "只能根據標題內容,無法判斷就回空字串。只回傳 JSON:{\"outlook\": 文字}\n\n" + json.dumps(titles, ensure_ascii=False))
+        got, _, _ = llm_json_fallback(prompt, max_tokens=300)
+        return str((got or {}).get("outlook") or "").strip()
+    except Exception as e:
+        print(f"[BondSheet outlook] {e}")
+        return ""
 
 def build_issuer_hist_map(isins, days=30):
     """{isin: '｜近30日±x.x%'} 由 bond_price_history 計算"""
