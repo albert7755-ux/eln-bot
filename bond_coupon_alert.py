@@ -265,7 +265,7 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
     lines = [f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達",
              f"{scope}：{len(ok)} 檔",
              f"（未來{lookahead}天共 {len(alerts)} 檔配息｜配息前可申購 {len(ok_all)}｜本期已截止 {gone}）",
-             "📌 配息前申購需墊付較高前手息，領回利息計入海外利息所得；配息後申購前手息較低。",
+             "📌 配息前申購需支付較高前手息；配息後申購前手息較低。",
              "兩者經濟價值相當，請依客戶資金與稅務情況評估，本表僅為時點資訊。\n"]
     cur = None
     for i, a in enumerate(ok):
@@ -277,6 +277,7 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
         ytm = a["ytm"] if a["ytm"] not in (None, "", 0) else "-"
         avail = "" if str(a["avail"]) == "有" else f"｜額度:{a['avail']}"
         lines.append(
+            f"{a['code'] or '-'}\n"
             f"{a['name']} {a['ccy']} {a['coupon']}% {a['freq']}｜{pi_tag(a)}\n"
             f"  配息{a['coupon_date']:%m/%d}｜Offer {offer}｜YTM {ytm}{avail}"
         )
