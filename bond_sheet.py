@@ -86,6 +86,35 @@ def get_financials(ticker):
     except Exception as e:
         print(f"[BondSheet] statements fail {ticker}: {e}")
 
+    # ROE 補算:info 沒有 returnOnEquity 時,用 淨利 / 股東權益 自己算
+    if fin["roe"] is None:
+        try:
+            import yfinance as yf
+            t = yf.Ticker(ticker)
+            ni = None
+            fs = t.financials
+            if fs is not None and not fs.empty:
+                col = fs.columns[0]
+                for k in ("Net Income", "Net Income Common Stockholders", "Net Income Continuous Operations"):
+                    if k in fs.index:
+                        ni = float(fs.loc[k, col]); break
+            if ni is None:
+                ni = info.get("netIncomeToCommon")
+                ni = float(ni) if isinstance(ni, (int, float)) else None
+            eq = None
+            bs2 = t.balance_sheet
+            if bs2 is not None and not bs2.empty:
+                col = bs2.columns[0]
+                for k in ("Stockholders Equity", "Total Stockholder Equity", "Common Stock Equity",
+                          "Total Equity Gross Minority Interest"):
+                    if k in bs2.index:
+                        eq = float(bs2.loc[k, col]); break
+            if ni is not None and eq:
+                fin["roe"] = ni / eq
+                print(f"[BondSheet] {ticker} ROE 由淨利/股東權益補算: {fin['roe']:.3f}")
+        except Exception as e:
+            print(f"[BondSheet] ROE fallback {ticker}: {e}")
+
     if fin["ebitda"] and fin["total_debt"] is not None:
         fin["net_debt_ebitda"] = round((fin["total_debt"] - (fin["cash"] or 0)) / fin["ebitda"], 1)
 
@@ -113,7 +142,10 @@ def _fin_rows(fin):
 UST_TENORS = [(0.25, "3M"), (2, "2Y"), (5, "5Y"), (10, "10Y"), (20, "20Y"), (30, "30Y")]
 
 def get_ust_curve():
-    """{年期: 殖利率%}，抓不到回 {}。給『vs 美債利差』欄用"""
+    """
+    美債曲線 {年期: 殖利率%}。yfinance 取 3M/5Y/10Y/30Y，
+    再用 FRED 補 2Y/20Y（曲線取樣點越密，內插出的同年期基準越準）。
+    """
     out = {}
     try:
         import yfinance as yf
@@ -125,7 +157,22 @@ def get_ust_curve():
             except Exception:
                 pass
     except Exception as e:
-        print(f"[BondSheet] UST curve fail: {e}")
+        print(f"[BondSheet] UST curve(yf) fail: {e}")
+    try:
+        import requests, csv, io
+        for series, yrs in (("DGS2", 2), ("DGS20", 20)):
+            try:
+                url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}"
+                r = requests.get(url, timeout=15)
+                rows = [x for x in csv.reader(io.StringIO(r.text))][1:]
+                vals = [float(x[1]) for x in rows if len(x) > 1 and x[1] not in (".", "")]
+                if vals:
+                    out[yrs] = round(vals[-1], 3)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[BondSheet] UST curve(FRED) fail: {e}")
+    print(f"[BondSheet] UST curve: {sorted(out.items())}")
     return out
 
 def _interp_ust(curve, years):
@@ -253,8 +300,6 @@ def build_sheet_text(issuer, intro, bonds, fin=None, parent_note="", hist_map=No
         lines.append(f"…另有 {len(live)-15} 檔（/issuer {issuer} 查看）")
     lines += ["", "【風險揭露】"]
     lines += [f"・{k}：{v}" for k, v in RISK_ITEMS]
-    lines += ["", "【名詞說明】"]
-    lines += [f"・{k}：{v}" for k, v in GLOSSARY]
     lines += ["", "※ 本資料由公開資訊彙整，僅供參考，非投資建議或要約；"
               "詳細產品資訊（配息條件、提前買回條款、風險揭露等）請以產品說明書為準"]
     return "\n".join(lines)
@@ -383,9 +428,6 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
     el.append(Spacer(1, 3*mm))
     el.append(Paragraph("風險揭露", st_h))
     for k, v in RISK_ITEMS:
-        el.append(Paragraph(f"● <b>{k}</b>：{v}", st_risk))
-    el.append(Paragraph("名詞說明", st_h))
-    for k, v in GLOSSARY:
         el.append(Paragraph(f"● <b>{k}</b>：{v}", st_risk))
     el.append(Spacer(1, 2.5*mm))
     el.append(Paragraph("YTM/YTC 欄呈現兩個數字者表示該券有提前買回條款（金色標示）。"
