@@ -306,7 +306,7 @@ def _ratings_of(bonds):
     return "-"
 
 # ---------- A. LINE 文字版 ----------
-def build_sheet_text(issuer, intro, bonds, fin=None, parent_note="", hist_map=None, fin_comment="", peers="", rating_note="", ust_curve=None, today=None):
+def build_sheet_text(issuer, intro, bonds, fin=None, parent_note="", hist_map=None, fin_comment="", peers="", rating_note="", ust_curve=None, charts_comment="", today=None):
     today = today or date.today()
     hist_map = hist_map or {}
     live = [b for b in bonds if not (b.get("maturity") and b["maturity"] < today)]
@@ -325,6 +325,8 @@ def build_sheet_text(issuer, intro, bonds, fin=None, parent_note="", hist_map=No
             lines += ["", "【財務比率解讀（AI）】", fin_comment]
         if peers:
             lines += ["", "【同業比較】", peers]
+        if charts_comment:
+            lines += ["", "【近五季財報趨勢解讀】", charts_comment]
         lines.append("")
     else:
         lines += ["【財務重點】財務資料暫時無法取得，請參閱發行機構最新公開財報", ""]
@@ -389,7 +391,7 @@ def _register_cjk_font(pdfmetrics, UnicodeCIDFont):
     return "MSung-Light"
 
 
-def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hist_map=None, fin_comment="", peers="", rating_note="", ust_curve=None, charts_png=None, today=None):
+def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hist_map=None, fin_comment="", peers="", rating_note="", ust_curve=None, charts_png=None, charts_comment="", today=None):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.lib import colors
@@ -472,6 +474,9 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
             disp_w = 180 * mm
             el.append(Paragraph("近五季財報趨勢", st_h))
             el.append(RLImage(charts_png, width=disp_w, height=disp_w * ih / iw))
+            if charts_comment:
+                el.append(Spacer(1, 1.5*mm))
+                el.append(Paragraph("圖表解讀：" + charts_comment, st_p))
             el.append(Paragraph("資料來源：公開財報（yfinance）；單位為該公司報表幣別之億元。", st_small))
         except Exception as e:
             print(f"[BondSheet] embed charts fail: {e}")
@@ -530,7 +535,18 @@ def _cjk_font_path():
               "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"]
     for p in cands:
         if p and os.path.exists(p):
+            print(f"[BondSheet] 使用字型: {p}")
             return p
+    # 掃描:fonts/ 與專案根目錄下任何 .ttf/.otf（容錯檔名打錯的情況，例如 xxx.tff.ttf）
+    import glob
+    for pattern in ("fonts/*.ttf", "fonts/*.otf", "*.ttf", "*.otf",
+                    "fonts/*.TTF", "*.TTF"):
+        hits = sorted(glob.glob(pattern))
+        if hits:
+            print(f"[BondSheet] 掃描到字型: {hits[0]}")
+            return hits[0]
+    print(f"[BondSheet] 找不到中文字型;工作目錄={os.getcwd()};"
+          f"fonts/內容={os.listdir('fonts') if os.path.isdir('fonts') else '(無 fonts 資料夾)'}")
     return None
 
 def get_quarterly_series(ticker, n=5):
