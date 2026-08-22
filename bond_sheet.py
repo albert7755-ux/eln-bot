@@ -234,6 +234,8 @@ def first_num(v):
     m = _re.search(r"-?\d+(?:\.\d+)?", str(v).replace(",", ""))
     return float(m.group()) if m else None
 
+WATERMARK = "僅供內部訓練參考，不構成推介行為"
+
 RISK_ITEMS = [
     ("利率風險", "市場利率上升時債券價格將下跌，存續期間越長價格波動幅度越大；提前贖回或於到期前賣出可能發生本金損失。"),
     ("信用風險", "發行機構之信用狀況若惡化或發生違約，將影響利息與本金之支付，投資人可能損失全部或部分本金。信用評等僅為評等機構意見，不保證還本付息。"),
@@ -242,13 +244,6 @@ RISK_ITEMS = [
     ("流動性風險", "海外債券次級市場流動性可能不足，於到期前出售未必能以合理價格成交，買賣價差亦可能擴大。"),
 ]
 
-GLOSSARY = [
-    ("YTM（到期殖利率）", "持有至到期、且各期利息均以相同利率再投資之年化報酬率假設值。"),
-    ("YTC（買回殖利率）", "假設發行機構於最近一次可買回日執行買回時之年化報酬率。具買回條款者，實際報酬通常介於 YTM 與 YTC 之間，應以較低者評估。"),
-    ("前手息（應計利息）", "買方於交割時須支付賣方自前次配息日起累積之利息；於配息日領回，故非額外收益或成本。"),
-    ("存續期間（Duration）", "衡量價格對利率變動的敏感度，數值越大越敏感。市場利率變動 1%，價格約反向變動「存續期間×1%」。"),
-    ("債券順位", "清償順序。優先順位優先受償；次順位／次順位金融債之受償順序在後，風險相對較高。"),
-]
 
 def _clean(v, dash="-"):
     return dash if v in (None, "", 0, "#VALUE!", "#N/A") else v
@@ -265,7 +260,7 @@ def build_sheet_text(issuer, intro, bonds, fin=None, parent_note="", hist_map=No
     today = today or date.today()
     hist_map = hist_map or {}
     live = [b for b in bonds if not (b.get("maturity") and b["maturity"] < today)]
-    lines = [f"📋 {issuer}｜發行機構參考資訊（{today:%Y/%m/%d}）", ""]
+    lines = [f"📋 {issuer}｜發行機構參考資訊（{today:%Y/%m/%d}）", f"⚠️ {WATERMARK}", ""]
     if intro:
         lines += ["【發行機構簡介】", intro, ""]
     rt_line = _ratings_of(live)
@@ -294,13 +289,13 @@ def build_sheet_text(issuer, intro, bonds, fin=None, parent_note="", hist_map=No
         call_s = f"｜提前買回:{ci}" if ci != "無" else ""
         lines.append(f"▪ {b.get('code') or '-'} {b['name']}")
         lines.append(f"  {b['ccy']} {b['coupon']}% {b['freq']}｜Offer {_clean(b.get('offer'))}｜YTM/YTC {ytm}{sp_s}")
-        lines.append(f"  到期{b['maturity']:%Y/%m}｜存續期間 {_clean(b.get('duration'))}｜{b.get('seniority') or '-'}"
+        lines.append(f"  到期{b['maturity']:%Y/%m}｜剩餘年期 {_clean(b.get('years'))}｜{b.get('seniority') or '-'}"
                      f"｜最低申購 {_clean(b.get('min_amt'))}｜{pi(b)}{call_s}{h}")
     if len(live) > 15:
         lines.append(f"…另有 {len(live)-15} 檔（/issuer {issuer} 查看）")
     lines += ["", "【風險揭露】"]
     lines += [f"・{k}：{v}" for k, v in RISK_ITEMS]
-    lines += ["", "※ 本資料由公開資訊彙整，僅供參考，非投資建議或要約；"
+    lines += ["", f"※ {WATERMARK}。本資料由公開資訊彙整，僅供參考，非投資建議或要約；"
               "詳細產品資訊（配息條件、提前買回條款、風險揭露等）請以產品說明書為準"]
     return "\n".join(lines)
 
@@ -325,11 +320,14 @@ def _register_cjk_font(pdfmetrics, UnicodeCIDFont):
     if os.getenv("BOND_SHEET_FONT"):
         candidates.append(os.getenv("BOND_SHEET_FONT"))
     candidates += [
-        "fonts/NotoSansTC-Regular.ttf",  # repo 內自帶(建議)
+        # 黑體(近似微軟正黑體)優先;把字型檔放進 repo 的 fonts/ 目錄即可全平台一致
+        "fonts/NotoSansTC-Regular.ttf",
+        "fonts/msjh.ttf",
+        "fonts/SourceHanSansTC-Regular.ttf",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",   # 文泉驛微米黑(黑體)
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",     # 文泉驛正黑(黑體)
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     ]
     for path in candidates:
         try:
@@ -363,6 +361,26 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
     st_p = ParagraphStyle("p", fontName=F, fontSize=9.5, leading=14)
     st_small = ParagraphStyle("sm", fontName=F, fontSize=7.5, textColor=GRAY, leading=10)
     st_risk = ParagraphStyle("rk", fontName=F, fontSize=7.5, leading=10.5, spaceAfter=1.2, leftIndent=3)
+
+    def _watermark(canv, doc_):
+        """斜向平鋪浮水印:僅供內部訓練參考，不構成推介行為"""
+        canv.saveState()
+        try:
+            canv.setFont(F, 20)
+        except Exception:
+            canv.setFont("Helvetica", 20)
+        canv.setFillColor(colors.HexColor("#0B2A4A"))
+        try:
+            canv.setFillAlpha(0.07)
+        except Exception:
+            canv.setFillColor(colors.HexColor("#E4E9EF"))
+        w, h = A4
+        canv.translate(w / 2, h / 2)
+        canv.rotate(35)
+        for row in range(-4, 5):
+            for col in range(-2, 3):
+                canv.drawCentredString(col * 230, row * 90, WATERMARK)
+        canv.restoreState()
 
     doc = SimpleDocTemplate(out_path, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=14*mm, bottomMargin=12*mm)
     el = []
@@ -398,7 +416,7 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
 
     el.append(Paragraph(f"債券標的一覽（{len(live)} 檔）", st_h))
     ust_curve = ust_curve or {}
-    hdr = ["產品代碼", "債券名稱", "幣別", "票面%", "頻率", "Offer", "YTM/YTC", "較美債", "到期", "存續\n期間", "順位", "最低\n申購", "提前\n買回", "近30日"]
+    hdr = ["產品代碼", "債券名稱", "幣別", "票面%", "頻率", "Offer", "YTM/YTC", "較美債", "到期", "剩餘\n年期", "順位", "最低\n申購", "提前\n買回", "近30日"]
     data = [hdr]
     for b in live[:20]:
         sp = ust_spread_bp(b, ust_curve, today)
@@ -407,7 +425,7 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
                      str(_clean(b.get("offer"))), str(_clean(b.get("ytm"))),
                      f"+{sp}bp" if sp is not None else "-",
                      f"{b['maturity']:%Y/%m}" if b.get("maturity") else "-",
-                     str(_clean(b.get("duration"))), sen, str(_clean(b.get("min_amt"))),
+                     str(_clean(b.get("years"))), sen, str(_clean(b.get("min_amt"))),
                      call_info(b).replace("（", "\n（"),
                      hist_map.get(b["isin"], "").replace("｜近30日", "").strip() or "-"])
     t = Table(data, colWidths=[21*mm, 31*mm, 8*mm, 9*mm, 11*mm, 11*mm, 15*mm, 12*mm, 12*mm, 9*mm, 14*mm, 11*mm, 16*mm, 12*mm], repeatRows=1)
@@ -433,5 +451,5 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
     el.append(Paragraph("YTM/YTC 欄呈現兩個數字者表示該券有提前買回條款（金色標示）。"
                         "本資料由公開資訊彙整，僅供參考，非投資建議或要約；"
                         "報價可能隨市場變動，詳細產品資訊（配息條件、提前買回條款、風險揭露等）請以產品說明書為準。", st_small))
-    doc.build(el)
+    doc.build(el, onFirstPage=_watermark, onLaterPages=_watermark)
     return out_path
