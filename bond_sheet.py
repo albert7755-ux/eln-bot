@@ -359,37 +359,17 @@ def pi(b):
 
 # ---------- B. PDF 版 ----------
 def _register_cjk_font(pdfmetrics, UnicodeCIDFont):
-    """
-    註冊中文字型,依序嘗試:
-    1. 環境變數 BOND_SHEET_FONT 指定的 .ttf/.ttc
-    2. 系統常見的 Noto/文泉驛 CJK 字型(會實際嵌入 PDF,任何裝置都能看)
-    3. Adobe CID 字型 MSung-Light(不嵌入,部分瀏覽器可能無法顯示,最後手段)
-    """
-    import os
+    """註冊 PDF 內文中文字型；與圖表共用同一套字型搜尋邏輯"""
     from reportlab.pdfbase.ttfonts import TTFont
-    candidates = []
-    if os.getenv("BOND_SHEET_FONT"):
-        candidates.append(os.getenv("BOND_SHEET_FONT"))
-    candidates += [
-        # 黑體(近似微軟正黑體)優先;把字型檔放進 repo 的 fonts/ 目錄即可全平台一致
-        "fonts/NotoSansTC-Regular.ttf",
-        "fonts/msjh.ttf",
-        "fonts/SourceHanSansTC-Regular.ttf",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",   # 文泉驛微米黑(黑體)
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",     # 文泉驛正黑(黑體)
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
-    ]
-    for path in candidates:
+    path = _cjk_font_path()
+    if path:
         try:
-            if path and os.path.exists(path):
-                pdfmetrics.registerFont(TTFont("CJK", path, subfontIndex=0))
-                return "CJK"
+            pdfmetrics.registerFont(TTFont("CJK", path, subfontIndex=0))
+            return "CJK"
         except Exception as e:
-            print(f"[BondSheet] font {path} fail: {e}")
+            print(f"[BondSheet] PDF font {path} 註冊失敗: {e}")
     pdfmetrics.registerFont(UnicodeCIDFont("MSung-Light"))
     return "MSung-Light"
-
 
 def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hist_map=None, fin_comment="", peers="", rating_note="", ust_curve=None, charts_png=None, charts_comment="", today=None):
     from reportlab.lib.pagesizes import A4
@@ -525,29 +505,45 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
 
 # ---------- 財報圖表（近 5 季）----------
 def _cjk_font_path():
-    import os
-    cands = [os.getenv("BOND_SHEET_FONT", "")] if os.getenv("BOND_SHEET_FONT") else []
-    cands += ["fonts/NotoSansTC-Regular.ttf", "fonts/NotoSansTC.ttf", "fonts/msjh.ttf",
-              "fonts/SourceHanSansTC-Regular.otf",
-              "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    """
+    找中文字型檔。以「本程式檔所在目錄」為基準組出絕對路徑，
+    不依賴執行時的工作目錄（Render 上 uvicorn 的 CWD 未必是專案根目錄）。
+    """
+    import os, glob
+    base = os.path.dirname(os.path.abspath(__file__))
+    names = ["NotoSansTC-Regular.ttf", "NotoSansTC.ttf", "msjh.ttf",
+             "SourceHanSansTC-Regular.otf", "NotoSansTC-Regular.tff.ttf"]
+    cands = []
+    env = os.getenv("BOND_SHEET_FONT", "")
+    if env:
+        cands += [env, os.path.join(base, env)]
+    for n in names:
+        cands += [os.path.join(base, "fonts", n), os.path.join(base, n),
+                  os.path.join("fonts", n), n]
+    cands += ["/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
               "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-              "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-              "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"]
+              "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"]
     for p in cands:
         if p and os.path.exists(p):
-            print(f"[BondSheet] 使用字型: {p}")
+            print(f"[BondSheet] font found: {p}")
             return p
-    # 掃描:fonts/ 與專案根目錄下任何 .ttf/.otf（容錯檔名打錯的情況，例如 xxx.tff.ttf）
-    import glob
-    for pattern in ("fonts/*.ttf", "fonts/*.otf", "*.ttf", "*.otf",
-                    "fonts/*.TTF", "*.TTF"):
+    # 掃描 fonts/ 與程式所在目錄下任何字型檔（容錯檔名打錯）
+    for pattern in (os.path.join(base, "fonts", "*.tt*"), os.path.join(base, "fonts", "*.otf"),
+                    os.path.join(base, "*.tt*"), "fonts/*.tt*", "*.tt*"):
         hits = sorted(glob.glob(pattern))
         if hits:
-            print(f"[BondSheet] 掃描到字型: {hits[0]}")
+            print(f"[BondSheet] font by scan: {hits[0]}")
             return hits[0]
-    print(f"[BondSheet] 找不到中文字型;工作目錄={os.getcwd()};"
-          f"fonts/內容={os.listdir('fonts') if os.path.isdir('fonts') else '(無 fonts 資料夾)'}")
+    fdir = os.path.join(base, "fonts")
+    print(f"[BondSheet] NO CJK FONT. base={base} cwd={os.getcwd()} "
+          f"fonts_dir_exists={os.path.isdir(fdir)} "
+          f"fonts_content={os.listdir(fdir) if os.path.isdir(fdir) else 'N/A'}")
     return None
+
+def font_status():
+    """回傳字型狀態字串，給 LINE 診斷用"""
+    p = _cjk_font_path()
+    return f"字型OK: {p}" if p else "字型未找到(圖表用英文標籤)"
 
 def get_quarterly_series(ticker, n=5):
     """
