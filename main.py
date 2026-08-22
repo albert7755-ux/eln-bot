@@ -88,6 +88,7 @@ BOND_GROUP_HELP = (
     "\n🏦 發行機構\n"
     "/issuer 蘋果 → 簡介＋架上所有債券（可用英文/ISIN/代碼）\n"
     "/sheet 蘋果 → 發行機構參考資訊（簡介+信評+財務+標的,文字+PDF）\n"
+    "/cleanup → 預覽 Drive 舊報告；/cleanup do → 清理（每週日 03:00 自動）\n"
     "\n📊 報價查詢與異動\n"
     "/price 蘋果 2043 或 /price 26070003 → 單檔完整報價\n"
     "/price 26070003 30 → 該檔近30天報價走勢（高低點＋期間變化）\n"
@@ -2130,6 +2131,44 @@ def handle_text_message(event):
             import threading
             threading.Thread(target=_run_bondnav, daemon=True).start()
             return
+        if cmd == "cleanup":
+            # /cleanup        → 預覽:列出 30 天前的舊檔,不刪除
+            # /cleanup do     → 實際清理(移到垃圾桶,可救回)
+            # /cleanup do 60  → 只清 60 天前的
+            parts = raw_cmd.split()
+            do_it = len(parts) > 1 and parts[1].lower() in ("do", "yes", "確認", "執行")
+            try:
+                days = int(parts[2]) if len(parts) > 2 else int(os.getenv("DRIVE_KEEP_DAYS", "30"))
+            except ValueError:
+                days = 30
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=f"🧹 {'清理中' if do_it else '預覽中'}（{days} 天前的舊報告）..."))
+            def _run_cleanup(chat_id, bot_api_ref):
+                try:
+                    from pdf_generator import cleanup_drive_folder
+                    deleted, checked, detail = cleanup_drive_folder(days=days, dry_run=not do_it)
+                    if not checked:
+                        bot_api_ref.push_message(chat_id, TextSendMessage(text="找不到「龍蝦報告」資料夾，或裡面沒有檔案。"))
+                        return
+                    head = (f"🧹 已將 {deleted} 個舊報告移到垃圾桶" if do_it
+                            else f"🔍 預覽：有 {deleted} 個檔案超過 {days} 天")
+                    lines_c = [head, f"（資料夾共 {checked} 個檔案）"]
+                    if detail:
+                        lines_c.append("")
+                        lines_c += [f"・{n}" for n in detail[:15]]
+                        if len(detail) > 15:
+                            lines_c.append(f"…另有 {len(detail)-15} 個")
+                    if not do_it and deleted:
+                        lines_c.append(f"\n要實際清理請打：/cleanup do {days}")
+                    if do_it:
+                        lines_c.append("\n※ 檔案在 Drive 垃圾桶中，30 天內可救回")
+                    push_long_message(bot_api_ref, chat_id, "\n".join(lines_c))
+                except Exception as e:
+                    print(f"[DriveCleanup ERROR] {e}")
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 清理失敗：{str(e)[:200]}"))
+            import threading
+            threading.Thread(target=_run_cleanup, args=(ck.split(":", 1)[1], _bot_api), daemon=True).start()
+            return
         if cmd == "sheet":
             # /sheet 蘋果  → 發行機構參考資訊(LINE文字 + PDF連結)
             kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
@@ -3664,6 +3703,23 @@ def run_rating_news_check(days=2, use_llm=True):
     blocks.append("※ 新聞為 AI 初篩，請點連結確認原文；本行報價檔的評等以總行更新為準")
     return "\n\n".join(blocks)
 
+def job_drive_cleanup():
+    """每週日 03:00 清掉 Drive「龍蝦報告」資料夾裡 30 天前的舊檔（移到垃圾桶，可救回）"""
+    now = datetime.now(TZ_TAIPEI_PYTZ)
+    write_job_log("Drive清理", "started", now.strftime('%Y-%m-%d %H:%M'))
+    try:
+        from pdf_generator import cleanup_drive_folder
+        days = int(os.getenv("DRIVE_KEEP_DAYS", "30"))
+        deleted, checked, _ = cleanup_drive_folder(days=days)
+        write_job_log("Drive清理", "success", f"檢查{checked}個，刪除{deleted}個({days}天前)")
+        user_id = os.getenv("LINE_USER_ID", "")
+        if user_id and deleted:
+            line_bot_api.push_message(user_id, TextSendMessage(
+                text=f"🧹 Drive 定期清理：已將 {deleted} 個超過 {days} 天的舊報告移到垃圾桶（共檢查 {checked} 個）"))
+    except Exception as e:
+        write_job_log("Drive清理", "error", str(e))
+        print(f"[DriveCleanup ERROR] {e}")
+
 def job_bond_rating_news():
     """每天 07:00 外部信評新聞掃描，推給配息雷達同一批對象"""
     now = datetime.now(TZ_TAIPEI_PYTZ)
@@ -3874,6 +3930,7 @@ def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
     scheduler.add_job(job_bond_coupon_radar, CronTrigger(day_of_week="mon-fri", hour=6, minute=45, timezone=TZ_TAIPEI_PYTZ), id="bond_coupon_radar", name="海外債配息雷達")
     scheduler.add_job(job_bond_rating_news, CronTrigger(day_of_week="mon-fri", hour=6, minute=50, timezone=TZ_TAIPEI_PYTZ), id="bond_rating_news", name="信評新聞雷達")
+    scheduler.add_job(job_drive_cleanup, CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=TZ_TAIPEI_PYTZ), id="drive_cleanup", name="Drive清理")
     scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
     scheduler.add_job(job_bond_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=38, timezone=TZ_TAIPEI_PYTZ), id="bond_daily_report", name="債券日報")
     scheduler.add_job(job_auto_tracking, CronTrigger(day_of_week="mon-sat", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ), id="auto_tracking", name="ELN自動追蹤")
