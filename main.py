@@ -2173,16 +2173,16 @@ def handle_text_message(event):
                     hist = build_issuer_hist_map([b["isin"] for b in bl_])
                     kw_ = dict(fin=fin, parent_note=parent_note, hist_map=hist, fin_comment=fin_comment,
                                peers=peers, rating_note=rating_note, ust_curve=curve, today=today_)
-                    txt = build_sheet_text(iss_, intro, bl_, **kw_)
-                    push_long_message(bot_api_ref, chat_id, txt)
                     # 近五季財報圖表(抓不到就略過,不影響 PDF 產出)
                     charts_png = None
                     chart_note = ""
+                    charts_comment = ""
                     if ticker:
                         try:
                             q = get_quarterly_series(ticker)
                             if q:
                                 charts_png = build_charts_png(q, f"/tmp/charts_{iss_}_{today_:%Y%m%d}.png")
+                                charts_comment = get_charts_comment(iss_, q)
                                 if not charts_png:
                                     chart_note = "（圖表繪製失敗，未附圖表）"
                             else:
@@ -2192,8 +2192,11 @@ def handle_text_message(event):
                             chart_note = "（圖表產生錯誤，未附圖表）"
                     else:
                         chart_note = "（未對應到上市公司，未附圖表）"
+                    txt = build_sheet_text(iss_, intro, bl_, charts_comment=charts_comment, **kw_)
+                    push_long_message(bot_api_ref, chat_id, txt)
                     pdf_path = f"/tmp/參考資訊_{iss_}_{today_:%Y%m%d}.pdf"
-                    build_sheet_pdf(pdf_path, iss_, intro, bl_, charts_png=charts_png, **kw_)
+                    build_sheet_pdf(pdf_path, iss_, intro, bl_, charts_png=charts_png,
+                                    charts_comment=charts_comment, **kw_)
                     if charts_png:
                         try:
                             os.remove(charts_png)
@@ -3778,6 +3781,24 @@ def get_rating_outlook(issuer):
     except Exception as e:
         print(f"[BondSheet outlook] {e}")
         return ""
+
+def get_charts_comment(issuer, q):
+    """對近五季四張圖做 AI 解讀:正向、建設性,但不得捏造或美化負面數字"""
+    if not q:
+        return ""
+    data = {k: q.get(k) for k in ("labels", "revenue", "op_income", "ocf", "fcf",
+                                  "debt", "cash", "debt_ebitda", "int_cover")}
+    prompt = ("以下是「" + issuer + "」近五季的財報數據(單位:億,依序由舊到新):"
+              + json.dumps(data, ensure_ascii=False) +
+              "\n請以債券投資人(債權人)角度,用 100~150 字繁體中文解讀這四組數據:"
+              "營運表現(營收/營業淨利)、現金流(營業現金流/自由現金流)、債務與現金、信用比率(債務EBITDA、利息保障倍數)。\n"
+              "要求:\n"
+              "1. 語氣正向且具建設性,優先點出結構性優勢與穩定性(例如營收規模穩定、現金流回升、利息保障充足)。\n"
+              "2. 但不得捏造或美化:若某季出現下滑或負值(例如自由現金流為負),要據實說明並補充合理的解釋角度(例如季節性、資本支出集中),不可略過不提。\n"
+              "3. 只描述數據本身與對償債能力的意義,不做投資建議、不預測股價、不用果決斷言。\n"
+              "只回傳 JSON:{\"comment\": 解讀文字}")
+    got, _, _ = llm_json_fallback(prompt, max_tokens=600)
+    return str((got or {}).get("comment") or "").strip()
 
 def build_issuer_hist_map(isins, days=30):
     """{isin: '｜近30日±x.x%'} 由 bond_price_history 計算"""
