@@ -44,7 +44,9 @@ def get_financials(ticker):
     fin = {
         "ticker": ticker,
         "currency": info.get("financialCurrency") or info.get("currency") or "USD",
-        "market_cap": g("marketCap") or g("market_cap", "marketCap", src=fast),
+        "market_cap": g("marketCap") or g("market_cap", "marketCap", src=fast)
+                      or ((g("currentPrice") or g("last_price", "lastPrice", src=fast) or 0)
+                          * (g("sharesOutstanding") or g("shares", src=fast) or 0)) or None,
         "eps": g("trailingEps", "epsTrailingTwelveMonths"),
         "roe": g("returnOnEquity"),
         "total_debt": g("totalDebt"),
@@ -85,6 +87,27 @@ def get_financials(ticker):
                     fin["ebitda"] = float(fs.loc["EBITDA", col])
     except Exception as e:
         print(f"[BondSheet] statements fail {ticker}: {e}")
+
+    # EPS 備援:info 沒有 trailingEps 時,依序用 財報 Diluted EPS → 淨利/在外股數
+    if fin["eps"] is None:
+        try:
+            import yfinance as yf
+            t = yf.Ticker(ticker)
+            fs = t.financials
+            if fs is not None and not fs.empty:
+                col = fs.columns[0]
+                for k in ("Diluted EPS", "Basic EPS"):
+                    if k in fs.index:
+                        fin["eps"] = float(fs.loc[k, col]); break
+            if fin["eps"] is None:
+                ni = info.get("netIncomeToCommon")
+                sh = info.get("sharesOutstanding") or fast.get("shares")
+                if isinstance(ni, (int, float)) and isinstance(sh, (int, float)) and sh:
+                    fin["eps"] = float(ni) / float(sh)
+            if fin["eps"] is not None:
+                print(f"[BondSheet] {ticker} EPS 由備援來源取得: {fin['eps']:.2f}")
+        except Exception as e:
+            print(f"[BondSheet] EPS fallback {ticker}: {e}")
 
     # ROE 補算:info 沒有 returnOnEquity 時,用 淨利 / 股東權益 自己算
     if fin["roe"] is None:
@@ -366,7 +389,7 @@ def _register_cjk_font(pdfmetrics, UnicodeCIDFont):
     return "MSung-Light"
 
 
-def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hist_map=None, fin_comment="", peers="", rating_note="", ust_curve=None, today=None):
+def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hist_map=None, fin_comment="", peers="", rating_note="", ust_curve=None, charts_png=None, today=None):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.lib import colors
@@ -441,6 +464,17 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
     else:
         el.append(Paragraph("財務資料暫時無法取得，請參閱發行機構最新公開財報。", st_p))
 
+    if charts_png:
+        try:
+            from reportlab.platypus import Image as RLImage
+            from PIL import Image as PILImage
+            iw, ih = PILImage.open(charts_png).size
+            disp_w = 180 * mm
+            el.append(Paragraph("近五季財報趨勢", st_h))
+            el.append(RLImage(charts_png, width=disp_w, height=disp_w * ih / iw))
+            el.append(Paragraph("資料來源：公開財報（yfinance）；單位為該公司報表幣別之億元。", st_small))
+        except Exception as e:
+            print(f"[BondSheet] embed charts fail: {e}")
     el.append(Paragraph(f"債券標的一覽（{len(live)} 檔）", st_h))
     ust_curve = ust_curve or {}
     hdr = ["產品代碼", "債券名稱", "幣別", "票面%", "頻率", "Offer", "YTM/YTC", "較美債", "到期", "剩餘\n年期", "順位", "最低\n申購", "提前\n買回", "近30日"]
@@ -483,3 +517,145 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
                         "報價可能隨市場變動，詳細產品資訊（配息條件、提前買回條款、風險揭露等）請以產品說明書為準。", st_small))
     doc.build(el, onFirstPage=_watermark, onLaterPages=_watermark)
     return out_path
+
+# ---------- 財報圖表（近 5 季）----------
+def _cjk_font_path():
+    import os
+    for p in ("fonts/NotoSansTC-Regular.ttf", "fonts/msjh.ttf",
+              "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+              "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+              "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
+        if os.path.exists(p):
+            return p
+    return None
+
+def get_quarterly_series(ticker, n=5):
+    """
+    近 n 季財報序列（單位：億）。回傳 dict 或 None。
+    labels / revenue / op_income / ocf / fcf / debt / cash / debt_ebitda / int_cover
+    """
+    if not ticker:
+        return None
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        fs = t.quarterly_financials
+        bs = t.quarterly_balance_sheet
+        cf = t.quarterly_cashflow
+        if fs is None or fs.empty:
+            return None
+        cols = list(fs.columns)[:n][::-1]      # 舊 → 新
+        def pick(df, names, col):
+            if df is None or df.empty or col not in df.columns:
+                return None
+            for nm in names:
+                if nm in df.index:
+                    try:
+                        v = float(df.loc[nm, col])
+                        return v if v == v else None      # 濾掉 NaN
+                    except Exception:
+                        pass
+            return None
+        out = {"labels": [], "revenue": [], "op_income": [], "ocf": [], "fcf": [],
+               "debt": [], "cash": [], "debt_ebitda": [], "int_cover": []}
+        for c in cols:
+            q = (c.month - 1) // 3 + 1
+            out["labels"].append(f"{q}Q{str(c.year)[2:]}")
+            rev = pick(fs, ["Total Revenue", "Operating Revenue"], c)
+            opi = pick(fs, ["Operating Income", "EBIT"], c)
+            ebitda = pick(fs, ["EBITDA", "Normalized EBITDA"], c)
+            intexp = pick(fs, ["Interest Expense", "Interest Expense Non Operating"], c)
+            ocf = pick(cf, ["Operating Cash Flow", "Total Cash From Operating Activities"], c)
+            capex = pick(cf, ["Capital Expenditure", "Capital Expenditures"], c)
+            fcf = pick(cf, ["Free Cash Flow"], c)
+            if fcf is None and ocf is not None and capex is not None:
+                fcf = ocf + capex          # capex 通常為負值
+            debt = pick(bs, ["Total Debt", "Long Term Debt"], c)
+            cash = pick(bs, ["Cash And Cash Equivalents",
+                             "Cash Cash Equivalents And Short Term Investments"], c)
+            e8 = lambda v: round(v / 1e8, 1) if v is not None else None
+            out["revenue"].append(e8(rev)); out["op_income"].append(e8(opi))
+            out["ocf"].append(e8(ocf)); out["fcf"].append(e8(fcf))
+            out["debt"].append(e8(debt)); out["cash"].append(e8(cash))
+            out["debt_ebitda"].append(round(debt / (ebitda * 4), 1) if (debt and ebitda) else None)
+            out["int_cover"].append(round(opi / abs(intexp), 1) if (opi and intexp) else None)
+        if not any(x is not None for x in out["revenue"]):
+            return None
+        return out
+    except Exception as e:
+        print(f"[BondSheet] quarterly {ticker} fail: {e}")
+        return None
+
+def build_charts_png(q, out_png, title=""):
+    """把近 5 季資料畫成 2x2 圖表（仿財報重點版型），成功回傳路徑，否則 None"""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib import font_manager
+        fp = _cjk_font_path()
+        if fp:
+            font_manager.fontManager.addfont(fp) if fp.endswith(".ttf") else None
+            try:
+                name = font_manager.FontProperties(fname=fp).get_name()
+                matplotlib.rcParams["font.family"] = name
+            except Exception:
+                pass
+        matplotlib.rcParams["axes.unicode_minus"] = False
+        BLUE, GREEN, NAVY = "#1F8AC0", "#3EA97A", "#0B2A4A"
+        L = q["labels"]
+        fig, axes = plt.subplots(2, 2, figsize=(11, 6.2), dpi=150)
+
+        def bars(ax, a, b, la, lb, ttl):
+            import numpy as np
+            x = np.arange(len(L)); w = 0.38
+            av = [v if v is not None else 0 for v in a]
+            bv = [v if v is not None else 0 for v in b]
+            r1 = ax.bar(x - w/2, av, w, label=la, color=BLUE)
+            r2 = ax.bar(x + w/2, bv, w, label=lb, color=GREEN)
+            for r in list(r1) + list(r2):
+                h = r.get_height()
+                if h:
+                    ax.annotate(f"{h:,.0f}" if abs(h) >= 100 else f"{h:,.1f}",
+                                (r.get_x() + r.get_width()/2, h), ha="center",
+                                va="bottom" if h >= 0 else "top", fontsize=7)
+            ax.set_title(ttl, fontsize=10, color=NAVY, pad=20)
+            ax.set_xticks(x); ax.set_xticklabels(L, fontsize=8)
+            ax.legend(fontsize=7, frameon=False, ncol=2, loc="lower left",
+                      bbox_to_anchor=(0, 1.02))
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.tick_params(axis="y", labelsize=7)
+            ax.axhline(0, color="#999999", linewidth=0.6)
+
+        def lines(ax, a, b, la, lb, ttl):
+            import numpy as np
+            x = np.arange(len(L))
+            ax2 = ax.twinx()
+            ax.plot(x, [v if v is not None else float("nan") for v in a], "o-", color=BLUE, label=la, linewidth=1.6)
+            ax2.plot(x, [v if v is not None else float("nan") for v in b], "o-", color=GREEN, label=lb, linewidth=1.6)
+            for i, v in enumerate(a):
+                if v is not None:
+                    ax.annotate(f"{v}", (i, v), fontsize=7, color=BLUE, ha="center", va="bottom")
+            for i, v in enumerate(b):
+                if v is not None:
+                    ax2.annotate(f"{v}", (i, v), fontsize=7, color=GREEN, ha="center", va="bottom")
+            ax.set_title(ttl, fontsize=10, color=NAVY, pad=20)
+            ax.set_xticks(x); ax.set_xticklabels(L, fontsize=8)
+            ax.tick_params(axis="y", labelsize=7, colors=BLUE)
+            ax2.tick_params(axis="y", labelsize=7, colors=GREEN)
+            ax.spines[["top"]].set_visible(False); ax2.spines[["top"]].set_visible(False)
+            h1, l1 = ax.get_legend_handles_labels(); h2, l2 = ax2.get_legend_handles_labels()
+            ax.legend(h1 + h2, l1 + l2, fontsize=7, frameon=False, ncol=2,
+                      loc="lower left", bbox_to_anchor=(0, 1.02))
+
+        bars(axes[0][0], q["revenue"], q["op_income"], "營業收入(億)", "營業淨利(億)", "公司營運表現")
+        bars(axes[0][1], q["ocf"], q["fcf"], "營業活動現金流(億)", "自由現金流量(億)", "公司現金流")
+        bars(axes[1][0], q["debt"], q["cash"], "總債務(億)", "現金及約當現金(億)", "債務與現金")
+        lines(axes[1][1], q["debt_ebitda"], q["int_cover"], "總債務/EBITDA", "利息保障倍數", "信用相關比率")
+        fig.tight_layout(pad=1.6)
+        fig.savefig(out_png, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        return out_png
+    except Exception as e:
+        print(f"[BondSheet] charts fail: {e}")
+        return None
