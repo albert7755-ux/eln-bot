@@ -2156,7 +2156,7 @@ def handle_text_message(event):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📋 整理 {iss} 參考資訊中(簡介+財務+架上標的),約 30~60 秒..."))
             def _run_sheet(chat_id, bot_api_ref, iss_, bl_):
                 try:
-                    from bond_sheet import get_financials, build_sheet_text, build_sheet_pdf
+                    from bond_sheet import get_financials, build_sheet_text, build_sheet_pdf, get_quarterly_series, build_charts_png
                     from pdf_generator import upload_to_drive
                     today_ = datetime.now(TZ_TAIPEI).date()
                     parent, ticker = get_issuer_ticker(iss_)
@@ -2175,8 +2175,22 @@ def handle_text_message(event):
                                peers=peers, rating_note=rating_note, ust_curve=curve, today=today_)
                     txt = build_sheet_text(iss_, intro, bl_, **kw_)
                     push_long_message(bot_api_ref, chat_id, txt)
+                    # 近五季財報圖表(抓不到就略過,不影響 PDF 產出)
+                    charts_png = None
+                    if ticker:
+                        try:
+                            q = get_quarterly_series(ticker)
+                            if q:
+                                charts_png = build_charts_png(q, f"/tmp/charts_{iss_}_{today_:%Y%m%d}.png")
+                        except Exception as e:
+                            print(f"[BondSheet charts] {e}")
                     pdf_path = f"/tmp/參考資訊_{iss_}_{today_:%Y%m%d}.pdf"
-                    build_sheet_pdf(pdf_path, iss_, intro, bl_, **kw_)
+                    build_sheet_pdf(pdf_path, iss_, intro, bl_, charts_png=charts_png, **kw_)
+                    if charts_png:
+                        try:
+                            os.remove(charts_png)
+                        except Exception:
+                            pass
                     link = upload_to_drive(pdf_path, f"參考資訊_{iss_}_{today_:%Y%m%d}.pdf")
                     try:
                         os.remove(pdf_path)
