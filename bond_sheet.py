@@ -218,12 +218,10 @@ def call_info(bond):
         return "無"
     parts = []
     if m:
-        parts.append(f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}")
+        parts.append(f"{m.group(1)}/{int(m.group(2)):02d}")
     if price:
-        parts.append(f"價{price.group(2)}")
-    if "/" in ytm:
-        parts.append("YTC見左欄")
-    return "有" + ("（" + "、".join(parts) + "）" if parts else "")
+        parts.append(f"@{price.group(2)}")
+    return "有" + ("\n" + " ".join(parts) if parts else "")
 
 def first_num(v):
     if v is None:
@@ -234,7 +232,10 @@ def first_num(v):
     m = _re.search(r"-?\d+(?:\.\d+)?", str(v).replace(",", ""))
     return float(m.group()) if m else None
 
-WATERMARK = "僅供內部訓練參考，不構成推介行為"
+WATERMARK = "本內容僅供參考且不構成要約或要約引誘"
+
+LEGAL_NOTE = ("【本內容僅供參考且不構成要約或要約引誘，特定標的之商品風險、申購之條件、"
+              "限制費用及其他相關權利義務，應依產品說明暨投資風險預告書等相關文件為準。】")
 
 RISK_ITEMS = [
     ("利率風險", "市場利率上升時債券價格將下跌，存續期間越長價格波動幅度越大；提前贖回或於到期前賣出可能發生本金損失。"),
@@ -295,8 +296,7 @@ def build_sheet_text(issuer, intro, bonds, fin=None, parent_note="", hist_map=No
         lines.append(f"…另有 {len(live)-15} 檔（/issuer {issuer} 查看）")
     lines += ["", "【風險揭露】"]
     lines += [f"・{k}：{v}" for k, v in RISK_ITEMS]
-    lines += ["", f"※ {WATERMARK}。本資料由公開資訊彙整，僅供參考，非投資建議或要約；"
-              "詳細產品資訊（配息條件、提前買回條款、風險揭露等）請以產品說明書為準"]
+    lines += ["", "※ 本資料由公開資訊彙整。", LEGAL_NOTE]
     return "\n".join(lines)
 
 def pi(b):
@@ -361,25 +361,26 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
     st_p = ParagraphStyle("p", fontName=F, fontSize=9.5, leading=14)
     st_small = ParagraphStyle("sm", fontName=F, fontSize=7.5, textColor=GRAY, leading=10)
     st_risk = ParagraphStyle("rk", fontName=F, fontSize=7.5, leading=10.5, spaceAfter=1.2, leftIndent=3)
+    st_legal = ParagraphStyle("lg", fontName=F, fontSize=8, leading=11.5, textColor=NAVY)
 
     def _watermark(canv, doc_):
         """斜向平鋪浮水印:僅供內部訓練參考，不構成推介行為"""
         canv.saveState()
         try:
-            canv.setFont(F, 20)
+            canv.setFont(F, 15)
         except Exception:
-            canv.setFont("Helvetica", 20)
+            canv.setFont("Helvetica", 15)
         canv.setFillColor(colors.HexColor("#0B2A4A"))
         try:
-            canv.setFillAlpha(0.07)
+            canv.setFillAlpha(0.06)
         except Exception:
             canv.setFillColor(colors.HexColor("#E4E9EF"))
         w, h = A4
         canv.translate(w / 2, h / 2)
         canv.rotate(35)
-        for row in range(-4, 5):
-            for col in range(-2, 3):
-                canv.drawCentredString(col * 230, row * 90, WATERMARK)
+        for row in range(-3, 4):
+            for col in range(-1, 2):
+                canv.drawCentredString(col * 330, row * 150, WATERMARK)
         canv.restoreState()
 
     doc = SimpleDocTemplate(out_path, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=14*mm, bottomMargin=12*mm)
@@ -428,7 +429,8 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
                      str(_clean(b.get("years"))), sen, str(_clean(b.get("min_amt"))),
                      call_info(b).replace("（", "\n（"),
                      hist_map.get(b["isin"], "").replace("｜近30日", "").strip() or "-"])
-    t = Table(data, colWidths=[21*mm, 31*mm, 8*mm, 9*mm, 11*mm, 11*mm, 15*mm, 12*mm, 12*mm, 9*mm, 14*mm, 11*mm, 16*mm, 12*mm], repeatRows=1)
+    # 欄寬總和須 ≤ 180mm(A4 扣左右邊界),否則表格會超出頁面
+    t = Table(data, colWidths=[21*mm, 29*mm, 7*mm, 9*mm, 11*mm, 11*mm, 15*mm, 11*mm, 11*mm, 9*mm, 12*mm, 11*mm, 13*mm, 10*mm], repeatRows=1)
     style = [("FONTNAME", (0,0), (-1,-1), F), ("FONTSIZE", (0,0), (-1,0), 6.5), ("FONTSIZE", (0,1), (-1,-1), 6.5),
              ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
              ("BACKGROUND", (0,0), (-1,0), NAVY), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
@@ -448,7 +450,9 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
     for k, v in RISK_ITEMS:
         el.append(Paragraph(f"● <b>{k}</b>：{v}", st_risk))
     el.append(Spacer(1, 2.5*mm))
-    el.append(Paragraph("YTM/YTC 欄呈現兩個數字者表示該券有提前買回條款（金色標示）。"
+    el.append(Paragraph(LEGAL_NOTE, st_legal))
+    el.append(Spacer(1, 1.5*mm))
+    el.append(Paragraph("YTM/YTC 欄呈現兩個數字者表示該券有提前買回條款（金色標示）；提前買回欄之日期與價格摘自報價檔備註。"
                         "本資料由公開資訊彙整，僅供參考，非投資建議或要約；"
                         "報價可能隨市場變動，詳細產品資訊（配息條件、提前買回條款、風險揭露等）請以產品說明書為準。", st_small))
     doc.build(el, onFirstPage=_watermark, onLaterPages=_watermark)
