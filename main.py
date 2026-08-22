@@ -2208,6 +2208,13 @@ def handle_text_message(event):
                     except Exception:
                         pass
                     bot_api_ref.push_message(chat_id, TextSendMessage(text=f"📎 {iss_} 參考資訊 PDF{chart_note}\n🔗 {link}"))
+                    try:
+                        from bond_sheet import font_status
+                        fs_ = font_status()
+                        if "未找到" in fs_:
+                            bot_api_ref.push_message(chat_id, TextSendMessage(text=f"ℹ️ {fs_}"))
+                    except Exception:
+                        pass
                 except Exception as e:
                     print(f"[BondSheet ERROR] {e}")
                     print(_traceback.format_exc())
