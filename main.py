@@ -2177,13 +2177,21 @@ def handle_text_message(event):
                     push_long_message(bot_api_ref, chat_id, txt)
                     # 近五季財報圖表(抓不到就略過,不影響 PDF 產出)
                     charts_png = None
+                    chart_note = ""
                     if ticker:
                         try:
                             q = get_quarterly_series(ticker)
                             if q:
                                 charts_png = build_charts_png(q, f"/tmp/charts_{iss_}_{today_:%Y%m%d}.png")
+                                if not charts_png:
+                                    chart_note = "（圖表繪製失敗，未附圖表）"
+                            else:
+                                chart_note = f"（{ticker} 季報資料不足，未附圖表）"
                         except Exception as e:
                             print(f"[BondSheet charts] {e}")
+                            chart_note = "（圖表產生錯誤，未附圖表）"
+                    else:
+                        chart_note = "（未對應到上市公司，未附圖表）"
                     pdf_path = f"/tmp/參考資訊_{iss_}_{today_:%Y%m%d}.pdf"
                     build_sheet_pdf(pdf_path, iss_, intro, bl_, charts_png=charts_png, **kw_)
                     if charts_png:
@@ -2196,7 +2204,7 @@ def handle_text_message(event):
                         os.remove(pdf_path)
                     except Exception:
                         pass
-                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"📎 {iss_} 參考資訊 PDF\n🔗 {link}"))
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"📎 {iss_} 參考資訊 PDF{chart_note}\n🔗 {link}"))
                 except Exception as e:
                     print(f"[BondSheet ERROR] {e}")
                     print(_traceback.format_exc())
