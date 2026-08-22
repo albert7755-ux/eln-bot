@@ -206,22 +206,28 @@ def ust_spread_bp(bond, curve, today=None):
 
 def call_info(bond):
     """
-    提前買回資訊:回傳短字串。優先讀備註欄裡的日期/價格,沒有就用 YTM≠YTC 判斷。
+    提前買回資訊。只回傳「有/無」與可信的下一個買回日期。
+    ※ 不解析買回價格:報價檔備註格式不一,曾誤把年份前三碼當成價格,
+      價格請以產品說明書為準。
     """
     import re as _re
     remark = str(bond.get("remark") or "")
-    m = _re.search(r"(20\d{2})[/年.-](\d{1,2})[/月.-](\d{1,2})", remark)
-    price = _re.search(r"(買回|贖回|call)[^0-9]{0,8}(\d{2,3}(?:\.\d+)?)", remark, _re.I)
     ytm = str(bond.get("ytm") or "")
-    has_call = "/" in ytm or bool(m) or ("買回" in remark or "贖回" in remark)
+    has_call = "/" in ytm or ("買回" in remark) or ("贖回" in remark) or bool(_re.search(r"\bcall\b", remark, _re.I))
     if not has_call:
         return "無"
-    parts = []
+    # 日期需與買回字樣同時出現才採用,避免抓到到期日或其他日期
+    m = None
+    for kw in ("買回", "贖回", "call", "Call"):
+        idx = remark.find(kw)
+        if idx >= 0:
+            window = remark[max(0, idx - 30): idx + 30]
+            m = _re.search(r"(20\d{2})[/年.-](\d{1,2})", window)
+            if m:
+                break
     if m:
-        parts.append(f"{m.group(1)}/{int(m.group(2)):02d}")
-    if price:
-        parts.append(f"@{price.group(2)}")
-    return "有" + ("\n" + " ".join(parts) if parts else "")
+        return f"有\n{m.group(1)}/{int(m.group(2)):02d}"
+    return "有"
 
 def first_num(v):
     if v is None:
@@ -246,8 +252,28 @@ RISK_ITEMS = [
 ]
 
 
-def _clean(v, dash="-"):
-    return dash if v in (None, "", 0, "#VALUE!", "#N/A") else v
+def _clean(v, dash="-", nd=2):
+    """空值統一顯示 dash;浮點數四捨五入到 nd 位,避免報價檔原始浮點數整串印出"""
+    if v in (None, "", 0, "#VALUE!", "#N/A"):
+        return dash
+    if isinstance(v, float):
+        return f"{round(v, nd):g}"
+    if isinstance(v, str):
+        t = v.strip()
+        # 「5.26/5.27」這種 YTM/YTC 也逐段處理
+        if "/" in t:
+            segs = []
+            for part in t.split("/"):
+                try:
+                    segs.append(f"{round(float(part.strip()), nd):g}")
+                except ValueError:
+                    segs.append(part.strip())
+            return "/".join(segs)
+        try:
+            return f"{round(float(t), nd):g}"
+        except ValueError:
+            return t
+    return v
 
 def _ratings_of(bonds):
     for b in bonds:
@@ -285,7 +311,7 @@ def build_sheet_text(issuer, intro, bonds, fin=None, parent_note="", hist_map=No
         ytm = _clean(b.get("ytm"))
         h = hist_map.get(b["isin"], "")
         sp = ust_spread_bp(b, ust_curve, today)
-        sp_s = f"｜較美債 +{sp}bp" if sp is not None else ""
+        sp_s = f"｜較美債 {sp:+d}bp" if sp is not None else ""
         ci = call_info(b)
         call_s = f"｜提前買回:{ci}" if ci != "無" else ""
         lines.append(f"▪ {b.get('code') or '-'} {b['name']}")
@@ -424,7 +450,7 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
         sen = str(b.get("seniority") or "-").replace("優先無擔保", "優先無擔").replace("次順位", "次順位")
         data.append([b.get("code") or "-", b["name"], b["ccy"], str(b["coupon"]), b["freq"],
                      str(_clean(b.get("offer"))), str(_clean(b.get("ytm"))),
-                     f"+{sp}bp" if sp is not None else "-",
+                     f"{sp:+d}bp" if sp is not None else "-",
                      f"{b['maturity']:%Y/%m}" if b.get("maturity") else "-",
                      str(_clean(b.get("years"))), sen, str(_clean(b.get("min_amt"))),
                      call_info(b).replace("（", "\n（"),
