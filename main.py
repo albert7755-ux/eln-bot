@@ -87,7 +87,7 @@ BOND_GROUP_HELP = (
     "/coupon table → Excel條件表＋發行機構簡介（未來14天）\n"
     "\n🏦 發行機構\n"
     "/issuer 蘋果 → 簡介＋架上所有債券（可用英文/ISIN/代碼）\n"
-    "/sheet 蘋果 → 銷售資訊一頁通（簡介+信評+財務+標的,文字+PDF）\n"
+    "/sheet 蘋果 → 發行機構參考資訊（簡介+信評+財務+標的,文字+PDF）\n"
     "\n📊 報價查詢與異動\n"
     "/price 蘋果 2043 或 /price 26070003 → 單檔完整報價\n"
     "/price 26070003 30 → 該檔近30天報價走勢（高低點＋期間變化）\n"
@@ -2131,13 +2131,13 @@ def handle_text_message(event):
             threading.Thread(target=_run_bondnav, daemon=True).start()
             return
         if cmd == "sheet":
-            # /sheet 蘋果  → 發行機構銷售資訊(LINE文字 + PDF連結)
+            # /sheet 蘋果  → 發行機構參考資訊(LINE文字 + PDF連結)
             kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
             if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔,請先把 Bond_Pricing Excel 傳給我。"))
                 return
             if not kw:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📋 用法:/sheet 蘋果\n/sheet 威瑞森\n產出發行機構銷售資訊(簡介+信評+財務重點+架上標的),文字版+PDF"))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📋 用法:/sheet 蘋果\n/sheet 威瑞森\n產出發行機構參考資訊(簡介+信評+財務重點+架上標的),文字版+PDF"))
                 return
             try:
                 from bond_coupon_alert import search_issuers
@@ -2153,7 +2153,7 @@ def handle_text_message(event):
                     text=f"「{kw}」對到 {len(hits)} 家:{'、'.join(h[0] for h in hits)}\n請用更精確的名稱再打一次 /sheet"))
                 return
             iss, bl = hits[0]
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📋 整理 {iss} 銷售資訊中(簡介+財務+架上標的),約 30~60 秒..."))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📋 整理 {iss} 參考資訊中(簡介+財務+架上標的),約 30~60 秒..."))
             def _run_sheet(chat_id, bot_api_ref, iss_, bl_):
                 try:
                     from bond_sheet import get_financials, build_sheet_text, build_sheet_pdf
@@ -2175,18 +2175,18 @@ def handle_text_message(event):
                                peers=peers, rating_note=rating_note, ust_curve=curve, today=today_)
                     txt = build_sheet_text(iss_, intro, bl_, **kw_)
                     push_long_message(bot_api_ref, chat_id, txt)
-                    pdf_path = f"/tmp/銷售資訊_{iss_}_{today_:%Y%m%d}.pdf"
+                    pdf_path = f"/tmp/參考資訊_{iss_}_{today_:%Y%m%d}.pdf"
                     build_sheet_pdf(pdf_path, iss_, intro, bl_, **kw_)
-                    link = upload_to_drive(pdf_path, f"銷售資訊_{iss_}_{today_:%Y%m%d}.pdf")
+                    link = upload_to_drive(pdf_path, f"參考資訊_{iss_}_{today_:%Y%m%d}.pdf")
                     try:
                         os.remove(pdf_path)
                     except Exception:
                         pass
-                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"📎 {iss_} 銷售資訊 PDF\n🔗 {link}"))
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"📎 {iss_} 參考資訊 PDF\n🔗 {link}"))
                 except Exception as e:
                     print(f"[BondSheet ERROR] {e}")
                     print(_traceback.format_exc())
-                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 銷售資訊產生失敗:{str(e)[:200]}"))
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 參考資訊產生失敗:{str(e)[:200]}"))
             import threading
             threading.Thread(target=_run_sheet, args=(ck.split(":", 1)[1], _bot_api, iss, bl), daemon=True).start()
             return
