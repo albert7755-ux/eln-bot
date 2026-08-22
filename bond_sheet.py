@@ -521,18 +521,22 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
 # ---------- 財報圖表（近 5 季）----------
 def _cjk_font_path():
     import os
-    for p in ("fonts/NotoSansTC-Regular.ttf", "fonts/msjh.ttf",
+    cands = [os.getenv("BOND_SHEET_FONT", "")] if os.getenv("BOND_SHEET_FONT") else []
+    cands += ["fonts/NotoSansTC-Regular.ttf", "fonts/NotoSansTC.ttf", "fonts/msjh.ttf",
+              "fonts/SourceHanSansTC-Regular.otf",
               "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
               "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-              "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
-        if os.path.exists(p):
+              "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+              "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"]
+    for p in cands:
+        if p and os.path.exists(p):
             return p
     return None
 
 def get_quarterly_series(ticker, n=5):
     """
     近 n 季財報序列（單位：億）。回傳 dict 或 None。
-    labels / revenue / op_income / ocf / fcf / debt / cash / debt_ebitda / int_cover
+    對財報索引重複、欄位命名不同、NaN 等狀況做防呆,失敗原因會印在 log。
     """
     if not ticker:
         return None
@@ -542,65 +546,109 @@ def get_quarterly_series(ticker, n=5):
         fs = t.quarterly_financials
         bs = t.quarterly_balance_sheet
         cf = t.quarterly_cashflow
-        if fs is None or fs.empty:
+        if fs is None or getattr(fs, "empty", True):
+            print(f"[BondSheet] {ticker} 無季報資料(quarterly_financials 空)")
             return None
-        cols = list(fs.columns)[:n][::-1]      # 舊 → 新
-        def pick(df, names, col):
-            if df is None or df.empty or col not in df.columns:
+
+        def val(df, names, col):
+            """安全取值:處理索引重複(回傳 Series)、NaN、型別問題"""
+            if df is None or getattr(df, "empty", True) or col not in df.columns:
                 return None
             for nm in names:
-                if nm in df.index:
-                    try:
-                        v = float(df.loc[nm, col])
-                        return v if v == v else None      # 濾掉 NaN
-                    except Exception:
-                        pass
+                if nm not in df.index:
+                    continue
+                try:
+                    v = df.loc[nm, col]
+                    if hasattr(v, "iloc"):        # 索引重複 → Series,取第一個
+                        v = v.iloc[0]
+                    v = float(v)
+                    if v == v:                    # 過濾 NaN
+                        return v
+                except Exception:
+                    continue
             return None
+
+        rev_names = ["Total Revenue", "Operating Revenue", "Revenues"]
+        cols = [c for c in list(fs.columns) if val(fs, rev_names, c) is not None]
+        if not cols:
+            cols = list(fs.columns)               # 完全找不到營收就先全收,後面再判斷
+        cols = cols[:n][::-1]                     # 舊 → 新
+
         out = {"labels": [], "revenue": [], "op_income": [], "ocf": [], "fcf": [],
                "debt": [], "cash": [], "debt_ebitda": [], "int_cover": []}
         for c in cols:
             q = (c.month - 1) // 3 + 1
             out["labels"].append(f"{q}Q{str(c.year)[2:]}")
-            rev = pick(fs, ["Total Revenue", "Operating Revenue"], c)
-            opi = pick(fs, ["Operating Income", "EBIT"], c)
-            ebitda = pick(fs, ["EBITDA", "Normalized EBITDA"], c)
-            intexp = pick(fs, ["Interest Expense", "Interest Expense Non Operating"], c)
-            ocf = pick(cf, ["Operating Cash Flow", "Total Cash From Operating Activities"], c)
-            capex = pick(cf, ["Capital Expenditure", "Capital Expenditures"], c)
-            fcf = pick(cf, ["Free Cash Flow"], c)
+            rev = val(fs, rev_names, c)
+            opi = val(fs, ["Operating Income", "EBIT", "Total Operating Income As Reported"], c)
+            ebitda = val(fs, ["EBITDA", "Normalized EBITDA"], c)
+            intexp = val(fs, ["Interest Expense", "Interest Expense Non Operating", "Net Interest Income"], c)
+            ocf = val(cf, ["Operating Cash Flow", "Total Cash From Operating Activities",
+                           "Cash Flow From Continuing Operating Activities"], c)
+            capex = val(cf, ["Capital Expenditure", "Capital Expenditures",
+                             "Purchase Of PPE", "Net PPE Purchase And Sale"], c)
+            fcf = val(cf, ["Free Cash Flow"], c)
             if fcf is None and ocf is not None and capex is not None:
-                fcf = ocf + capex          # capex 通常為負值
-            debt = pick(bs, ["Total Debt", "Long Term Debt"], c)
-            cash = pick(bs, ["Cash And Cash Equivalents",
-                             "Cash Cash Equivalents And Short Term Investments"], c)
+                fcf = ocf - abs(capex)
+            debt = val(bs, ["Total Debt", "Long Term Debt", "Long Term Debt And Capital Lease Obligation"], c)
+            cash = val(bs, ["Cash And Cash Equivalents",
+                            "Cash Cash Equivalents And Short Term Investments",
+                            "Cash And Cash Equivalents At Carrying Value"], c)
             e8 = lambda v: round(v / 1e8, 1) if v is not None else None
             out["revenue"].append(e8(rev)); out["op_income"].append(e8(opi))
             out["ocf"].append(e8(ocf)); out["fcf"].append(e8(fcf))
             out["debt"].append(e8(debt)); out["cash"].append(e8(cash))
             out["debt_ebitda"].append(round(debt / (ebitda * 4), 1) if (debt and ebitda) else None)
             out["int_cover"].append(round(opi / abs(intexp), 1) if (opi and intexp) else None)
-        if not any(x is not None for x in out["revenue"]):
+
+        filled = {k: sum(1 for x in v if x is not None) for k, v in out.items() if k != "labels"}
+        print(f"[BondSheet] {ticker} 季報序列 {out['labels']} 取得筆數 {filled}")
+        # 至少要有一組能畫的資料
+        if not any(filled[k] >= 2 for k in ("revenue", "ocf", "debt")):
+            print(f"[BondSheet] {ticker} 季報資料不足,略過圖表")
             return None
         return out
     except Exception as e:
+        import traceback
         print(f"[BondSheet] quarterly {ticker} fail: {e}")
+        print(traceback.format_exc()[:500])
         return None
 
+CHART_LABELS_ZH = {
+    "op": "公司營運表現", "cf": "公司現金流", "dc": "債務與現金", "cr": "信用相關比率",
+    "rev": "營業收入(億)", "opi": "營業淨利(億)", "ocf": "營業活動現金流(億)", "fcf": "自由現金流量(億)",
+    "debt": "總債務(億)", "cash": "現金及約當現金(億)", "de": "總債務/EBITDA", "ic": "利息保障倍數",
+}
+CHART_LABELS_EN = {
+    "op": "Revenue & Operating Income", "cf": "Cash Flow", "dc": "Debt & Cash", "cr": "Credit Ratios",
+    "rev": "Revenue (100M)", "opi": "Operating Income (100M)", "ocf": "Operating CF (100M)", "fcf": "Free CF (100M)",
+    "debt": "Total Debt (100M)", "cash": "Cash & Equiv (100M)", "de": "Debt/EBITDA", "ic": "Interest Coverage",
+}
+
 def build_charts_png(q, out_png, title=""):
-    """把近 5 季資料畫成 2x2 圖表（仿財報重點版型），成功回傳路徑，否則 None"""
+    """
+    把近 5 季資料畫成 2x2 圖表。
+    找不到中文字型時（例如伺服器未安裝），自動改用英文標籤，避免變成方框。
+    """
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib import font_manager
         fp = _cjk_font_path()
+        zh_ok = False
         if fp:
-            font_manager.fontManager.addfont(fp) if fp.endswith(".ttf") else None
             try:
+                font_manager.fontManager.addfont(fp)
                 name = font_manager.FontProperties(fname=fp).get_name()
                 matplotlib.rcParams["font.family"] = name
-            except Exception:
-                pass
+                zh_ok = True
+            except Exception as e:
+                print(f"[BondSheet] chart font {fp} 註冊失敗: {e}")
+        T = CHART_LABELS_ZH if zh_ok else CHART_LABELS_EN
+        if not zh_ok:
+            print("[BondSheet] 找不到可用中文字型,圖表改用英文標籤"
+                  "(把 NotoSansTC-Regular.ttf 放進 repo 的 fonts/ 即可顯示中文)")
         matplotlib.rcParams["axes.unicode_minus"] = False
         BLUE, GREEN, NAVY = "#1F8AC0", "#3EA97A", "#0B2A4A"
         L = q["labels"]
@@ -648,10 +696,10 @@ def build_charts_png(q, out_png, title=""):
             ax.legend(h1 + h2, l1 + l2, fontsize=7, frameon=False, ncol=2,
                       loc="lower left", bbox_to_anchor=(0, 1.02))
 
-        bars(axes[0][0], q["revenue"], q["op_income"], "營業收入(億)", "營業淨利(億)", "公司營運表現")
-        bars(axes[0][1], q["ocf"], q["fcf"], "營業活動現金流(億)", "自由現金流量(億)", "公司現金流")
-        bars(axes[1][0], q["debt"], q["cash"], "總債務(億)", "現金及約當現金(億)", "債務與現金")
-        lines(axes[1][1], q["debt_ebitda"], q["int_cover"], "總債務/EBITDA", "利息保障倍數", "信用相關比率")
+        bars(axes[0][0], q["revenue"], q["op_income"], T["rev"], T["opi"], T["op"])
+        bars(axes[0][1], q["ocf"], q["fcf"], T["ocf"], T["fcf"], T["cf"])
+        bars(axes[1][0], q["debt"], q["cash"], T["debt"], T["cash"], T["dc"])
+        lines(axes[1][1], q["debt_ebitda"], q["int_cover"], T["de"], T["ic"], T["cr"])
         fig.tight_layout(pad=1.6)
         fig.savefig(out_png, bbox_inches="tight", facecolor="white")
         plt.close(fig)
