@@ -89,7 +89,8 @@ BOND_GROUP_HELP = (
     "/issuer 蘋果 → 簡介＋架上所有債券（可用英文/ISIN/代碼）\n"
     "/sheet 蘋果 → 銷售資訊一頁通（簡介+信評+財務+標的,文字+PDF）\n"
     "\n📊 報價查詢與異動\n"
-    "/price 蘋果 2043 或 /price 26070003 → 單檔完整報價＋近期走勢\n"
+    "/price 蘋果 2043 或 /price 26070003 → 單檔完整報價\n"
+    "/price 26070003 30 → 該檔近30天報價走勢（高低點＋期間變化）\n"
     "/move → 全架 vs 上一份報價，變動 ≥1%\n"
     "/move 7 3 → vs 7天前，≥3%（上傳報價檔時自動推 ≥2%/≥3%）\n"
     "/bondalert 蘋果 2043 ytm>5.2 → 單檔到價通知（list / del）\n"
@@ -2262,8 +2263,14 @@ def handle_text_message(event):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔，請先把 Bond_Pricing Excel 傳給我。"))
                 return
             if not kw:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="🔎 用法：/price 蘋果 2043\n/price 美林 2029\n/price US037833EN\n（名稱片段＋到期年份，或 ISIN／產品代碼）"))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="🔎 用法：/price 蘋果 2043\n/price 26070003（產品代碼免打WMBB）\n/price 26070003 30 → 近30天價格走勢\n（名稱片段＋到期年份，或 ISIN／產品代碼）"))
                 return
+            # 結尾帶天數 → 查歷史走勢（例:/price 26070003 30）;年份(20xx)不算
+            hist_days = 0
+            _kwp = kw.split()
+            if len(_kwp) >= 2 and re.fullmatch(r"\d{1,3}", _kwp[-1]) and not re.fullmatch(r"20\d\d", _kwp[-1]):
+                hist_days = max(2, min(int(_kwp[-1]), 365))
+                kw = " ".join(_kwp[:-1]).strip()
             try:
                 from bond_coupon_alert import find_bonds, first_num, pi_tag
                 hits = find_bonds(str(BOND_PRICE_FILE), kw, max_hits=5)
@@ -2285,6 +2292,39 @@ def handle_text_message(event):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines)[:4900]))
                 return
             b = hits[0]
+            if hist_days:
+                try:
+                    with engine.begin() as conn:
+                        rows = conn.execute(text("""SELECT snap_date, offer, ytm FROM bond_price_history
+                                                   WHERE isin=:i AND snap_date >= CURRENT_DATE - :d * INTERVAL '1 day'
+                                                   ORDER BY snap_date"""), {"i": b["isin"], "d": hist_days}).fetchall()
+                except Exception as e:
+                    rows = []
+                    print(f"[BondPrice hist] {e}")
+                if len(rows) < 2:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text=f"📉 {b['name']}\n近 {hist_days} 天的報價歷史不足（目前只有 {len(rows)} 筆）。\n"
+                             f"每天上傳報價檔會累積，也可以把過去的報價檔丟給我補歷史。"))
+                    return
+                offs = [(d, o, y) for d, o, y in rows if o is not None]
+                lines_h = [f"📉 {b['name']}｜近 {hist_days} 天報價走勢",
+                           f"{b.get('code') or '-'}｜{b['ccy']} {b['coupon']}% {b['freq']}", ""]
+                step = max(1, len(offs) // 12)   # 太多筆時等距抽樣,避免訊息過長
+                for d, o, y in offs[::step]:
+                    lines_h.append(f"{d:%m/%d}  Offer {o:g}" + (f"｜YTM {y:g}" if y is not None else ""))
+                if offs and offs[-1] not in offs[::step]:
+                    d, o, y = offs[-1]
+                    lines_h.append(f"{d:%m/%d}  Offer {o:g}" + (f"｜YTM {y:g}" if y is not None else ""))
+                if len(offs) >= 2:
+                    o_first, o_last = offs[0][1], offs[-1][1]
+                    hi = max(offs, key=lambda x: x[1]); lo = min(offs, key=lambda x: x[1])
+                    chg = (o_last - o_first) / o_first * 100 if o_first else 0
+                    lines_h += ["", f"期間變化：{o_first:g} → {o_last:g}（{chg:+.1f}%）",
+                                f"最高 {hi[1]:g}（{hi[0]:%m/%d}）｜最低 {lo[1]:g}（{lo[0]:%m/%d}）",
+                                f"共 {len(offs)} 個報價日"]
+                lines_h.append("\n※ 依報價檔 Offer 價，非市場成交價")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines_h)[:4900]))
+                return
             offer = b["offer"] if b["offer"] not in (None, "", 0, "#VALUE!", "#N/A") else "-"
             ytm = b["ytm"] if b["ytm"] not in (None, "", 0, "#N/A") else "-"
             mat = f"{b['maturity']:%Y/%m/%d}" if b["maturity"] else "-"
