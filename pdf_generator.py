@@ -95,6 +95,49 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
     return f"https://drive.google.com/file/d/{file_id}/view"
 
 
+def cleanup_drive_folder(folder_name: str = "龍蝦報告", days: int = 30, dry_run: bool = False):
+    """
+    刪除指定 Drive 資料夾中超過 days 天的舊檔（移到垃圾桶，可救回）。
+    回傳 (刪除數, 檢查總數, 明細list)。找不到資料夾回 (0, 0, [])。
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    service = get_drive_service()
+    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    folders = service.files().list(q=query, fields="files(id, name)").execute().get("files", [])
+    if not folders:
+        return 0, 0, []
+    folder_id = folders[0]["id"]
+    cutoff = _dt.now(_tz.utc) - _td(days=days)
+
+    deleted, checked, detail, page_token = 0, 0, [], None
+    while True:
+        resp = service.files().list(
+            q=f"'{folder_id}' in parents and trashed=false",
+            fields="nextPageToken, files(id, name, createdTime, size)",
+            pageSize=200, pageToken=page_token,
+        ).execute()
+        for f in resp.get("files", []):
+            checked += 1
+            try:
+                created = _dt.fromisoformat(f["createdTime"].replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if created < cutoff:
+                detail.append(f["name"])
+                if not dry_run:
+                    try:
+                        service.files().update(fileId=f["id"], body={"trashed": True}).execute()
+                    except Exception as e:
+                        print(f"[DriveCleanup] 刪除失敗 {f['name']}: {e}")
+                        continue
+                deleted += 1
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    print(f"[DriveCleanup] {folder_name}: 檢查 {checked} 個檔案，{'將刪除' if dry_run else '已刪除'} {deleted} 個（{days} 天前）")
+    return deleted, checked, detail
+
+
 def get_styles():
     title_style = ParagraphStyle(
         "ReportTitle",
