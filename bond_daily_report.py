@@ -472,6 +472,30 @@ def clean_line_text(text: str) -> str:
     return cleaned
 
 
+def get_push_targets():
+    """
+    推播對象:Albert 個人 + 海外債主群(/coupon settarget 設定的那個群)。
+    群組設定存在 targets.json,與配息雷達共用同一份名單。
+    """
+    targets = []
+    if LINE_USER_ID:
+        targets.append(LINE_USER_ID)
+    # 找 targets.json(優先持久磁碟 /data,再退回 /tmp)
+    import json as _json
+    for path in ("/data/targets.json", "/tmp/targets.json"):
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+                gid = data.get("bond", "")
+                if gid and gid not in targets:
+                    targets.append(gid)
+                break
+        except Exception as e:
+            print(f"[BondDaily] read targets {path}: {e}")
+    return targets
+
+
 def send_line_message(text):
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
@@ -479,15 +503,17 @@ def send_line_message(text):
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     }
     safe_text = clean_line_text(text[:4900])
-    payload = {
-        "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": safe_text}]
-    }
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code == 200:
-        print("[BondDaily] LINE push success")
-    else:
-        print(f"[BondDaily] LINE push failed: {response.status_code} {response.text}")
+    targets = get_push_targets()
+    if not targets:
+        print("[BondDaily] 無推播對象")
+        return
+    for to in targets:
+        payload = {"to": to, "messages": [{"type": "text", "text": safe_text}]}
+        response = requests.post(url, headers=headers, json=payload)
+        if response.status_code == 200:
+            print(f"[BondDaily] LINE push success -> {to[:8]}...")
+        else:
+            print(f"[BondDaily] LINE push failed -> {to[:8]}...: {response.status_code} {response.text}")
 
 
 # ==============================
