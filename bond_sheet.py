@@ -322,7 +322,7 @@ def build_sheet_text(issuer, intro, bonds, fin=None, parent_note="", hist_map=No
         lines.append(f"【財務重點】{src}")
         lines += [f"{k}:{v}" for k, v in _fin_rows(fin)]
         if fin_comment:
-            lines += ["", "【財務比率解讀（AI）】", fin_comment]
+            lines += ["", "【財務比率解讀】", fin_comment]
         if peers:
             lines += ["", "【同業比較】", peers]
         if charts_comment:
@@ -648,20 +648,28 @@ def build_charts_png(q, out_png, title=""):
         import matplotlib.pyplot as plt
         from matplotlib import font_manager
         fp = _cjk_font_path()
-        zh_ok = False
+        zh_ok, PROP = False, None
         if fp:
             try:
-                font_manager.fontManager.addfont(fp)
-                name = font_manager.FontProperties(fname=fp).get_name()
-                matplotlib.rcParams["font.family"] = name
+                PROP = font_manager.FontProperties(fname=fp)   # 直接綁字型檔,不靠全域註冊
+                try:
+                    font_manager.fontManager.addfont(fp)
+                    matplotlib.rcParams["font.family"] = PROP.get_name()
+                except Exception as e2:
+                    print(f"[BondSheet] addfont 失敗(改用逐元素指定): {e2}")
                 zh_ok = True
+                print(f"[BondSheet] chart font ready: {fp} -> {PROP.get_name()}")
             except Exception as e:
-                print(f"[BondSheet] chart font {fp} 註冊失敗: {e}")
+                print(f"[BondSheet] chart font {fp} 無法使用: {e}")
         T = CHART_LABELS_ZH if zh_ok else CHART_LABELS_EN
         if not zh_ok:
             print("[BondSheet] 找不到可用中文字型,圖表改用英文標籤"
                   "(把 NotoSansTC-Regular.ttf 放進 repo 的 fonts/ 即可顯示中文)")
         matplotlib.rcParams["axes.unicode_minus"] = False
+        def _legend_prop(prop, size):
+            if prop is None:
+                return {"size": size}
+            p2 = prop.copy(); p2.set_size(size); return p2
         BLUE, GREEN, NAVY = "#1F8AC0", "#3EA97A", "#0B2A4A"
         L = q["labels"]
         fig, axes = plt.subplots(2, 2, figsize=(11, 6.2), dpi=150)
@@ -679,10 +687,10 @@ def build_charts_png(q, out_png, title=""):
                     ax.annotate(f"{h:,.0f}" if abs(h) >= 100 else f"{h:,.1f}",
                                 (r.get_x() + r.get_width()/2, h), ha="center",
                                 va="bottom" if h >= 0 else "top", fontsize=7)
-            ax.set_title(ttl, fontsize=10, color=NAVY, pad=20)
-            ax.set_xticks(x); ax.set_xticklabels(L, fontsize=8)
+            ax.set_title(ttl, fontsize=10, color=NAVY, pad=20, fontproperties=PROP)
+            ax.set_xticks(x); ax.set_xticklabels(L, fontsize=8, fontproperties=PROP)
             ax.legend(fontsize=7, frameon=False, ncol=2, loc="lower left",
-                      bbox_to_anchor=(0, 1.02))
+                      bbox_to_anchor=(0, 1.02), prop=_legend_prop(PROP, 7))
             ax.spines[["top", "right"]].set_visible(False)
             ax.tick_params(axis="y", labelsize=7)
             ax.axhline(0, color="#999999", linewidth=0.6)
@@ -699,14 +707,15 @@ def build_charts_png(q, out_png, title=""):
             for i, v in enumerate(b):
                 if v is not None:
                     ax2.annotate(f"{v}", (i, v), fontsize=7, color=GREEN, ha="center", va="bottom")
-            ax.set_title(ttl, fontsize=10, color=NAVY, pad=20)
-            ax.set_xticks(x); ax.set_xticklabels(L, fontsize=8)
+            ax.set_title(ttl, fontsize=10, color=NAVY, pad=20, fontproperties=PROP)
+            ax.set_xticks(x); ax.set_xticklabels(L, fontsize=8, fontproperties=PROP)
             ax.tick_params(axis="y", labelsize=7, colors=BLUE)
             ax2.tick_params(axis="y", labelsize=7, colors=GREEN)
             ax.spines[["top"]].set_visible(False); ax2.spines[["top"]].set_visible(False)
             h1, l1 = ax.get_legend_handles_labels(); h2, l2 = ax2.get_legend_handles_labels()
             ax.legend(h1 + h2, l1 + l2, fontsize=7, frameon=False, ncol=2,
-                      loc="lower left", bbox_to_anchor=(0, 1.02))
+                      loc="lower left", bbox_to_anchor=(0, 1.02),
+                      prop=_legend_prop(PROP, 7))
 
         bars(axes[0][0], q["revenue"], q["op_income"], T["rev"], T["opi"], T["op"])
         bars(axes[0][1], q["ocf"], q["fcf"], T["ocf"], T["fcf"], T["cf"])
