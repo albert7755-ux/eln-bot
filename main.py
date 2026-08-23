@@ -2328,7 +2328,15 @@ def handle_text_message(event):
                 def _run_rating(chat_id_, bot_api_ref):
                     try:
                         msg = run_rating_news_check(days=3)
-                        push_long_message(bot_api_ref, chat_id_, msg or "📡 近 3 天監控名單沒有新的信評動作新聞。")
+                        if not msg:
+                            st = globals().get("_LAST_RATING_STATS", {})
+                            msg = ("📡 近 3 天監控名單沒有新的信評動作新聞。\n\n"
+                                   f"掃描 {st.get('issuers', 0)} 家發行機構\n"
+                                   f"搜到相關新聞 {st.get('raw', 0)} 則\n"
+                                   f"扣除已推播過 → 新新聞 {st.get('new', 0)} 則\n"
+                                   f"AI 判定為真正評等動作 {st.get('kept', 0)} 則\n\n"
+                                   "／rating list 可看監控名單")
+                        push_long_message(bot_api_ref, chat_id_, msg)
                     except Exception as e:
                         bot_api_ref.push_message(chat_id_, TextSendMessage(text=f"❌ 信評掃描失敗：{str(e)[:200]}"))
                 import threading
@@ -3664,6 +3672,7 @@ def run_rating_news_check(days=2, use_llm=True):
         seen = {r[0] for r in conn.execute(text("SELECT link FROM bond_rating_news_seen WHERE seen_at > NOW() - INTERVAL '30 days'")).fetchall()}
     if not rows:
         return ""
+    stats = {"issuers": len(rows), "raw": 0, "new": 0, "kept": 0, "hit_issuers": []}
     fresh = {}
     _AGENCY_QUERY = {  # 評等機構自己也是發行機構時,用公司主體名搜尋,避免抓到它對別人的評等動作
         "moody's": '"Moody\'s Corporation"', "moodys": '"Moody\'s Corporation"',
@@ -3673,12 +3682,15 @@ def run_rating_news_check(days=2, use_llm=True):
     for iss, en in rows:
         en_q = _AGENCY_QUERY.get((en or "").strip().lower(), en or "")
         items = fetch_rating_news(en_q, zh_name=iss if iss != (en or "") else "", days=days)
+        stats["raw"] += len(items)
         items = [it for it in items if it["link"] not in seen]
+        stats["new"] += len(items)
         if items:
             fresh[iss] = items
         with engine.begin() as conn:
             conn.execute(text("UPDATE bond_rating_watch SET last_checked=NOW() WHERE issuer=:i"), {"i": iss})
     if not fresh:
+        globals()["_LAST_RATING_STATS"] = stats
         return ""
     # LLM 二次過濾：只留「真的評等/展望動作」，順便中文一句話
     keep = fresh
@@ -3707,6 +3719,9 @@ def run_rating_news_check(days=2, use_llm=True):
                         sel.append(it)
                 if sel:
                     keep[iss] = sel
+    stats["kept"] = sum(len(v) for v in keep.values()) if keep else 0
+    stats["hit_issuers"] = list(keep.keys()) if keep else []
+    globals()["_LAST_RATING_STATS"] = stats
     if not keep:
         # 全部被 LLM 判定為雜訊：仍記錄為已看過，避免明天重複評估
         with engine.begin() as conn:
