@@ -71,41 +71,67 @@ def is_bond_query_group(chat_key: str) -> bool:
         return False
 
 BOND_QUERY_HELP = (
-    "💵 本群可用指令（查價專用）\n"
-    "/price 蘋果 2043 → 單檔完整報價\n"
-    "/price 26070003 → 用產品代碼查（免打WMBB）\n"
-    "/price US037833EN → 用ISIN查\n"
-    "（名稱片段＋到期年份／代碼／ISIN 皆可模糊搜尋）"
+    "💵 本群可用指令\n"
+    "━━━━━━━━━━━━━\n"
+    "🔍 查報價\n"
+    "/price 26070003 → 產品代碼查（WMBB免打）\n"
+    "/price 蘋果 2043 → 名稱＋到期年份\n"
+    "/price US037833EN → ISIN查\n"
+    "\n🏦 查發行機構\n"
+    "/issuer 蘋果 → 機構簡介＋架上所有債券\n"
+    "（可用中文、英文、ISIN、產品代碼）\n"
+    "\n📅 查配息\n"
+    "/coupon → 3個營業日內截止的配息債\n"
+    "/coupon 7 → 改看7個營業日內\n"
+    "/coupon all → 未來14天全部\n"
+    "━━━━━━━━━━━━━\n"
+    "🔒專投＝限專業投資人｜💎高資產＝高資產客戶專屬\n"
+    "報價以本行系統為準，商品條件依產品說明書"
 )
 
 BOND_GROUP_HELP = (
-    "💰 海外債專區指令（/help bond）\n"
+    "💰 海外債專區指令\n"
     "━━━━━━━━━━━━━━━\n"
-    "📅 配息雷達（每天 06:45 自動推）\n"
-    "/coupon → 3個營業日內要下單的配息債＋30天內到期\n"
-    "/coupon 7 → 7個營業日內　/coupon all → 未來14天全部\n"
-    "/coupon table → Excel條件表＋發行機構簡介（未來14天）\n"
+    "⏰ 每天自動推播\n"
+    "06:38 債券市場日報　06:45 配息雷達　06:50 信評新聞\n"
+    "\n📅 配息雷達\n"
+    "/coupon → 3個營業日內截止的配息債＋30天內到期\n"
+    "/coupon 7 → 改看7個營業日內\n"
+    "/coupon all → 未來14天全部\n"
+    "/coupon table → Excel條件表＋機構簡介（Drive連結）\n"
+    "\n💵 報價查詢\n"
+    "/price 26070003 → 產品代碼查（WMBB免打）\n"
+    "/price 蘋果 2043 → 名稱＋到期年份\n"
+    "/price US037833EN → ISIN查\n"
+    "/price 26070003 30 → 該檔近30天走勢\n"
+    "\n📊 異動與追蹤\n"
+    "/move → 全架 vs 上一份報價，變動≥1%\n"
+    "/move 7 3 → vs 7天前，≥3%\n"
+    "/bondalert 蘋果 2043 ytm>5.2 → 單檔到價通知\n"
+    "/bondalert list　/bondalert del 3\n"
     "\n🏦 發行機構\n"
-    "/issuer 蘋果 → 簡介＋架上所有債券（可用英文/ISIN/代碼）\n"
-    "/sheet 蘋果 → 發行機構參考資訊（簡介+信評+財務+標的,文字+PDF）\n"
-    "/cleanup → 預覽 Drive 舊報告；/cleanup do → 清理（每週日 03:00 自動）\n"
-    "\n📊 報價查詢與異動\n"
-    "/price 蘋果 2043 或 /price 26070003 → 單檔完整報價\n"
-    "/price 26070003 30 → 該檔近30天報價走勢（高低點＋期間變化）\n"
-    "/move → 全架 vs 上一份報價，變動 ≥1%\n"
-    "/move 7 3 → vs 7天前，≥3%（上傳報價檔時自動推 ≥2%/≥3%）\n"
-    "/bondalert 蘋果 2043 ytm>5.2 → 單檔到價通知（list / del）\n"
+    "/issuer 蘋果 → 簡介＋架上所有債券\n"
+    "/sheet 蘋果 → 參考資訊（信評+財務+圖表+標的，含PDF）\n"
     "\n🚨 信評\n"
-    "/rating → 掃外部信評新聞（每天 07:00 自動；list / watch / unwatch）\n"
-    "上傳報價檔時自動比對：信評異動／新上架／下架\n"
+    "/rating → 立即掃外部信評新聞\n"
+    "/rating list　/rating watch 台積電　/rating unwatch 蘋果\n"
     "\n📥 報價檔\n"
-    "直接把 Bond_Pricing Excel 傳給我 → 更新＋自動跑上面全部\n"
-    "\n📣 推播設定\n"
-    "/coupon subscribe → 訂閱每日推播（unsubscribe 取消）\n"
-    "/coupon settarget → 群組推播（off 取消）\n"
+    "傳 Bond_Pricing Excel → 更新報價＋自動跑配息雷達、\n"
+    "　信評異動比對、報價異動、到價檢查\n"
+    "傳舊日期的報價檔 → 只補歷史，不動最新報價\n"
+    "\n📣 推播與維護\n"
+    "/coupon subscribe → 訂閱每日推播（unsubscribe取消）\n"
+    "/coupon settarget → 本群收每日推播（off取消）\n"
+    "/price settarget → 本群只開放查價（off取消）\n"
+    "/cleanup → 預覽Drive舊報告；/cleanup do → 清理\n"
+    "\n📈 日報\n"
+    "/bonddaily → 立即產生債券市場日報\n"
+    "/bonddaily cache → 看最近一份\n"
     "━━━━━━━━━━━━━━━\n"
-    "🔒專投＝限專業投資人；💎高資產＝高資產客戶專屬"
+    "🔒專投＝限專業投資人｜💎高資產＝高資產客戶專屬\n"
+    "報價以本行系統為準，商品條件依產品說明書"
 )
+
 
 BOND_SNAPSHOT_FILE = BOND_PRICE_FILE.parent / "bond_snapshot.json"
 
@@ -1323,8 +1349,14 @@ def handle_text_message(event):
             if cmd == "help":
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=BOND_QUERY_HELP))
                 return
-            if cmd not in ("price", "p", "價格", "報價"):
+            if cmd not in ("price", "p", "價格", "報價", "issuer", "coupon"):
                 return
+            # 查價群的 /coupon 只給查詢用法,設定類子指令不開放
+            if cmd == "coupon":
+                _sub = raw_cmd.split()[1].lower() if len(raw_cmd.split()) > 1 else ""
+                if _sub in ("settarget", "subscribe", "unsubscribe", "subscribers", "table",
+                            "設定推播", "訂閱", "取消訂閱", "訂閱名單", "off"):
+                    return
             # /price 放行，往下走到 price 指令處理
         # ── 海外債群組：只回白名單指令，一般聊天/其他指令一律靜默 ──
         if is_group and is_bond_group_chat(ck):
