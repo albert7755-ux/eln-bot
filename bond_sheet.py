@@ -523,14 +523,27 @@ def _cjk_font_path():
     cands += ["/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
               "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
               "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"]
+    def _usable(path):
+        """字型檔要存在且夠大(>50KB);GitHub 上搬檔失敗時會留下 0 bytes 空檔"""
+        try:
+            if not os.path.exists(path):
+                return False
+            size = os.path.getsize(path)
+            if size < 50 * 1024:
+                print(f"[BondSheet] skip font (size {size}B, probably empty/LFS pointer): {path}")
+                return False
+            return True
+        except Exception:
+            return False
+
     for p in cands:
-        if p and os.path.exists(p):
+        if p and _usable(p):
             print(f"[BondSheet] font found: {p}")
             return p
     # 掃描 fonts/ 與程式所在目錄下任何字型檔（容錯檔名打錯）
     for pattern in (os.path.join(base, "fonts", "*.tt*"), os.path.join(base, "fonts", "*.otf"),
                     os.path.join(base, "*.tt*"), "fonts/*.tt*", "*.tt*"):
-        hits = sorted(glob.glob(pattern))
+        hits = [h for h in sorted(glob.glob(pattern)) if _usable(h)]
         if hits:
             print(f"[BondSheet] font by scan: {hits[0]}")
             return hits[0]
