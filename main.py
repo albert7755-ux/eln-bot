@@ -2163,6 +2163,38 @@ def handle_text_message(event):
             import threading
             threading.Thread(target=_run_bondnav, daemon=True).start()
             return
+        if cmd == "fontcheck":
+            # 診斷:伺服器上到底有沒有找到中文字型
+            try:
+                import os as _os
+                from bond_sheet import _cjk_font_path
+                base = _os.path.dirname(_os.path.abspath(__file__))
+                fdir = _os.path.join(base, "fonts")
+                fp = _cjk_font_path()
+                lines_f = ["🔤 字型診斷",
+                           f"程式目錄：{base}",
+                           f"工作目錄：{_os.getcwd()}",
+                           f"fonts 資料夾存在：{'是' if _os.path.isdir(fdir) else '否'}"]
+                if _os.path.isdir(fdir):
+                    fl = _os.listdir(fdir)
+                    lines_f.append(f"fonts 內容：{fl if fl else '(空)'}")
+                    for f_ in fl:
+                        try:
+                            sz = _os.path.getsize(_os.path.join(fdir, f_)) / 1024 / 1024
+                            lines_f.append(f"　・{f_} ({sz:.1f} MB)")
+                        except Exception:
+                            pass
+                lines_f.append(f"\n最終採用：{fp if fp else '❌ 找不到，圖表會用英文標籤'}")
+                if fp:
+                    try:
+                        from matplotlib import font_manager
+                        lines_f.append(f"字型名稱：{font_manager.FontProperties(fname=fp).get_name()}")
+                    except Exception as e:
+                        lines_f.append(f"matplotlib 讀取失敗：{str(e)[:120]}")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(lines_f)[:4900]))
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 診斷失敗：{str(e)[:300]}"))
+            return
         if cmd == "cleanup":
             # /cleanup        → 預覽:列出 30 天前的舊檔,不刪除
             # /cleanup do     → 實際清理(移到垃圾桶,可救回)
