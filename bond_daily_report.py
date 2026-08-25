@@ -46,6 +46,70 @@ def _safe_close_pair(symbol: str):
     }
 
 
+TREASURY_COLS = {
+    "US3M": ["3 Mo"], "US2Y": ["2 Yr"], "US5Y": ["5 Yr"],
+    "US10Y": ["10 Yr"], "US20Y": ["20 Yr"], "US30Y": ["30 Yr"],
+}
+
+def get_treasury_curve():
+    """
+    美國財政部官方每日公債殖利率曲線(Par Yield Curve)。
+    一次取得所有天期、同一個交易日,徹底解決混用 yfinance/FRED 造成的日期錯位。
+    回傳 {"date":..., "prev_date":..., "US3M":{price,change,...}, ...} 或 None。
+    """
+    from datetime import datetime as _dt
+    year = _dt.now().year
+    urls = [
+        ("https://home.treasury.gov/resource-center/data-chart-center/interest-rates/"
+         f"daily-treasury-rates.csv/{year}/all?type=daily_treasury_yield_curve&"
+         f"field_tdr_date_value={year}&page&_format=csv"),
+        ("https://home.treasury.gov/resource-center/data-chart-center/interest-rates/"
+         f"daily-treasury-rates.csv/{year-1}/all?type=daily_treasury_yield_curve&"
+         f"field_tdr_date_value={year-1}&page&_format=csv"),
+    ]
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=JGB_HEADERS, timeout=20)
+            resp.raise_for_status()
+            rows = list(csv.reader(io.StringIO(resp.text)))
+            if len(rows) < 3:
+                continue
+            header = [c.strip() for c in rows[0]]
+            data_rows = [r for r in rows[1:] if r and r[0].strip()]
+            if len(data_rows) < 2:
+                continue
+            # 財政部 CSV 為新到舊排列;第一列是最新交易日
+            latest, prev = data_rows[0], data_rows[1]
+            def pick(row, names):
+                for nm in names:
+                    if nm in header:
+                        idx = header.index(nm)
+                        try:
+                            v = row[idx].strip()
+                            if v not in ("", "N/A"):
+                                return float(v)
+                        except Exception:
+                            pass
+                return None
+            out = {"date": latest[0].strip(), "prev_date": prev[0].strip()}
+            got = 0
+            for key, names in TREASURY_COLS.items():
+                cur, pre = pick(latest, names), pick(prev, names)
+                if cur is None:
+                    out[key] = None
+                    continue
+                out[key] = {"price": round(cur, 3),
+                            "change": round(cur - pre, 3) if pre is not None else 0.0,
+                            "pct": 0.0, "date": out["date"]}
+                got += 1
+            if got >= 5:
+                print(f"[BondDaily] Treasury curve {out['date']} (vs {out['prev_date']}) 取得 {got} 個天期")
+                return out
+        except Exception as e:
+            print(f"[BondDaily] Treasury curve 抓取失敗: {e}")
+    return None
+
+
 def get_fred_yield(series_id: str):
     """
     從 FRED 公開 CSV 抓殖利率(不用 API key)。
@@ -190,11 +254,21 @@ def get_bond_market_data():
             results[name] = None
             print(f"[BondDaily] Error fetching {name} ({symbol}): {e}")
 
-    results["US2Y"] = get_fred_yield("DGS2")
-    results["US20Y"] = get_fred_yield("DGS20")
-    # 利差專用:2/10/20/30 全部用 FRED 同一天的官方收盤,避免與 yfinance 混用造成日期錯位
-    results["FRED10Y"] = get_fred_yield("DGS10")
-    results["FRED30Y"] = get_fred_yield("DGS30")
+    # ── 殖利率曲線:優先用美國財政部官方每日曲線(所有天期同一交易日)──
+    curve = get_treasury_curve()
+    results["CURVE_SOURCE"] = None
+    if curve:
+        for key in TREASURY_COLS:
+            if curve.get(key):
+                results[key] = curve[key]          # 覆蓋 yfinance 的同名天期
+        results["CURVE_SOURCE"] = {"name": "美國財政部", "date": curve["date"]}
+    else:
+        # 備援:維持原本混用來源(2Y/20Y 走 FRED),並標示資料來源不一致
+        print("[BondDaily] 財政部曲線不可用,改用 yfinance + FRED 備援")
+        results["US2Y"] = get_fred_yield("DGS2")
+        results["US20Y"] = get_fred_yield("DGS20")
+        results["FRED10Y"] = get_fred_yield("DGS10")
+        results["FRED30Y"] = get_fred_yield("DGS30")
     results["JGB10Y"] = get_jgb_10y()
     try:
         results["JGB10Y_MONTH"] = get_jgb_10y_month()
@@ -238,31 +312,44 @@ def build_bond_snapshot(data):
     lines.append("")
     lines.append("__INTRO__")
     lines.append("")
+    src = data.get("CURVE_SOURCE")
+    star = "" if src else "*"          # 資料源統一時不需要星號註記
     lines.append("一、美債殖利率曲線")
     lines.append(_yield_line("3個月期", data.get("US3M")))
-    lines.append(_yield_line("2年期*", data.get("US2Y")))
+    lines.append(_yield_line(f"2年期{star}", data.get("US2Y")))
     lines.append(_yield_line("5年期", data.get("US5Y")))
     lines.append(_yield_line("10年期", data.get("US10Y")))
-    lines.append(_yield_line("20年期*", data.get("US20Y")))
+    lines.append(_yield_line(f"20年期{star}", data.get("US20Y")))
     lines.append(_yield_line("30年期", data.get("US30Y")))
 
-    # 利差計算:全部用 FRED(美國財政部官方收盤)同一天的數字,
-    # 不與 yfinance 混算——之前 20Y(FRED,T-1) 配 30Y(yfinance,T) 日期錯位,利差會跟行情軟體對不起來
-    d2, f10, d20, f30 = data.get("US2Y"), data.get("FRED10Y"), data.get("US20Y"), data.get("FRED30Y")
-    spread_date = ""
-    if d2 and f10 and d2.get("date") == f10.get("date"):
-        spread_2s10s = (f10["price"] - d2["price"]) * 100
-        lines.append(f"2年/10年利差:{spread_2s10s:+.0f}bp")
-        spread_date = d2.get("date", "")
-    if d20 and f30 and d20.get("date") == f30.get("date"):
-        spread_20s30s = (f30["price"] - d20["price"]) * 100
-        shape = "正斜率" if spread_20s30s > 0 else "倒掛(20Y高於30Y)"
-        lines.append(f"20年/30年利差:{spread_20s30s:+.0f}bp({shape})")
-        spread_date = d20.get("date", spread_date)
-    note = "(*2年期與20年期為FRED資料,更新較慢一日"
-    if spread_date:
-        note += f";利差以FRED {spread_date} 同日收盤計算"
-    lines.append(note + ")")
+    # 利差計算:直接用上方顯示的同一組數字,確保與表格一致
+    d2, d10, d20, d30 = (data.get("US2Y"), data.get("US10Y"),
+                         data.get("US20Y"), data.get("US30Y"))
+    if src:
+        # 資料源統一(財政部官方曲線,所有天期同一交易日)
+        if d2 and d10:
+            lines.append(f"2年/10年利差:{(d10['price'] - d2['price']) * 100:+.0f}bp")
+        if d20 and d30:
+            sp = (d30["price"] - d20["price"]) * 100
+            shape = "正斜率" if sp > 0 else "倒掛(20Y高於30Y)"
+            lines.append(f"20年/30年利差:{sp:+.0f}bp({shape})")
+        lines.append(f"(全部天期同為{src['name']} {src['date']} 收盤)")
+    else:
+        # 備援模式:2Y/20Y 走 FRED(較慢一日),僅在日期相同時才計算利差
+        f10, f30 = data.get("FRED10Y"), data.get("FRED30Y")
+        spread_date = ""
+        if d2 and f10 and d2.get("date") == f10.get("date"):
+            lines.append(f"2年/10年利差:{(f10['price'] - d2['price']) * 100:+.0f}bp")
+            spread_date = d2.get("date", "")
+        if d20 and f30 and d20.get("date") == f30.get("date"):
+            sp = (f30["price"] - d20["price"]) * 100
+            shape = "正斜率" if sp > 0 else "倒掛(20Y高於30Y)"
+            lines.append(f"20年/30年利差:{sp:+.0f}bp({shape})")
+            spread_date = d20.get("date", spread_date)
+        note = "(*2年期與20年期為FRED資料,更新較慢一日"
+        if spread_date:
+            note += f";利差以FRED {spread_date} 同日收盤計算"
+        lines.append(note + ")")
 
     lines.append("")
     lines.append("二、日債與匯率")
@@ -318,12 +405,23 @@ def generate_bond_commentary(snapshot_text: str) -> str:
         "他們服務的高資產客戶持有海外債券(以投資等級債為主)、債券基金與結構型商品。\n\n"
         f"今天台北時間是 {today_str}。以下是昨晚(美國時間)收盤的債券市場數據:\n\n"
         f"{snapshot_text}\n\n"
-        f"請上網搜尋 {today_str} 前後最新的債券與利率相關新聞(優先最近24小時),"
-        "重點關注:美債殖利率變動原因、Fed 官員談話、通膨與就業數據、"
-        "各國央行動向、公司債利差與新發行、重要國債標售結果。\n\n"
+        "【極重要-利差方向】上方數據中的『2年/10年利差』與『20年/30年利差』已由系統計算完成,"
+        "括號內若標示『正斜率』代表 30年殖利率高於 20年(曲線扭曲已修復);"
+        "若標示『倒掛(20Y高於30Y)』代表 20年高於 30年(扭曲尚未修復)。"
+        "你在文字中描述這兩組利差時,必須完全依照上方括號內的標示,"
+        "嚴禁自行推算或寫出與其相反的方向,也不要重新計算數值。\n\n"
+        f"請上網搜尋 {today_str} 前後最新的債券與利率相關新聞。\n"
+        "【搜尋重點順序】\n"
+        "1. 最優先:昨晚(美股交易時段)殖利率變動的『直接觸發事件』——例如油價大幅變動、地緣政治進展、"
+        "當日公布的經濟數據、Fed 官員突發談話、國債標售結果。這類事件通常只在 24 小時內的新聞裡,"
+        "請務必找出來,不要用『財政部回購計畫』這類持續數日的結構性題材充當當日觸發原因。\n"
+        "2. 其次:結構性與政策面因素(財政赤字、回購操作、供需、通膨趨勢),作為背景補充。\n"
+        "3. 也留意:各國央行動向、投資等級公司債利差與新發行。\n\n"
         "請完成以下段落:\n"
         "1.【前言】1-2句,點出昨晚債市最重要的主線。\n"
-        "2.【殖利率動向解讀】2-3句,解釋美債各天期為什麼這樣動,"
+        "2.【殖利率動向解讀】3-4句。第一句必須回答『昨晚殖利率變動最直接的觸發事件是什麼』"
+        "(引用具體新聞與數字,例如油價跌幅、數據結果、官員談話內容);若確實找不到明確觸發事件,"
+        "就誠實說明市場在等待什麼,不要拿結構性題材硬湊。接著解釋美債各天期為什麼這樣動,"
         "務必區分短天期(反映Fed政策預期)與長天期(反映通膨與期限溢酬)的不同邏輯,"
         "不可把單一天期的變化泛化成整條曲線。"
         "另外請留意20年/30年利差:過去幾年20年期因供需因素長期高於30年期(曲線扭曲),"
