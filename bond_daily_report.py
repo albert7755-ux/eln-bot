@@ -287,12 +287,17 @@ def updown_mark(value: float):
 
 
 def _yield_line(label: str, d: dict) -> str:
-    """殖利率專用格式:變化用 bp(基點)表示,同仁們比較好講"""
+    """
+    殖利率格式:絕對變化用 bp,另附相對變化率(%),
+    讓「降6bp」有比較基準——同樣 6bp 對 3個月期與 30年期的意義差很多。
+    """
     if not d:
         return f"{label}:數據抓取失敗"
     arrow = updown_mark(d["change"])
     bp = abs(d["change"]) * 100  # 0.05% = 5 bp
-    return f"{label}:{d['price']:.2f}% {arrow}{bp:.0f}bp"
+    prev = d["price"] - d["change"]
+    pct = (d["change"] / prev * 100) if prev else 0.0
+    return f"{label}:{d['price']:.2f}% {arrow}{bp:.0f}bp ({pct:+.2f}%)"
 
 
 def _etf_line(label: str, d: dict) -> str:
