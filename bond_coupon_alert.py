@@ -203,7 +203,7 @@ def issuer_of(name):
     changed = True
     while changed:
         changed = False
-        for suf in ("有限公司", "有限", "私人", "國際", "公司"):
+        for suf in ("有限公司", "有限", "私人", "國際", "全球", "控股", "公司"):
             if n.endswith(suf) and len(n) - len(suf) >= 2:
                 n = n[: -len(suf)].strip()
                 changed = True
@@ -399,6 +399,11 @@ def format_snapshot_diff(diff, max_lines=15):
     return "\n".join(lines)
 
 # ---------- 發行機構模糊搜尋 ----------
+ZH_ALIAS = {   # 中文俗名/英文小寫 → 報價檔實際用的名稱
+    "台積電": "TSMC", "台積": "TSMC", "tsmc": "TSMC",
+    "谷歌": "Alphabet", "google": "Alphabet", "臉書": "Meta",
+}
+
 EN_ALIAS = {
     "apple": "蘋果", "aapl": "蘋果", "microsoft": "微軟", "msft": "微軟", "amazon": "亞馬遜", "amzn": "亞馬遜",
     "google": "Alphabet", "alphabet": "Alphabet", "meta": "Meta", "nvidia": "輝達", "intel": "英特爾",
@@ -425,11 +430,21 @@ def search_issuers(path, keyword, max_issuers=3):
     kw = str(keyword).strip().lower()
     if not kw:
         return []
-    # 常見英文名 → 中文（讓 /issuer apple 也找得到）
-    for en, zh in EN_ALIAS.items():
-        if kw == en or (len(kw) >= 4 and (kw in en or en in kw)):
-            kw = zh.lower()
+    # 中文俗名 → 報價檔英文名（台積電 → TSMC）
+    _mapped = False
+    for zh, en in ZH_ALIAS.items():
+        if kw == zh.lower():
+            kw = en.lower()
+            _mapped = True
             break
+    # 常見英文名 → 中文（讓 /issuer apple 也找得到）；已由中文轉英文者不再反轉
+    if not _mapped:
+        for en, zh in EN_ALIAS.items():
+            if kw == en or (len(kw) >= 4 and (kw in en or en in kw)):
+                if zh.lower() in ZH_ALIAS and ZH_ALIAS[zh.lower()].lower() == kw:
+                    break   # 避免 tsmc→台積電→TSMC 來回打轉
+                kw = zh.lower()
+                break
     groups = {}
     for b in read_bonds(path):
         iss = issuer_of(b["name"])
