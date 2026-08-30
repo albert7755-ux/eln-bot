@@ -112,6 +112,7 @@ BOND_GROUP_HELP = (
     "\n🏦 發行機構\n"
     "/issuer 蘋果 → 簡介＋架上所有債券\n"
     "/sheet 蘋果 → 參考資訊（信評+財務+圖表+標的，含PDF）\n"
+    "/focus 輝達 → 債市每日聚焦 PPTX（直式兩頁，可編輯）\n"
     "\n🚨 信評\n"
     "/rating → 立即掃外部信評新聞\n"
     "/rating list　/rating watch 台積電　/rating unwatch 蘋果\n"
@@ -2281,6 +2282,121 @@ def handle_text_message(event):
                     bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 清理失敗：{str(e)[:200]}"))
             import threading
             threading.Thread(target=_run_cleanup, args=(ck.split(":", 1)[1], _bot_api), daemon=True).start()
+            return
+        if cmd == "focus":
+            # /focus 輝達            → 產生「債市每日聚焦 / 富邦好債報」PPTX(直式兩頁)
+            # /focus 輝達 26070004   → 指定焦點債券(1~3檔)
+            kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
+            if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔,請先把 Bond_Pricing Excel 傳給我。"))
+                return
+            if not kw:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="📰 用法\n/focus 輝達 → 自動挑2檔焦點債券\n/focus 輝達 26070004 26070003 → 指定焦點債券\n"
+                         "產出「債市每日聚焦＋富邦好債報」PPTX(直式兩頁,可直接編輯)"))
+                return
+            f_kws = []
+            _tk = kw.split()
+            if len(_tk) > 1:
+                _c = [x for x in _tk[1:] if re.fullmatch(r"(?:WMBB)?\d{6,10}", x, re.I)
+                      or re.fullmatch(r"[A-Z]{2}[A-Z0-9]{6,10}", x, re.I)]
+                if _c:
+                    f_kws = _c
+                    kw = _tk[0]
+            try:
+                from bond_coupon_alert import search_issuers, find_bonds, first_num
+                hits = search_issuers(str(BOND_PRICE_FILE), kw, max_issuers=3)
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 搜尋失敗:{str(e)[:200]}"))
+                return
+            if not hits:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🔎 找不到「{kw}」,可用 /issuer 查名稱。"))
+                return
+            if len(hits) > 1:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=f"「{kw}」對到 {len(hits)} 家:{'、'.join(h[0] for h in hits)}\n請用更精確的名稱再打一次"))
+                return
+            f_iss, f_bl = hits[0]
+            f_today = datetime.now(TZ_TAIPEI).date()
+            f_live = [b for b in f_bl if not (b.get("maturity") and b["maturity"] < f_today)]
+            f_pick = []
+            if f_kws:
+                for pk in f_kws[:3]:
+                    fb = find_bonds(str(BOND_PRICE_FILE), pk, max_hits=1)
+                    if fb:
+                        f_pick.append(fb[0])
+            if not f_pick:
+                _c2 = [(first_num(b.get("ytm")), b) for b in f_live if first_num(b.get("ytm")) is not None]
+                _c2.sort(key=lambda x: -x[0])
+                f_pick = [b for _, b in _c2[:2]]
+            if not f_pick:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"{f_iss} 目前架上沒有可列示的債券。"))
+                return
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=f"📰 製作 {f_iss} 債市每日聚焦 PPTX 中(查證信評與財報資料),約 60~90 秒..."))
+
+            def _run_focus(chat_id, bot_api_ref, iss_, bonds_, today_):
+                try:
+                    from bond_focus_ppt import build_focus_pptx
+                    from pdf_generator import upload_to_drive
+                    parent, ticker = get_issuer_ticker(iss_)
+                    b_lines = [f"{b.get('code')} {b['name']} 票面{b['coupon']}% YTM {b.get('ytm')} 到期{b['maturity']:%Y/%m/%d}"
+                               for b in bonds_]
+                    prompt = (
+                        "你是銀行固定收益科的研究員,要製作一份「債市每日聚焦」內部教育訓練文件。"
+                        f"對象發行機構:{iss_}" + (f"(上市主體:{parent}, 代碼:{ticker})" if ticker else "") + "。\n"
+                        "本行架上焦點債券:\n" + "\n".join(b_lines) + "\n\n"
+                        "請依你所知的公開資訊填寫下列欄位,並嚴格遵守:\n"
+                        "- 只寫你有把握的事實;不確定的數字、日期、評等一律省略或填 --,絕對不要臆測。\n"
+                        "- 評等只填確實知道的機構,不知道填 --。\n"
+                        "- 營收結構只在確知部門別或地區別金額時才給,否則 values 給空陣列。\n"
+                        "- 語氣專業中性,不做投資建議、不預測股價。\n\n"
+                        "只回傳 JSON:\n"
+                        "{\"issuer_en\": 英文全名, \"intro\": 公司簡介100~140字, \"headline\": 焦點新聞標題20字內,\n"
+                        " \"news_bullets\": [3則,每則60~90字,該公司近期與信用/財務/業務相關的重要事實],\n"
+                        " \"ops_blocks\": [[小標題,內文60~90字],[小標題,內文60~90字]],\n"
+                        " \"revenue_mix\": {\"labels\":[],\"values\":[],\"unit_note\":\"\"},\n"
+                        " \"ratings\": {\"moody\":\"\",\"sp\":\"\",\"fitch\":\"\",\"moody_outlook\":\"\",\"sp_outlook\":\"\","
+                        "\"fitch_outlook\":\"\",\"moody_date\":\"\",\"sp_date\":\"\",\"fitch_date\":\"\"},\n"
+                        " \"agency_comments\": [[\"穆迪\",評析80~120字],[\"標普\",評析80~120字]],\n"
+                        " \"bond_tagline\": 焦點債券一句話定位15字內}")
+                    got, _src, _errs = llm_json_fallback(prompt, max_tokens=3000)
+                    if not got:
+                        bot_api_ref.push_message(chat_id, TextSendMessage(text="❌ 資料生成失敗(AI 服務不可用),請稍後再試。"))
+                        return
+                    data = {
+                        "issuer": iss_, "issuer_en": got.get("issuer_en") or "",
+                        "intro": got.get("intro") or "", "headline": got.get("headline") or f"{iss_} 焦點速報",
+                        "news_bullets": got.get("news_bullets") or [],
+                        "ops_blocks": got.get("ops_blocks") or [],
+                        "revenue_mix": got.get("revenue_mix") or {},
+                        "ratings": got.get("ratings") or {},
+                        "agency_comments": got.get("agency_comments") or [],
+                        "bond_tagline": got.get("bond_tagline") or "",
+                        "date_str": f"{today_:%Y/%m/%d}",
+                        "source_note": "（資料來源：發行機構公開財報、信評機構公開資訊、公開新聞）",
+                        "bonds": [{"code": b.get("code") or "-", "name": b["name"], "coupon": b["coupon"],
+                                   "ytm": str(b.get("ytm") or "-"),
+                                   "maturity": f"{b['maturity']:%Y/%m/%d}" if b.get("maturity") else "-"}
+                                  for b in bonds_],
+                    }
+                    out = f"/tmp/債市每日聚焦_{iss_}_{today_:%Y%m%d}.pptx"
+                    build_focus_pptx(out, data)
+                    link = upload_to_drive(out, f"債市每日聚焦_{iss_}_{today_:%Y%m%d}.pptx")
+                    try:
+                        os.remove(out)
+                    except Exception:
+                        pass
+                    bot_api_ref.push_message(chat_id, TextSendMessage(
+                        text=f"📰 {iss_} 債市每日聚焦 PPTX\n（直式兩頁，可直接在 PowerPoint 編輯）\n🔗 {link}\n\n"
+                             "⚠️ 內容由 AI 依公開資訊整理，發布前請人工核對評等、日期與財務數字。"))
+                except Exception as e:
+                    print(f"[BondFocus ERROR] {e}")
+                    print(_traceback.format_exc())
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 製作失敗:{str(e)[:200]}"))
+            import threading
+            threading.Thread(target=_run_focus,
+                             args=(ck.split(":", 1)[1], _bot_api, f_iss, f_pick, f_today), daemon=True).start()
             return
         if cmd == "sheet":
             # /sheet 蘋果  → 發行機構參考資訊(LINE文字 + PDF連結)
