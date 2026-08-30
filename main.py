@@ -2292,7 +2292,7 @@ def handle_text_message(event):
                 return
             if not kw:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="📰 用法\n/focus 輝達 → 自動挑2檔焦點債券\n/focus 輝達 26070004 26070003 → 指定焦點債券\n"
+                    text="📰 用法\n/focus 輝達 → 自動挑短天期與長天期各1檔\n/focus 輝達 26070004 26070003 → 指定焦點債券\n"
                          "產出「債市每日聚焦＋富邦好債報」PPTX(直式兩頁,可直接編輯)"))
                 return
             f_kws = []
@@ -2326,9 +2326,19 @@ def handle_text_message(event):
                     if fb:
                         f_pick.append(fb[0])
             if not f_pick:
-                _c2 = [(first_num(b.get("ytm")), b) for b in f_live if first_num(b.get("ytm")) is not None]
-                _c2.sort(key=lambda x: -x[0])
-                f_pick = [b for _, b in _c2[:2]]
+                # 預設:短天期與長天期各一檔(依剩餘年期取最短、最長),讓兩檔形成對比
+                _c2 = []
+                for b in f_live:
+                    _y = first_num(b.get("years"))
+                    if _y is None and b.get("maturity"):
+                        _y = (b["maturity"] - f_today).days / 365.25
+                    if _y is not None and first_num(b.get("ytm")) is not None:
+                        _c2.append((_y, b))
+                _c2.sort(key=lambda x: x[0])
+                if len(_c2) >= 2:
+                    f_pick = [_c2[0][1], _c2[-1][1]]
+                elif _c2:
+                    f_pick = [_c2[0][1]]
             if not f_pick:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"{f_iss} 目前架上沒有可列示的債券。"))
                 return
