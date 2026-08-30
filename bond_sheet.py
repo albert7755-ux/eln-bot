@@ -306,12 +306,14 @@ def _ratings_of(bonds):
     return "-"
 
 # ---------- A. LINE 文字版 ----------
-def build_sheet_text(issuer, intro, bonds, fin=None, parent_note="", hist_map=None, fin_comment="", peers="", rating_note="", ust_curve=None, charts_comment="", today=None):
+def build_sheet_text(issuer, intro, bonds, fin=None, parent_note="", hist_map=None, fin_comment="", peers="", rating_note="", ust_curve=None, charts_comment="", intro_bullets=None, today=None):
     today = today or date.today()
     hist_map = hist_map or {}
     live = [b for b in bonds if not (b.get("maturity") and b["maturity"] < today)]
     lines = [f"📋 {issuer}｜發行機構參考資訊（{today:%Y/%m/%d}）", f"⚠️ {WATERMARK}", ""]
-    if intro:
+    if intro_bullets:
+        lines += ["【發行機構簡介】"] + [f"・{b}" for b in intro_bullets[:5]] + [""]
+    elif intro:
         lines += ["【發行機構簡介】", intro, ""]
     rt_line = _ratings_of(live)
     if rating_note:
@@ -371,7 +373,7 @@ def _register_cjk_font(pdfmetrics, UnicodeCIDFont):
     pdfmetrics.registerFont(UnicodeCIDFont("MSung-Light"))
     return "MSung-Light"
 
-def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hist_map=None, fin_comment="", peers="", rating_note="", ust_curve=None, charts_png=None, charts_comment="", today=None):
+def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hist_map=None, fin_comment="", peers="", rating_note="", ust_curve=None, charts_png=None, charts_comment="", intro_bullets=None, peer_png=None, picked_bonds=None, today=None):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.lib import colors
@@ -388,11 +390,51 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
 
     st_title = ParagraphStyle("t", fontName=F, fontSize=16, leading=22, textColor=NAVY, spaceAfter=4)
     st_sub = ParagraphStyle("s", fontName=F, fontSize=8.5, leading=12, textColor=GRAY, spaceAfter=10)
-    st_h = ParagraphStyle("h", fontName=F, fontSize=11, textColor=NAVY, spaceBefore=8, spaceAfter=3)
+    st_h = ParagraphStyle("h", fontName=F, fontSize=11, textColor=NAVY, spaceBefore=9, spaceAfter=4,
+                          leftIndent=3, borderPadding=(2, 0, 2, 0))
     st_p = ParagraphStyle("p", fontName=F, fontSize=9.5, leading=14)
-    st_small = ParagraphStyle("sm", fontName=F, fontSize=7.5, textColor=GRAY, leading=10)
-    st_risk = ParagraphStyle("rk", fontName=F, fontSize=7.5, leading=10.5, spaceAfter=1.2, leftIndent=3)
-    st_legal = ParagraphStyle("lg", fontName=F, fontSize=8, leading=11.5, textColor=NAVY)
+    st_small = ParagraphStyle("sm", fontName=F, fontSize=6.8, textColor=GRAY, leading=9)
+    st_risk = ParagraphStyle("rk", fontName=F, fontSize=5.9, leading=7.6, spaceAfter=0.3, leftIndent=2)
+    st_legal = ParagraphStyle("lg", fontName=F, fontSize=7.2, leading=10, textColor=NAVY)
+    st_bullet = ParagraphStyle("bl", fontName=F, fontSize=9, leading=13.5, spaceAfter=3, leftIndent=2)
+    st_hdr_name = ParagraphStyle("hn", fontName=F, fontSize=17, leading=21, textColor=colors.white)
+    st_hdr_right = ParagraphStyle("hr", fontName=F, fontSize=8.5, leading=11.5,
+                                  textColor=colors.HexColor("#C9D4E0"), alignment=2)
+    st_card_lbl = ParagraphStyle("cl", fontName=F, fontSize=8.5, leading=11,
+                                 textColor=colors.white, alignment=1)
+    st_card_txt = ParagraphStyle("ct", fontName=F, fontSize=8, leading=11.5, textColor="#222222")
+    st_spec_lbl = ParagraphStyle("sl", fontName=F, fontSize=8.5, leading=11,
+                                 textColor=colors.white, alignment=1)
+    st_spec_val = ParagraphStyle("sv", fontName=F, fontSize=8, leading=11, textColor="#222222")
+    st_hero_lbl = ParagraphStyle("hl", fontName=F, fontSize=8.5, leading=11,
+                                 textColor=colors.white, alignment=1)
+    st_hero_num = ParagraphStyle("hnum", fontName=F, fontSize=19, leading=23,
+                                 textColor=NAVY, alignment=1)
+    st_mini_lbl = ParagraphStyle("ml", fontName=F, fontSize=7, leading=9.5,
+                                 textColor=colors.white, alignment=1)
+    st_mini_num = ParagraphStyle("mn", fontName=F, fontSize=11, leading=14,
+                                 textColor=NAVY, alignment=1)
+    st_intro = ParagraphStyle("in", fontName=F, fontSize=9, leading=12.5, spaceAfter=1,
+                              textColor="#222222")
+    st_sec = ParagraphStyle("sc", fontName=F, fontSize=10.5, leading=13, textColor=NAVY,
+                            spaceBefore=5, spaceAfter=2)
+    st_box_lbl = ParagraphStyle("bxl", fontName=F, fontSize=8.5, leading=11,
+                                textColor=colors.HexColor("#14547A"), alignment=1)
+    st_box_num = ParagraphStyle("bxn", fontName=F, fontSize=13, leading=17,
+                                textColor=colors.HexColor("#14547A"), alignment=1)
+    st_note_box = ParagraphStyle("nb", fontName=F, fontSize=7.6, leading=10.5,
+                                 textColor="#333333", backColor=colors.HexColor("#F7F9FB"),
+                                 borderPadding=(3, 3, 3, 3), spaceAfter=1.5,
+                                 borderColor=colors.HexColor("#DDE4EC"), borderWidth=0.5)
+
+    def sec_header(title):
+        """區塊標題:藍色雙箭頭 + 底線(仿財報重點版型)"""
+        tb = Table([[Paragraph(f'<font color="#1F8AC0">≫</font> <b>{title}</b>', st_sec)]],
+                   colWidths=[184*mm])
+        tb.setStyle(TableStyle([("LINEBELOW", (0,0), (-1,-1), 1.2, colors.HexColor("#1F8AC0")),
+                                ("LEFTPADDING", (0,0), (-1,-1), 0),
+                                ("BOTTOMPADDING", (0,0), (-1,-1), 1)]))
+        return tb
 
     def _watermark(canv, doc_):
         """斜向平鋪浮水印:僅供內部訓練參考，不構成推介行為"""
@@ -414,90 +456,172 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
                 canv.drawCentredString(col * 330, row * 150, WATERMARK)
         canv.restoreState()
 
-    doc = SimpleDocTemplate(out_path, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=14*mm, bottomMargin=12*mm)
+    doc = SimpleDocTemplate(out_path, pagesize=A4, leftMargin=13*mm, rightMargin=13*mm, topMargin=11*mm, bottomMargin=9*mm)
     el = []
-    el.append(Paragraph(f"{issuer}｜發行機構參考資訊", st_title))
+    # 標題色帶(仿商品文宣):深藍底 + 機構名放大 + 右側日期
+    hdr_tbl = Table([[Paragraph(f"<b>{issuer}</b>", st_hdr_name),
+                      Paragraph(f"發行機構參考資訊<br/>{today:%Y/%m/%d}", st_hdr_right)]],
+                    colWidths=[122*mm, 62*mm])
+    hdr_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,-1), NAVY),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("LEFTPADDING", (0,0), (0,0), 8), ("RIGHTPADDING", (1,0), (1,0), 8),
+        ("TOPPADDING", (0,0), (-1,-1), 6), ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("LINEBELOW", (0,0), (-1,-1), 2.5, GOLD),
+    ]))
+    el.append(hdr_tbl)
+    el.append(Spacer(1, 2.5*mm))
+
+    # ── 簡介(全寬大字) ──
+    el.append(sec_header("發行機構簡介"))
+    if intro_bullets:
+        for b_ in intro_bullets[:4]:
+            el.append(Paragraph("● " + b_, st_intro))
+    elif intro:
+        el.append(Paragraph(intro, st_intro))
+
+    rt_txt = _ratings_of(live)
+    if rating_note:
+        rt_txt += f"　{rating_note}"
     el.append(Spacer(1, 1.5*mm))
-    el.append(Paragraph(f"資料日期：{today:%Y/%m/%d}", st_sub))
+    el.append(Paragraph(f"<b>信用評等（S&amp;P / Moody's / Fitch）</b>　{rt_txt}", st_intro))
 
-    el.append(Paragraph("發行機構簡介", st_h))
-    el.append(Paragraph(intro or "-", st_p))
-
-    el.append(Paragraph("信用評等（S&amp;P / Moody's / Fitch）", st_h))
-    el.append(Paragraph(_ratings_of(live) + (f"　　{rating_note}" if rating_note else ""), st_p))
-
-    el.append(Paragraph("財務重點" + (f"　（{parent_note}，代碼 {fin['ticker']}）" if fin and parent_note else (f"　（{fin['ticker']}）" if fin else "")), st_h))
+    # ── 財務數據:四~五個色塊(仿財報重點版型) ──
     if fin:
-        rows = _fin_rows(fin)
-        t = Table([[k for k, _ in rows], [v for _, v in rows]], colWidths=[(180/len(rows))*mm]*len(rows))
-        t.setStyle(TableStyle([
-            ("FONTNAME", (0,0), (-1,-1), F), ("FONTSIZE", (0,0), (-1,0), 8), ("FONTSIZE", (0,1), (-1,1), 10),
-            ("BACKGROUND", (0,0), (-1,0), NAVY), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-            ("ALIGN", (0,0), (-1,-1), "CENTER"), ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#D0D0D0")),
-            ("TOPPADDING", (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 4),
-        ]))
-        el.append(t)
-        if fin_comment:
-            el.append(Spacer(1, 2*mm))
-            el.append(Paragraph("財務比率解讀：" + fin_comment, st_p))
-        if peers:
-            el.append(Spacer(1, 1.5*mm))
-            el.append(Paragraph("同業比較：" + peers, st_p))
-    else:
-        el.append(Paragraph("財務資料暫時無法取得，請參閱發行機構最新公開財報。", st_p))
+        el.append(sec_header("財務數據" + (f"　（{parent_note}，代碼 {fin['ticker']}）" if parent_note
+                                        else f"　（{fin['ticker']}）")))
+        roe = fin.get("roe")
+        boxes = [("市值", _fmt_b(fin.get("market_cap"), "USD")),
+                 ("EPS(近12月)", f"{fin['eps']:.2f}" if fin.get("eps") is not None else "-"),
+                 ("ROE", f"{roe*100:.1f}%" if roe is not None else "-"),
+                 ("負債比", f"{fin['debt_ratio']:.0f}%" if fin.get("debt_ratio") is not None else "-"),
+                 ("淨負債/EBITDA", f"{fin['net_debt_ebitda']}x" if fin.get("net_debt_ebitda") is not None else "-")]
+        cells = []
+        for lb, vl in boxes:
+            inner = Table([[Paragraph(f"<b>{lb}</b>", st_box_lbl)],
+                           [Paragraph(f"<b>{vl}</b>", st_box_num)]], colWidths=[34*mm])
+            inner.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#DBEEF9")),
+                ("ALIGN", (0,0), (-1,-1), "CENTER"), ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+                ("TOPPADDING", (0,0), (0,0), 4), ("BOTTOMPADDING", (0,0), (0,0), 1),
+                ("TOPPADDING", (0,1), (0,1), 0), ("BOTTOMPADDING", (0,1), (0,1), 5),
+                ("BOX", (0,0), (-1,-1), 0.7, colors.HexColor("#A9D2EC")),
+            ]))
+            cells.append(inner)
+        grid = Table([cells], colWidths=[36.8*mm]*5)
+        grid.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+                                  ("LEFTPADDING", (0,0), (-1,-1), 1.5),
+                                  ("RIGHTPADDING", (0,0), (-1,-1), 1.5)]))
+        el.append(grid)
 
-    if charts_png:
+    if fin_comment or peers:
+        el.append(Spacer(1, 2.5*mm))
+        if fin_comment:
+            el.append(Paragraph("<b>財務比率解讀</b>：" + fin_comment, st_note_box))
+        if peers:
+            el.append(Paragraph("<b>同業比較</b>：" + peers, st_note_box))
+    if peer_png:
         try:
             from reportlab.platypus import Image as RLImage
             from PIL import Image as PILImage
+            iw, ih = PILImage.open(peer_png).size
+            pw = 68 * mm
+            img = RLImage(peer_png, width=pw, height=pw * ih / iw)
+            holder = Table([[img]], colWidths=[184*mm])
+            holder.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
+            el.append(Spacer(1, 1.5*mm))
+            el.append(holder)
+        except Exception as e:
+            print(f"[BondSheet] peer chart embed fail: {e}")
+
+    if charts_png:
+        try:
+            el.append(Spacer(1, 1*mm))
+            from reportlab.platypus import Image as RLImage
+            from PIL import Image as PILImage
             iw, ih = PILImage.open(charts_png).size
-            disp_w = 180 * mm
-            el.append(Paragraph("近五季財報趨勢", st_h))
+            disp_w = 170 * mm
+            el.append(sec_header("近五季財報趨勢"))
             el.append(RLImage(charts_png, width=disp_w, height=disp_w * ih / iw))
             if charts_comment:
-                el.append(Spacer(1, 1.5*mm))
-                el.append(Paragraph("圖表解讀：" + charts_comment, st_p))
-            el.append(Paragraph("資料來源：公開財報（yfinance）；單位為該公司報表幣別之億元。", st_small))
+                el.append(Paragraph("<b>圖表解讀</b>：" + charts_comment +
+                                    "（資料來源：公開財報，單位為該公司報表幣別之億元）", st_note_box))
         except Exception as e:
             print(f"[BondSheet] embed charts fail: {e}")
-    el.append(Paragraph(f"債券標的一覽（{len(live)} 檔）", st_h))
+    # ── 債券標的:依年期分三段,各取 YTM 最高一檔 ──
+    el.append(sec_header("本行架上代表標的"))
     ust_curve = ust_curve or {}
-    hdr = ["產品代碼", "債券名稱", "幣別", "票面%", "頻率", "Offer", "YTM/YTC", "較美債", "到期", "剩餘\n年期", "順位", "最低\n申購", "提前\n買回", "近30日"]
-    data = [hdr]
-    for b in live[:20]:
-        sp = ust_spread_bp(b, ust_curve, today)
-        sen = str(b.get("seniority") or "-").replace("優先無擔保", "優先無擔").replace("次順位", "次順位")
-        data.append([b.get("code") or "-", b["name"], b["ccy"], str(b["coupon"]), b["freq"],
-                     str(_clean(b.get("offer"))), str(_clean(b.get("ytm"))),
-                     f"{sp:+d}bp" if sp is not None else "-",
-                     f"{b['maturity']:%Y/%m}" if b.get("maturity") else "-",
-                     str(_clean(b.get("years"))), sen, str(_clean(b.get("min_amt"))),
-                     call_info(b).replace("（", "\n（"),
-                     hist_map.get(b["isin"], "").replace("｜近30日", "").strip() or "-"])
-    # 欄寬總和須 ≤ 180mm(A4 扣左右邊界),否則表格會超出頁面
-    t = Table(data, colWidths=[21*mm, 29*mm, 7*mm, 9*mm, 11*mm, 11*mm, 15*mm, 11*mm, 11*mm, 9*mm, 12*mm, 11*mm, 13*mm, 10*mm], repeatRows=1)
-    style = [("FONTNAME", (0,0), (-1,-1), F), ("FONTSIZE", (0,0), (-1,0), 6.5), ("FONTSIZE", (0,1), (-1,-1), 6.5),
-             ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-             ("BACKGROUND", (0,0), (-1,0), NAVY), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-             ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#D0D0D0")),
-             ("TOPPADDING", (0,0), (-1,-1), 2.5), ("BOTTOMPADDING", (0,0), (-1,-1), 2.5),
-             ("ALIGN", (2,1), (-1,-1), "CENTER")]
-    for i, b in enumerate(live[:20], 1):
-        ytm = b.get("ytm")
-        if isinstance(ytm, str) and "/" in ytm:
-            style.append(("TEXTCOLOR", (6, i), (6, i), GOLD))  # 可提前買回:金色標示
-    t.setStyle(TableStyle(style))
-    el.append(t)
-    if len(live) > 20:
-        el.append(Paragraph(f"…另有 {len(live)-20} 檔未列", st_small))
+    picks = []
+    if picked_bonds:
+        # 使用者指定的標的:依剩餘年期標示區間
+        for b in picked_bonds:
+            y = first_num(b.get("years"))
+            if y is None and b.get("maturity"):
+                y = (b["maturity"] - today).days / 365.25
+            if y is None:
+                label = "-"
+            elif y < 10:
+                label = "10年內"
+            elif y < 20:
+                label = "10–20年"
+            else:
+                label = "20年以上"
+            picks.append((label, b))
+    buckets = [("10年內", 0, 10), ("10–20年", 10, 20), ("20–30年", 20, 99)]
+    for label, lo, hi in ([] if picked_bonds else buckets):
+        cand = []
+        for b in live:
+            y = first_num(b.get("years"))
+            if y is None and b.get("maturity"):
+                y = (b["maturity"] - today).days / 365.25
+            ym = first_num(b.get("ytm"))
+            if y is None or ym is None:
+                continue
+            if lo <= y < hi:
+                cand.append((ym, b))
+        if cand:
+            cand.sort(key=lambda x: -x[0])
+            picks.append((label, cand[0][1]))
+    if picks:
+        hdr = ["年期區間", "產品代碼", "債券名稱", "幣別", "票面%", "頻率", "Offer",
+               "YTM/YTC", "較美債", "到期", "剩餘年期", "順位", "最低申購", "提前買回"]
+        data = [hdr]
+        for label, b in picks:
+            sp = ust_spread_bp(b, ust_curve, today)
+            sen = str(b.get("seniority") or "-").replace("優先無擔保", "優先無擔")
+            data.append([label, b.get("code") or "-", b["name"], b["ccy"], str(b["coupon"]), b["freq"],
+                         str(_clean(b.get("offer"))), str(_clean(b.get("ytm"))),
+                         f"{sp:+d}bp" if sp is not None else "-",
+                         f"{b['maturity']:%Y/%m}" if b.get("maturity") else "-",
+                         str(_clean(b.get("years"))), sen, str(_clean(b.get("min_amt"))),
+                         call_info(b).replace("（", "\n（")])
+        t = Table(data, colWidths=[15*mm, 22*mm, 29*mm, 8*mm, 9*mm, 11*mm, 11*mm,
+                                   16*mm, 11*mm, 12*mm, 11*mm, 14*mm, 13*mm, 12*mm], repeatRows=1)
+        style = [("FONTNAME", (0,0), (-1,-1), F), ("FONTSIZE", (0,0), (-1,-1), 7),
+                 ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+                 ("BACKGROUND", (0,0), (-1,0), NAVY), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+                 ("BACKGROUND", (0,1), (0,-1), colors.HexColor("#EAF3FA")),
+                 ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#D0D0D0")),
+                 ("TOPPADDING", (0,0), (-1,-1), 4), ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+                 ("ALIGN", (0,0), (-1,-1), "CENTER"), ("ALIGN", (2,1), (2,-1), "LEFT")]
+        for i2, (_, b) in enumerate(picks, 1):
+            ym = b.get("ytm")
+            if isinstance(ym, str) and "/" in ym:
+                style.append(("TEXTCOLOR", (7, i2), (7, i2), GOLD))
+        t.setStyle(TableStyle(style))
+        el.append(t)
+        _note = ("※ 上表為指定之代表標的" if picked_bonds
+                 else "※ 上表為各年期區間中 YTM 最高之標的")
+        el.append(Paragraph(f"{_note}（架上共 {len(live)} 檔）；"
+                            "YTM/YTC 呈現兩個數字者表示具提前買回條款（金色標示）。"
+                            "完整清單請洽固定收益科或使用查詢指令。", st_small))
     el.append(Spacer(1, 3*mm))
-    el.append(Paragraph("風險揭露", st_h))
+    el.append(sec_header("風險揭露"))
     for k, v in RISK_ITEMS:
-        el.append(Paragraph(f"● <b>{k}</b>：{v}", st_risk))
-    el.append(Spacer(1, 2.5*mm))
-    el.append(Paragraph(LEGAL_NOTE, st_legal))
+        el.append(Paragraph(f"<b>{k}</b>：{v}", st_risk))
     el.append(Spacer(1, 1.5*mm))
-    el.append(Paragraph("YTM/YTC 欄呈現兩個數字者表示該券有提前買回條款（金色標示）；提前買回欄之日期與價格摘自報價檔備註。"
+    el.append(Paragraph(LEGAL_NOTE, st_legal))
+    el.append(Paragraph("YTM/YTC 欄呈現兩個數字者表示該券有提前買回條款（金色標示）；提前買回欄之日期摘自報價檔備註。"
                         "本資料由公開資訊彙整，僅供參考，非投資建議或要約；"
                         "報價可能隨市場變動，詳細產品資訊（配息條件、提前買回條款、風險揭露等）請以產品說明書為準。", st_small))
     doc.build(el, onFirstPage=_watermark, onLaterPages=_watermark)
@@ -685,7 +809,7 @@ def build_charts_png(q, out_png, title=""):
             p2 = prop.copy(); p2.set_size(size); return p2
         BLUE, GREEN, NAVY = "#1F8AC0", "#3EA97A", "#0B2A4A"
         L = q["labels"]
-        fig, axes = plt.subplots(2, 2, figsize=(11, 6.2), dpi=150)
+        fig, axes = plt.subplots(2, 2, figsize=(11, 4.4), dpi=150)
 
         def bars(ax, a, b, la, lb, ttl):
             import numpy as np
@@ -734,10 +858,65 @@ def build_charts_png(q, out_png, title=""):
         bars(axes[0][1], q["ocf"], q["fcf"], T["ocf"], T["fcf"], T["cf"])
         bars(axes[1][0], q["debt"], q["cash"], T["debt"], T["cash"], T["dc"])
         lines(axes[1][1], q["debt_ebitda"], q["int_cover"], T["de"], T["ic"], T["cr"])
-        fig.tight_layout(pad=1.6)
+        fig.tight_layout(pad=1.0, h_pad=1.6, w_pad=1.2)
         fig.savefig(out_png, bbox_inches="tight", facecolor="white")
         plt.close(fig)
         return out_png
     except Exception as e:
         print(f"[BondSheet] charts fail: {e}")
+        return None
+
+
+# ---------- 同業市值長條圖 ----------
+def build_peer_chart(issuer_name, issuer_cap, peers, out_png):
+    """
+    仿商品文宣的「同業規模比較」長條圖:主角用強調色,同業灰色。
+    peers: [{"name":中文名, "ticker":代碼, "market_cap":市值}, ...]
+    issuer_cap 與 peers 的 market_cap 單位皆為原始美元數字。
+    成功回傳路徑,資料不足回 None。
+    """
+    items = [(issuer_name, issuer_cap, True)]
+    for p_ in peers or []:
+        if p_.get("market_cap"):
+            items.append((p_.get("name") or p_.get("ticker"), p_["market_cap"], False))
+    items = [(n, v, hi) for n, v, hi in items if v]
+    if len(items) < 2:
+        return None
+    items.sort(key=lambda x: -x[1])
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib import font_manager
+        fp = _cjk_font_path()
+        PROP = None
+        if fp:
+            try:
+                PROP = font_manager.FontProperties(fname=fp)
+                font_manager.fontManager.addfont(fp)
+                matplotlib.rcParams["font.family"] = PROP.get_name()
+            except Exception:
+                PROP = None
+        fig, ax = plt.subplots(figsize=(5.0, 2.2), dpi=170)
+        names = [n for n, _, _ in items]
+        vals = [v / 1e8 for _, v, _ in items]        # 億美元
+        colors = ["#C9553D" if hi else "#BFBFBF" for _, _, hi in items]
+        bars = ax.bar(range(len(items)), vals, color=colors, width=0.55)
+        for b_, v in zip(bars, vals):
+            ax.annotate(f"{v:,.0f}", (b_.get_x() + b_.get_width() / 2, v),
+                        ha="center", va="bottom", fontsize=12,
+                        fontproperties=PROP)
+        ax.set_xticks(range(len(items)))
+        ax.set_xticklabels(names, fontsize=12, fontproperties=PROP)
+        ax.set_title("同業市值比較（億美元）", fontsize=12.5, color="#0B2A4A",
+                     pad=8, fontproperties=PROP)
+        ax.spines[["top", "right", "left"]].set_visible(False)
+        ax.tick_params(axis="y", labelsize=9)
+        ax.set_ylim(0, max(vals) * 1.18)
+        fig.tight_layout(pad=0.8)
+        fig.savefig(out_png, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        return out_png
+    except Exception as e:
+        print(f"[BondSheet] peer chart fail: {e}")
         return None
