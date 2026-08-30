@@ -2289,8 +2289,19 @@ def handle_text_message(event):
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔,請先把 Bond_Pricing Excel 傳給我。"))
                 return
             if not kw:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📋 用法:/sheet 蘋果\n/sheet 威瑞森\n產出發行機構參考資訊(簡介+信評+財務重點+架上標的),文字版+PDF"))
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📋 用法\n/sheet 蘋果 → 自動挑三檔(各年期區間YTM最高)\n/sheet 威瑞森 25120005 → 指定1檔\n/sheet 威瑞森 25120005 25100003 → 指定2檔(最多3檔)\n產出發行機構參考資訊(簡介+信評+財務+圖表+標的),文字版+PDF"))
                 return
+            # 可在機構名後面接 1~3 個產品代碼/ISIN,指定要列出的標的
+            # 例:/sheet 威瑞森 25120005 25100003
+            picked_kws = []
+            _tok = kw.split()
+            if len(_tok) > 1:
+                _cand = [t for t in _tok[1:]
+                         if re.fullmatch(r"(?:WMBB)?\d{6,10}", t, re.I)
+                         or re.fullmatch(r"[A-Z]{2}[A-Z0-9]{6,10}", t, re.I)]
+                if _cand:
+                    picked_kws = _cand
+                    kw = _tok[0]
             try:
                 from bond_coupon_alert import search_issuers
                 hits = search_issuers(str(BOND_PRICE_FILE), kw, max_issuers=3)
