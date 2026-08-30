@@ -127,6 +127,7 @@ BOND_GROUP_HELP = (
     "\n📈 日報\n"
     "/bonddaily → 立即產生債券市場日報\n"
     "/bonddaily cache → 看最近一份\n"
+    "/bonddaily focus 零息債 | 風險:無配息、有提前買回 → 設定當期主打方向與必講風險（off取消）\n"
     "━━━━━━━━━━━━━━━\n"
     "🔒專投＝限專業投資人｜💎高資產＝高資產客戶專屬\n"
     "報價以本行系統為準，商品條件依產品說明書"
@@ -1571,7 +1572,55 @@ def handle_text_message(event):
             return
         if cmd.startswith("bonddaily"):
             parts = text_raw.split(" ", 1)
-            use_cache = len(parts) > 1 and parts[1].strip().lower() == "cache"
+            _arg = parts[1].strip() if len(parts) > 1 else ""
+            # /bonddaily focus 浮動利率債 → 設定當期主打方向(每日操作思維會帶到)
+            # /bonddaily focus        → 查看目前設定
+            # /bonddaily focus off    → 取消
+            if _arg.lower().startswith("focus"):
+                fv = _arg[5:].strip()
+                fpath = "/data/bond_focus.json" if os.path.isdir("/data") else "/tmp/bond_focus.json"
+                try:
+                    if not fv:
+                        cur, curisk = "", ""
+                        try:
+                            from bond_daily_report import get_daily_focus_full
+                            cur, curisk = get_daily_focus_full()
+                        except Exception:
+                            pass
+                        body = (f"📌 目前當期主打方向：{cur}" if cur else "📌 尚未設定當期主打方向")
+                        if curisk:
+                            body += f"\n⚠️ 必講風險：{curisk}"
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(
+                            text=body + "\n\n設定：/bonddaily focus 零息債 | 風險:無配息、有提前買回、信用風險"
+                                        "\n取消：/bonddaily focus off"))
+                        return
+                    if fv.lower() in ("off", "clear", "取消"):
+                        if os.path.exists(fpath):
+                            os.remove(fpath)
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已取消當期主打方向，日報恢復純市場觀察。"))
+                        return
+                    # 支援「方向 | 風險:xxx」格式，風險會被強制寫進同一段
+                    fdir, frisk = fv, ""
+                    if "|" in fv or "｜" in fv:
+                        seg = re.split(r"[|｜]", fv, 1)
+                        fdir = seg[0].strip()
+                        frisk = re.sub(r"^\s*(風險|risk)\s*[:：]?\s*", "", seg[1].strip(), flags=re.I)
+                    with open(fpath, "w", encoding="utf-8") as f:
+                        json.dump({"focus": fdir, "risk": frisk}, f, ensure_ascii=False)
+                    msg_f = (f"✅ 已設定當期主打方向：{fdir}")
+                    if frisk:
+                        msg_f += f"\n⚠️ 必講風險：{frisk}"
+                    else:
+                        msg_f += "\n（未設定必講風險，建議加上，格式：/bonddaily focus 零息債 | 風險:無配息、有提前買回、信用風險）"
+                    msg_f += ("\n\n明天起的債券日報，今日操作思維最後會用一句話把當天市場連結到這個方向"
+                              "（只講產品類型邏輯，不提具體標的與價格）"
+                              + ("，並一併帶出上述風險。" if frisk else "。")
+                              + "\n取消請打 /bonddaily focus off")
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg_f))
+                except Exception as e:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 設定失敗：{str(e)[:200]}"))
+                return
+            use_cache = _arg.lower() == "cache"
             if use_cache:
                 try:
                     with engine.begin() as conn:
@@ -2259,7 +2308,8 @@ def handle_text_message(event):
             _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📋 整理 {iss} 參考資訊中(簡介+財務+架上標的),約 30~60 秒..."))
             def _run_sheet(chat_id, bot_api_ref, iss_, bl_):
                 try:
-                    from bond_sheet import get_financials, build_sheet_text, build_sheet_pdf, get_quarterly_series, build_charts_png
+                    from bond_sheet import (get_financials, build_sheet_text, build_sheet_pdf,
+                                            get_quarterly_series, build_charts_png, build_peer_chart)
                     from pdf_generator import upload_to_drive
                     today_ = datetime.now(TZ_TAIPEI).date()
                     parent, ticker = get_issuer_ticker(iss_)
@@ -2269,6 +2319,15 @@ def handle_text_message(event):
                     if parent_note and fin:
                         parent_note = f"財報為母集團 {parent_note}"
                     fin_comment = get_fin_comment(iss_, fin)
+                    bullets = get_issuer_bullets(iss_, parent or "")
+                    peer_png = None
+                    try:
+                        if fin and fin.get("market_cap"):
+                            pc = get_peer_caps(iss_, parent or "")
+                            peer_png = build_peer_chart(parent or iss_, fin["market_cap"], pc,
+                                                        f"/tmp/peer_{iss_}_{today_:%Y%m%d}.png")
+                    except Exception as e:
+                        print(f"[BondSheet peer chart] {e}")
                     peers = get_peer_comparison(iss_, parent or "", fin)
                     rating_note = get_rating_outlook(iss_)
                     from bond_sheet import get_ust_curve
@@ -2295,11 +2354,18 @@ def handle_text_message(event):
                             chart_note = "（圖表產生錯誤，未附圖表）"
                     else:
                         chart_note = "（未對應到上市公司，未附圖表）"
-                    txt = build_sheet_text(iss_, intro, bl_, charts_comment=charts_comment, **kw_)
+                    txt = build_sheet_text(iss_, intro, bl_, charts_comment=charts_comment,
+                                           intro_bullets=bullets, **kw_)
                     push_long_message(bot_api_ref, chat_id, txt)
                     pdf_path = f"/tmp/參考資訊_{iss_}_{today_:%Y%m%d}.pdf"
                     build_sheet_pdf(pdf_path, iss_, intro, bl_, charts_png=charts_png,
-                                    charts_comment=charts_comment, **kw_)
+                                    charts_comment=charts_comment, intro_bullets=bullets,
+                                    peer_png=peer_png, **kw_)
+                    if peer_png:
+                        try:
+                            os.remove(peer_png)
+                        except Exception:
+                            pass
                     if charts_png:
                         try:
                             os.remove(charts_png)
@@ -3864,6 +3930,52 @@ def get_issuer_profile(issuer, parent=""):
         return profile
     # 退回短版簡介
     return (get_issuer_intros([issuer]) or {}).get(issuer, "")
+
+def get_issuer_bullets(issuer, parent=""):
+    """把發行機構簡介改成 3~4 條 bullet(仿商品文宣版型),存快取"""
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT profile FROM bond_issuer_profile WHERE issuer=:i"),
+                           {"i": issuer + "|bullets"}).fetchone()
+    if row:
+        try:
+            return json.loads(row[0])
+        except Exception:
+            pass
+    subject = issuer + (f"(母集團為{parent})" if parent and parent != issuer else "")
+    prompt = ("你是銀行固定收益研究員。請為債券發行機構「" + subject + "」寫 4 條簡介重點,"
+              "每條 30~50 字繁體中文,依序為:\n"
+              "1. 成立背景、總部所在地、在該產業/國家的規模地位\n"
+              "2. 主要業務組成(用文字描述部門或業務線,不要編造精確的營收百分比)\n"
+              "3. 市場地位或競爭優勢的具體事實\n"
+              "4. 信用體質重點:財務結構特徵與主要風險\n"
+              "語氣專業中性,不做投資建議,不確定的數字寧可不寫。"
+              "只回傳 JSON:{\"bullets\": [第1條, 第2條, 第3條, 第4條]}")
+    got, _, _ = llm_json_fallback(prompt, max_tokens=800)
+    bullets = (got or {}).get("bullets") or []
+    bullets = [str(b).strip() for b in bullets if str(b).strip()][:5]
+    if bullets:
+        with engine.begin() as conn:
+            conn.execute(text("""INSERT INTO bond_issuer_profile(issuer, profile) VALUES (:i,:p)
+                                 ON CONFLICT (issuer) DO UPDATE SET profile=EXCLUDED.profile, updated_at=NOW()"""),
+                         {"i": issuer + "|bullets", "p": json.dumps(bullets, ensure_ascii=False)})
+    return bullets
+
+def get_peer_caps(issuer, parent=""):
+    """同業市值(給長條圖用):AI 給同業代碼,市值一律用 yfinance 實抓"""
+    subject = parent or issuer
+    prompt = ("公司「" + subject + "」的主要同業(相同產業、相同國家或區域優先)請給 2~3 家。"
+              "只回傳 JSON:{\"peers\":[{\"name\":中文名,\"ticker\":代碼}]}")
+    got, _, _ = llm_json_fallback(prompt, max_tokens=300)
+    out = []
+    from bond_sheet import get_financials
+    for p_ in ((got or {}).get("peers") or [])[:3]:
+        tk = str(p_.get("ticker") or "").strip()
+        if not tk:
+            continue
+        pf = get_financials(tk)
+        if pf and pf.get("market_cap"):
+            out.append({"name": str(p_.get("name") or tk), "ticker": tk, "market_cap": pf["market_cap"]})
+    return out
 
 def get_fin_comment(issuer, fin):
     """對五大財務比率做 2~3 句的信用角度 AI 解讀"""
