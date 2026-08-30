@@ -2305,8 +2305,21 @@ def handle_text_message(event):
                     text=f"「{kw}」對到 {len(hits)} 家:{'、'.join(h[0] for h in hits)}\n請用更精確的名稱再打一次 /sheet"))
                 return
             iss, bl = hits[0]
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📋 整理 {iss} 參考資訊中(簡介+財務+架上標的),約 30~60 秒..."))
-            def _run_sheet(chat_id, bot_api_ref, iss_, bl_):
+            picked = []
+            if picked_kws:
+                from bond_coupon_alert import find_bonds
+                for pk in picked_kws[:3]:
+                    fb = find_bonds(str(BOND_PRICE_FILE), pk, max_hits=1)
+                    if fb:
+                        picked.append(fb[0])
+                if not picked:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text=f"找不到指定的標的：{'、'.join(picked_kws)}\n請確認產品代碼，或不帶代碼讓系統自動挑選。"))
+                    return
+            _note_p = f"（指定 {len(picked)} 檔標的）" if picked else ""
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=f"📋 整理 {iss} 參考資訊中{_note_p},約 30~60 秒..."))
+            def _run_sheet(chat_id, bot_api_ref, iss_, bl_, picked_=None):
                 try:
                     from bond_sheet import (get_financials, build_sheet_text, build_sheet_pdf,
                                             get_quarterly_series, build_charts_png, build_peer_chart)
@@ -2360,7 +2373,7 @@ def handle_text_message(event):
                     pdf_path = f"/tmp/參考資訊_{iss_}_{today_:%Y%m%d}.pdf"
                     build_sheet_pdf(pdf_path, iss_, intro, bl_, charts_png=charts_png,
                                     charts_comment=charts_comment, intro_bullets=bullets,
-                                    peer_png=peer_png, **kw_)
+                                    peer_png=peer_png, picked_bonds=picked_, **kw_)
                     if peer_png:
                         try:
                             os.remove(peer_png)
@@ -2389,7 +2402,7 @@ def handle_text_message(event):
                     print(_traceback.format_exc())
                     bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 參考資訊產生失敗:{str(e)[:200]}"))
             import threading
-            threading.Thread(target=_run_sheet, args=(ck.split(":", 1)[1], _bot_api, iss, bl), daemon=True).start()
+            threading.Thread(target=_run_sheet, args=(ck.split(":", 1)[1], _bot_api, iss, bl, picked), daemon=True).start()
             return
         if cmd == "rating":
             # /rating              → 立刻掃一次監控名單的信評新聞
