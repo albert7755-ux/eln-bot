@@ -95,6 +95,59 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
     return f"https://drive.google.com/file/d/{file_id}/view"
 
 
+def upload_pptx_with_pdf(file_path: str, filename: str, folder_name: str = "龍蝦報告"):
+    """
+    上傳 PPTX，並利用 Google Drive 的轉檔能力另存一份 PDF（手機預覽較穩）。
+    回傳 (pptx_link, pdf_link)；PDF 轉檔失敗時 pdf_link 為 None。
+    """
+    import io as _io
+    from googleapiclient.http import MediaIoBaseUpload
+
+    pptx_link = upload_to_drive(file_path, filename, folder_name)
+    pdf_link = None
+    try:
+        service = get_drive_service()
+        query = (f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' "
+                 f"and trashed=false")
+        folders = service.files().list(q=query, fields="files(id)").execute().get("files", [])
+        folder_id = folders[0]["id"] if folders else None
+
+        # 1) 上傳並轉成 Google 簡報（暫存）
+        media = MediaFileUpload(
+            file_path,
+            mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        tmp_meta = {"name": filename + "(轉檔暫存)",
+                    "mimeType": "application/vnd.google-apps.presentation"}
+        if folder_id:
+            tmp_meta["parents"] = [folder_id]
+        slides = service.files().create(body=tmp_meta, media_body=media, fields="id").execute()
+        slides_id = slides["id"]
+
+        # 2) 匯出 PDF
+        pdf_bytes = service.files().export(fileId=slides_id, mimeType="application/pdf").execute()
+
+        # 3) 上傳 PDF 本體
+        pdf_name = filename.rsplit(".", 1)[0] + ".pdf"
+        pdf_meta = {"name": pdf_name}
+        if folder_id:
+            pdf_meta["parents"] = [folder_id]
+        pdf_media = MediaIoBaseUpload(_io.BytesIO(pdf_bytes), mimetype="application/pdf")
+        pdf_file = service.files().create(body=pdf_meta, media_body=pdf_media,
+                                          fields="id").execute()
+        service.permissions().create(fileId=pdf_file["id"],
+                                     body={"type": "anyone", "role": "reader"}).execute()
+        pdf_link = f"https://drive.google.com/file/d/{pdf_file['id']}/view"
+
+        # 4) 刪掉轉檔暫存的 Google 簡報
+        try:
+            service.files().delete(fileId=slides_id).execute()
+        except Exception as e:
+            print(f"[Drive] 刪除轉檔暫存失敗: {e}")
+    except Exception as e:
+        print(f"[Drive] PPTX→PDF 轉檔失敗: {e}")
+    return pptx_link, pdf_link
+
+
 def cleanup_drive_folder(folder_name: str = "龍蝦報告", days: int = 30, dry_run: bool = False):
     """
     刪除指定 Drive 資料夾中超過 days 天的舊檔（移到垃圾桶，可救回）。
