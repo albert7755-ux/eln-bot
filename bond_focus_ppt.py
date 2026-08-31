@@ -172,6 +172,111 @@ def _donut_png(rm):
         return None
 
 
+def _bar_png(labels, series, title=""):
+    """
+    備援圖表:長條圖(可 1~2 組數列)。series = [(名稱, [值...]), ...]
+    回傳暫存 PNG 路徑,失敗回 None。
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib import font_manager
+        fp = _cjk_font()
+        PROP = None
+        if fp:
+            try:
+                PROP = font_manager.FontProperties(fname=fp)
+                font_manager.fontManager.addfont(fp)
+                matplotlib.rcParams["font.family"] = PROP.get_name()
+            except Exception:
+                PROP = None
+        matplotlib.rcParams["axes.unicode_minus"] = False
+        colors_ = ["#169B9B", "#1F8AC0"]
+        fig, ax = plt.subplots(figsize=(4.6, 3.2), dpi=170)
+        x = np.arange(len(labels))
+        n = max(1, len(series))
+        w = 0.7 / n
+        for i, (name, vals) in enumerate(series):
+            v = [0 if x_ is None else x_ for x_ in vals]
+            bars = ax.bar(x + (i - (n - 1) / 2) * w, v, w, label=name, color=colors_[i % 2])
+            for b_, val in zip(bars, v):
+                if val:
+                    ax.annotate(f"{val:,.0f}" if abs(val) >= 100 else f"{val:,.1f}",
+                                (b_.get_x() + b_.get_width() / 2, val), ha="center",
+                                va="bottom", fontsize=8, fontproperties=PROP)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=9, fontproperties=PROP)
+        ax.tick_params(axis="y", labelsize=8)
+        ax.spines[["top", "right"]].set_visible(False)
+        if title:
+            ax.set_title(title, fontsize=10.5, color="#0B2A4A", pad=8, fontproperties=PROP)
+        if len(series) > 1:
+            ax.legend(fontsize=8, frameon=False, ncol=2, loc="lower left",
+                      bbox_to_anchor=(0, 1.0),
+                      prop=(PROP.copy() if PROP else None))
+        fig.tight_layout(pad=0.4)
+        f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        fig.savefig(f.name, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        return f.name
+    except Exception as e:
+        print(f"[BondFocus] bar png fail: {e}")
+        return None
+
+
+def _chart_for_revenue_block(D):
+    """
+    營收結構區塊要放哪張圖:
+    1) AI 有給部門別營收 → 甜甜圈
+    2) 否則用近五季營收/營業淨利 → 長條圖
+    3) 再否則用架上債券到期分布 → 長條圖
+    回傳 (png_path, 說明文字) 或 (None, "")
+    """
+    rm = D.get("revenue_mix") or {}
+    if rm.get("values"):
+        return _donut_png(rm), rm.get("unit_note", "")
+    q = D.get("quarterly") or {}
+    if q.get("labels") and any(v is not None for v in (q.get("revenue") or [])):
+        series = [("營業收入", q.get("revenue") or [])]
+        if any(v is not None for v in (q.get("op_income") or [])):
+            series.append(("營業淨利", q["op_income"]))
+        return _bar_png(q["labels"], series, "近五季營收與獲利"), "單位：該公司報表幣別之億元"
+    md = D.get("maturity_dist") or {}
+    if md.get("labels"):
+        return (_bar_png(md["labels"], [("檔數", md["values"])], "架上債券到期分布"),
+                "本行架上該發行機構之債券檔數")
+    return None, ""
+
+
+OUTLOOK_ZH = {
+    "stable": "穩定", "positive": "正向", "negative": "負向",
+    "developing": "發展中", "watch negative": "負向觀察", "watch positive": "正向觀察",
+    "rating watch negative": "負向觀察", "creditwatch negative": "負向觀察",
+    "under review": "評等審查中", "n/a": "--", "na": "--", "none": "--", "": "--",
+}
+
+
+def _zh_outlook(v):
+    """評等展望統一中文化(AI 有時回 Stable/Positive)"""
+    t = str(v or "").strip()
+    return OUTLOOK_ZH.get(t.lower(), t or "--")
+
+
+def _revenue_block_title(D):
+    """區塊標題依實際畫的圖調整"""
+    rm = D.get("revenue_mix") or {}
+    if rm.get("values"):
+        return "營收結構"
+    q = D.get("quarterly") or {}
+    if q.get("labels") and any(v is not None for v in (q.get("revenue") or [])):
+        return "營運趨勢"
+    if (D.get("maturity_dist") or {}).get("labels"):
+        return "架上債券分布"
+    return "營收結構"
+
+
 def build_focus_pptx(out_path, D):
     prs = Presentation()
     prs.slide_width, prs.slide_height = PAGE_W, PAGE_H
@@ -256,11 +361,10 @@ def build_focus_pptx(out_path, D):
     _txt(t, M + Cm(0.25), Cm(9.45), half - Cm(0.5), Cm(5.6), ops, size=11, line=1.4)
 
     x2 = M + half + Cm(0.5)
-    _txt(t, x2, Cm(8.0), half, Cm(1.0), "營收結構", size=19, bold=True, color=NAVY, align=PP_ALIGN.CENTER)
+    _txt(t, x2, Cm(8.0), half, Cm(1.0), _revenue_block_title(D), size=19, bold=True, color=NAVY, align=PP_ALIGN.CENTER)
     _line(t, x2 + Cm(1.2), Cm(9.0), half - Cm(2.4))
     _rect(t, x2, Cm(9.25), half, Cm(6.0), fill=WHITE, line_color=BLUE)
-    rm = D.get("revenue_mix") or {}
-    png = _donut_png(rm) if rm.get("values") else None
+    png, png_note = _chart_for_revenue_block(D)
     if png:
         # 以高度為準置中,避免圖超出卡片
         try:
@@ -274,14 +378,14 @@ def build_focus_pptx(out_path, D):
             t.shapes.add_picture(png, x2 + (half - img_w) // 2, Cm(9.5), width=img_w, height=img_h)
         except Exception:
             t.shapes.add_picture(png, x2 + Cm(0.6), Cm(9.5), height=Cm(4.7))
-        _txt(t, x2, Cm(14.55), half, Cm(0.7), rm.get("unit_note", ""), size=9, color=GRAY,
+        _txt(t, x2, Cm(14.55), half, Cm(0.7), png_note, size=9, color=GRAY,
              align=PP_ALIGN.CENTER)
         try:
             os.remove(png)
         except Exception:
             pass
     else:
-        _txt(t, x2, Cm(11.8), half, Cm(1.0), "（無公開部門別營收資料）", size=12, color=GRAY,
+        _txt(t, x2, Cm(11.8), half, Cm(1.0), "（暫無可用圖表資料）", size=12, color=GRAY,
              align=PP_ALIGN.CENTER)
 
     # 信用評等
@@ -290,7 +394,7 @@ def build_focus_pptx(out_path, D):
     R = D.get("ratings") or {}
     rows2 = [[("信用評等", {}), ("穆迪", {}), ("標普", {}), ("惠譽", {})],
              [("長期評等", {"bold": True}), (R.get("moody") or "--", {}), (R.get("sp") or "--", {}), (R.get("fitch") or "--", {})],
-             [("評等展望", {"bold": True}), (R.get("moody_outlook") or "--", {}), (R.get("sp_outlook") or "--", {}), (R.get("fitch_outlook") or "--", {})],
+             [("評等展望", {"bold": True}), (_zh_outlook(R.get("moody_outlook")), {}), (_zh_outlook(R.get("sp_outlook")), {}), (_zh_outlook(R.get("fitch_outlook")), {})],
              [("最近評等動作", {"bold": True}), (R.get("moody_date") or "--", {}), (R.get("sp_date") or "--", {}), (R.get("fitch_date") or "--", {})]]
     _table(t, M, Cm(16.95), W, rows2,
            col_w=[Cm(5.0), Cm(4.5), Cm(4.5), Cm(4.7)], row_h=Cm(0.95), font=12)
@@ -465,8 +569,7 @@ def build_focus_pdf(out_path, D):
     for blk in (D.get("ops_blocks") or []):
         ops_flow.append(Paragraph(f'<font color="#1F8AC0"><b>{blk[0]}：</b></font>', st_cell))
         ops_flow.append(Paragraph(str(blk[1]), st_cell))
-    rm = D.get("revenue_mix") or {}
-    png = _donut_png(rm) if rm.get("values") else None
+    png, png_note = _chart_for_revenue_block(D)
     right_flow = []
     if png:
         try:
@@ -478,14 +581,15 @@ def build_focus_pdf(out_path, D):
                 w_ = 8.4 * cm
                 h_ = w_ * ih / iw
             right_flow.append(RLImage(png, width=w_, height=h_))
-            if rm.get("unit_note"):
-                right_flow.append(Paragraph(rm["unit_note"], st_center_s))
+            if png_note:
+                right_flow.append(Paragraph(png_note, st_center_s))
         except Exception as e:
             print(f"[BondFocus] pdf donut embed: {e}")
     else:
-        right_flow.append(Paragraph("（無公開部門別營收資料）", st_center_s))
+        right_flow.append(Paragraph("（暫無可用圖表資料）", st_center_s))
 
-    heads = Table([[Paragraph("<b>營運概況</b>", st_secc), Paragraph("<b>營收結構</b>", st_secc)]],
+    heads = Table([[Paragraph("<b>營運概況</b>", st_secc),
+                    Paragraph(f"<b>{_revenue_block_title(D)}</b>", st_secc)]],
                   colWidths=[W_ / 2, W_ / 2])
     heads.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 1.2, BLUE_),
                                ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
@@ -504,7 +608,7 @@ def build_focus_pdf(out_path, D):
     R = D.get("ratings") or {}
     r2 = [["信用評等", "穆迪", "標普", "惠譽"],
           ["長期評等", R.get("moody") or "--", R.get("sp") or "--", R.get("fitch") or "--"],
-          ["評等展望", R.get("moody_outlook") or "--", R.get("sp_outlook") or "--", R.get("fitch_outlook") or "--"],
+          ["評等展望", _zh_outlook(R.get("moody_outlook")), _zh_outlook(R.get("sp_outlook")), _zh_outlook(R.get("fitch_outlook"))],
           ["最近評等動作", R.get("moody_date") or "--", R.get("sp_date") or "--", R.get("fitch_date") or "--"]]
     t2 = Table(r2, colWidths=[5.0 * cm, 4.3 * cm, 4.3 * cm, 4.4 * cm])
     t2.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), FN), ("FONTSIZE", (0, 0), (-1, -1), 10.5),
