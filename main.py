@@ -2392,14 +2392,23 @@ def handle_text_message(event):
                     }
                     out = f"/tmp/債市每日聚焦_{iss_}_{today_:%Y%m%d}.pptx"
                     build_focus_pptx(out, data)
-                    link = upload_to_drive(out, f"債市每日聚焦_{iss_}_{today_:%Y%m%d}.pptx")
+                    fname_ = f"債市每日聚焦_{iss_}_{today_:%Y%m%d}.pptx"
+                    try:
+                        from pdf_generator import upload_pptx_with_pdf
+                        link, pdf_link = upload_pptx_with_pdf(out, fname_)
+                    except Exception as e:
+                        print(f"[BondFocus] 轉檔上傳失敗,改用一般上傳: {e}")
+                        link, pdf_link = upload_to_drive(out, fname_), None
                     try:
                         os.remove(out)
                     except Exception:
                         pass
-                    bot_api_ref.push_message(chat_id, TextSendMessage(
-                        text=f"📰 {iss_} 債市每日聚焦 PPTX\n（直式兩頁，可直接在 PowerPoint 編輯）\n🔗 {link}\n\n"
-                             "⚠️ 內容由 AI 依公開資訊整理，發布前請人工核對評等、日期與財務數字。"))
+                    msg_f = (f"📰 {iss_} 債市每日聚焦\n\n"
+                             f"📊 PPTX（可編輯）\n{link}\n")
+                    if pdf_link:
+                        msg_f += f"\n📄 PDF（手機預覽用）\n{pdf_link}\n"
+                    msg_f += "\n⚠️ 內容由 AI 依公開資訊整理，發布前請人工核對評等、日期與財務數字。"
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=msg_f))
                 except Exception as e:
                     print(f"[BondFocus ERROR] {e}")
                     print(_traceback.format_exc())
