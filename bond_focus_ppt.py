@@ -190,15 +190,29 @@ def build_focus_pptx(out_path, D):
     _line(s, M, Cm(4.65), Cm(5.6))
     _txt(s, M, Cm(5.05), W, Cm(1.8), D.get("headline", ""), size=22, bold=True, color=DARK, line=1.25)
 
-    bullets = [([("・", {"color": BLUE, "bold": True}), (t, {})], {"space_after": 8})
-               for t in (D.get("news_bullets") or [])]
-    _txt(s, M, Cm(7.1), W, Cm(8.0), bullets, size=15.5, line=1.5)
+    news = [str(x) for x in (D.get("news_bullets") or [])]
+    # 依字數自動縮放:每行約 26 字(15.5pt)、行高約 0.78cm,避免長文壓到下方區塊
+    n_size = 15.5
+    n_chars = sum(len(x) for x in news)
+    if n_chars > 300:
+        n_size = 13.0
+    elif n_chars > 230:
+        n_size = 14.0
+    per_line = int(26 * 15.5 / n_size)
+    n_lines = sum(max(1, -(-len(x) // per_line)) for x in news)
+    news_h = Cm(0.052 * n_size * 1.5) * n_lines + Cm(0.25) * max(0, len(news) - 1)
+    news_h = min(news_h, Cm(8.6))
+    bullets = [([("・", {"color": BLUE, "bold": True}), (t, {})], {"space_after": 7})
+               for t in news]
+    _txt(s, M, Cm(7.1), W, news_h, bullets, size=n_size, line=1.5)
 
-    _txt(s, M, Cm(16.0), Cm(6), Cm(1.0), "焦點債券", size=20, bold=True, color=BLUE)
-    _line(s, M, Cm(17.0), Cm(5.6))
+    # 焦點債券區塊位置隨新聞長度下移(最低不超過 Cm(18.4),確保表格與註記放得下)
+    y_bond = min(Cm(18.4), max(Cm(15.0), Cm(7.1) + news_h + Cm(1.0)))
+    _txt(s, M, y_bond, Cm(6), Cm(1.0), "焦點債券", size=20, bold=True, color=BLUE)
+    _line(s, M, y_bond + Cm(1.0), Cm(5.6))
     if D.get("bond_tagline"):
-        _txt(s, M + Cm(6), Cm(16.1), W - Cm(6), Cm(0.9), D["bond_tagline"], size=14, bold=True,
-             color=NAVY, align=PP_ALIGN.RIGHT)
+        _txt(s, M + Cm(6), y_bond + Cm(0.1), W - Cm(6), Cm(0.9), D["bond_tagline"], size=14,
+             bold=True, color=NAVY, align=PP_ALIGN.RIGHT)
 
     head = [("債券代碼", {}), ("債券名稱", {}), ("票面%", {}), ("YTM%", {}), ("到期日", {})]
     body = []
@@ -208,10 +222,11 @@ def build_focus_pptx(out_path, D):
                      (str(b.get("coupon", "-")), {"color": RED, "bold": True}),
                      (str(b.get("ytm", "-")), {}),
                      (b.get("maturity", "-"), {})])
-    _table(s, M, Cm(17.5), W, [head] + body,
-           col_w=[Cm(4.5), Cm(4.6), Cm(2.5), Cm(2.4), Cm(4.7)],
+    y_tbl = y_bond + Cm(1.5)
+    _table(s, M, y_tbl, W, [head] + body,
+           col_w=[Cm(4.5), Cm(4.3), Cm(2.3), Cm(3.2), Cm(4.4)],
            row_h=Cm(1.05), font=13.5, head_fill=PEACH, body_fill=PEACH)
-    _txt(s, M, Cm(17.5) + Cm(1.05) * (len(body) + 1) + Cm(0.2), W, Cm(0.8),
+    _txt(s, M, y_tbl + Cm(1.05) * (len(body) + 1) + Cm(0.2), W, Cm(0.8),
          "※ 報價與可承作與否以本行系統為準；商品條件依產品說明書。", size=10.5, color=GRAY)
 
     _txt(s, M, Cm(27.8), Cm(8), Cm(0.8), "僅限內部教育訓練使用", size=12.5, bold=True, color=RED)
