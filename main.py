@@ -2390,16 +2390,25 @@ def handle_text_message(event):
                                    "maturity": f"{b['maturity']:%Y/%m/%d}" if b.get("maturity") else "-"}
                                   for b in bonds_],
                     }
-                    out = f"/tmp/債市每日聚焦_{iss_}_{today_:%Y%m%d}.pptx"
+                    base_ = f"債市每日聚焦_{iss_}_{today_:%Y%m%d}"
+                    out = f"/tmp/{base_}.pptx"
                     build_focus_pptx(out, data)
-                    fname_ = f"債市每日聚焦_{iss_}_{today_:%Y%m%d}.pptx"
-                    pdf_err = ""
+                    link = upload_to_drive(out, base_ + ".pptx")
+                    # PDF 由本機直接產出(reportlab),不依賴 Google 轉檔
+                    pdf_link, pdf_err = None, ""
                     try:
-                        from pdf_generator import upload_pptx_with_pdf
-                        link, pdf_link, pdf_err = upload_pptx_with_pdf(out, fname_)
+                        from bond_focus_ppt import build_focus_pdf
+                        out_pdf = f"/tmp/{base_}.pdf"
+                        build_focus_pdf(out_pdf, data)
+                        pdf_link = upload_to_drive(out_pdf, base_ + ".pdf")
+                        try:
+                            os.remove(out_pdf)
+                        except Exception:
+                            pass
                     except Exception as e:
-                        print(f"[BondFocus] 轉檔上傳失敗,改用一般上傳: {e}")
-                        link, pdf_link, pdf_err = upload_to_drive(out, fname_), None, f"{type(e).__name__}: {str(e)[:120]}"
+                        print(f"[BondFocus] PDF 產生失敗: {e}")
+                        print(_traceback.format_exc()[:500])
+                        pdf_err = f"{type(e).__name__}: {str(e)[:120]}"
                     try:
                         os.remove(out)
                     except Exception:
@@ -2409,7 +2418,7 @@ def handle_text_message(event):
                     if pdf_link:
                         msg_f += f"\n📄 PDF（手機預覽用）\n{pdf_link}\n"
                     elif pdf_err:
-                        msg_f += f"\n（PDF 轉檔未成功：{pdf_err}）\n"
+                        msg_f += f"\n（PDF 產生失敗：{pdf_err}）\n"
                     msg_f += "\n⚠️ 內容由 AI 依公開資訊整理，發布前請人工核對評等、日期與財務數字。"
                     bot_api_ref.push_message(chat_id, TextSendMessage(text=msg_f))
                 except Exception as e:
