@@ -1,152 +1,305 @@
 # -*- coding: utf-8 -*-
 """
 bond_focus_ppt.py — 「債市每日聚焦 / 富邦好債報」PPTX 產生器（直式 A4，兩頁）
-=========================================================================
-用法：
-    from bond_focus_ppt import build_focus_pptx
-    path = build_focus_pptx(out_path, data)
-
-data 需要的欄位（全部由 main.py 準備，避免本模組自行臆測）：
-    issuer, issuer_en, intro, headline, news_bullets[list],
-    ops_blocks[[標題, 內文], ...], revenue_mix{labels, values, unit_note},
-    ratings{moody, sp, fitch, moody_outlook, sp_outlook, fitch_outlook, moody_date, sp_date, fitch_date},
-    agency_comments[[機構, 評析], ...], bonds[list of dict], date_str
+使用 python-pptx（與 /report 相同的套件，不需 Node）
 """
-import json
+from pptx import Presentation
+from pptx.util import Cm, Pt, Emu
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 import os
-import subprocess
 import tempfile
 
-TEMPLATE = r"""
-const pptxgen = require("pptxgenjs");
-const D = __DATA__;
-const p = new pptxgen();
-p.defineLayout({ name: "A4P", width: 8.27, height: 11.69 });
-p.layout = "A4P";
-const NAVY="1F4E79", BLUE="1F8AC0", TEAL="169B9B", GRAY="595959", RED="C00000";
-const F="Microsoft JhengHei";
-const M=0.45, W=8.27-2*M;
+NAVY = RGBColor(0x1F, 0x4E, 0x79)
+BLUE = RGBColor(0x1F, 0x8A, 0xC0)
+DEEP = RGBColor(0x1B, 0x7F, 0xA8)
+TEAL = RGBColor(0x16, 0x9B, 0x9B)
+GRAY = RGBColor(0x59, 0x59, 0x59)
+RED = RGBColor(0xC0, 0x00, 0x00)
+DARK = RGBColor(0x33, 0x33, 0x33)
+WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+PEACH = RGBColor(0xFD, 0xF2, 0xEC)
+F = "Microsoft JhengHei"
 
-// ===== P1 債市每日聚焦 =====
-let s = p.addSlide();
-s.addText("🔍", { x:M, y:0.30, w:0.75, h:0.6, fontSize:30, isTextBox:true });
-s.addText("債市每日聚焦", { x:M+0.72, y:0.28, w:5.2, h:0.65, fontSize:34, bold:true, color:NAVY, fontFace:F, isTextBox:true });
-s.addShape(p.ShapeType.rect, { x:M, y:0.98, w:W, h:0.30, fill:{color:BLUE} });
-s.addText(D.date_str, { x:M, y:0.98, w:W-0.15, h:0.30, fontSize:14, bold:true, color:"FFFFFF", align:"right", fontFace:F, isTextBox:true, margin:0 });
-
-s.addText("焦點新聞", { x:M, y:1.45, w:2.2, h:0.38, fontSize:18, bold:true, color:BLUE, fontFace:F, isTextBox:true });
-s.addShape(p.ShapeType.line, { x:M, y:1.86, w:2.1, h:0, line:{color:BLUE, width:2} });
-s.addText(D.headline, { x:M, y:2.02, w:W, h:0.62, fontSize:19, bold:true, color:"222222", fontFace:F, isTextBox:true });
-
-const nb = D.news_bullets.map((t,i)=>({ text:t, options:{ bullet:true, breakLine:i<D.news_bullets.length-1, paraSpaceAfter:10 } }));
-s.addText(nb, { x:M, y:2.72, w:W, h:3.1, fontSize:13, color:"333333", fontFace:F, lineSpacing:21, isTextBox:true });
-
-s.addText("焦點債券", { x:M, y:6.15, w:2.2, h:0.38, fontSize:18, bold:true, color:BLUE, fontFace:F, isTextBox:true });
-s.addShape(p.ShapeType.line, { x:M, y:6.56, w:2.1, h:0, line:{color:BLUE, width:2} });
-if (D.bond_tagline) s.addText(D.bond_tagline, { x:M+2.3, y:6.15, w:W-2.3, h:0.38, fontSize:13.5, bold:true, color:NAVY, align:"right", fontFace:F, isTextBox:true });
-
-const head = ["債券代碼","債券名稱","票面利率%","YTM%","到期日"].map(t=>({text:t, options:{bold:true}}));
-const rows = [head].concat(D.bonds.map(b=>[
-  b.code,
-  { text:b.name, options:{ color:TEAL, bold:true } },
-  { text:String(b.coupon), options:{ color:RED, bold:true } },
-  String(b.ytm), b.maturity ]));
-s.addTable(rows, { x:M, y:6.75, w:7.37, colW:[1.95,2.05,1.15,0.95,1.27], rowH:0.34,
-  fontSize:12, fontFace:F, align:"center", valign:"middle",
-  border:{type:"solid", color:"D9D9D9", pt:0.5}, fill:{color:"FDF2EC"} });
-s.addText("※ 報價與可承作與否以本行系統為準；商品條件依產品說明書。",
-  { x:M, y:6.79+0.34*rows.length, w:W, h:0.3, fontSize:10, color:GRAY, fontFace:F, isTextBox:true });
-
-s.addText("僅限內部教育訓練使用", { x:M, y:11.05, w:3.2, h:0.3, fontSize:13, bold:true, color:RED, fontFace:F, isTextBox:true });
-s.addText("台北富邦銀行", { x:M, y:11.05, w:W, h:0.3, fontSize:13, bold:true, color:NAVY, align:"right", fontFace:F, isTextBox:true });
-
-// ===== P2 富邦好債報 =====
-let t = p.addSlide();
-t.background = { color:"FFFFFF" };   // 白底(對照底稿)
-t.addShape(p.ShapeType.roundRect, { x:1.35, y:0.28, w:5.55, h:0.66, fill:{color:"1B7FA8"}, rectRadius:0.06 });
-t.addText("富邦好債報", { x:1.35, y:0.28, w:5.55, h:0.66, fontSize:26, bold:true, color:"FFFFFF", align:"center", fontFace:F, isTextBox:true, charSpacing:6 });
-t.addText(D.issuer, { x:M, y:1.05, w:W, h:0.45, fontSize:26, bold:true, color:"222222", align:"center", fontFace:F, isTextBox:true });
-t.addText(D.issuer_en, { x:M, y:1.48, w:W, h:0.3, fontSize:14, bold:true, color:GRAY, align:"center", fontFace:F, isTextBox:true });
-
-t.addShape(p.ShapeType.roundRect, { x:M, y:1.85, w:W, h:1.15, fill:{color:"FFFFFF"}, line:{color:BLUE, width:1}, rectRadius:0.08 });
-t.addText(D.intro, { x:M+0.12, y:1.93, w:W-0.24, h:1.0, fontSize:12, color:"333333", fontFace:F, lineSpacing:19, valign:"top", isTextBox:true });
-
-t.addText("營運概況", { x:M, y:3.02, w:3.6, h:0.42, fontSize:21, bold:true, color:NAVY, align:"center", fontFace:F, isTextBox:true });
-t.addShape(p.ShapeType.line, { x:M+0.35, y:3.44, w:2.9, h:0, line:{color:BLUE, width:1.5} });
-t.addShape(p.ShapeType.roundRect, { x:M, y:3.54, w:3.6, h:2.36, fill:{color:"FFFFFF"}, line:{color:BLUE, width:1}, rectRadius:0.08 });
-let ops=[];
-D.ops_blocks.forEach((blk,i)=>{
-  ops.push({ text:blk[0]+"：", options:{ bold:true, color:BLUE, breakLine:true } });
-  ops.push({ text:blk[1], options:{ breakLine:i<D.ops_blocks.length-1, paraSpaceAfter:8 } });
-});
-t.addText(ops, { x:M+0.12, y:3.62, w:3.36, h:2.2, fontSize:11, color:"333333", fontFace:F, lineSpacing:16, valign:"top", isTextBox:true });
-
-t.addText("營收結構", { x:4.25, y:3.02, w:3.57, h:0.42, fontSize:21, bold:true, color:NAVY, align:"center", fontFace:F, isTextBox:true });
-t.addShape(p.ShapeType.line, { x:4.60, y:3.44, w:2.87, h:0, line:{color:BLUE, width:1.5} });
-t.addShape(p.ShapeType.roundRect, { x:4.25, y:3.54, w:3.57, h:2.36, fill:{color:"FFFFFF"}, line:{color:BLUE, width:1}, rectRadius:0.08 });
-if (D.revenue_mix && D.revenue_mix.values && D.revenue_mix.values.length) {
-  t.addChart(p.ChartType.doughnut,
-    [{ name:"營收結構", labels:D.revenue_mix.labels, values:D.revenue_mix.values }],
-    { x:4.28, y:3.50, w:3.51, h:2.08, holeSize:30, showLegend:true, legendPos:"b", legendFontSize:8.5,
-      chartColors:["169B9B","1F8AC0","BFBFBF","7F7F7F"], showValue:false, showPercent:true,
-      dataLabelFontSize:11, dataLabelColor:"333333", dataLabelPosition:"outEnd", fontFace:F });
-  t.addText(D.revenue_mix.unit_note||"", { x:4.28, y:5.60, w:3.51, h:0.26, fontSize:8.5, color:GRAY, align:"center", fontFace:F, isTextBox:true });
-} else {
-  t.addText("（無公開部門別營收資料）", { x:4.25, y:4.4, w:3.57, h:0.4, fontSize:12, color:GRAY, align:"center", fontFace:F, isTextBox:true });
-}
-
-t.addText("信用評等", { x:M, y:5.92, w:W, h:0.42, fontSize:21, bold:true, color:NAVY, align:"center", fontFace:F, isTextBox:true });
-t.addShape(p.ShapeType.line, { x:2.6, y:6.34, w:3.1, h:0, line:{color:BLUE, width:1.5} });
-const R=D.ratings||{};
-const r2 = [
- ["信用評等","穆迪","標普","惠譽"].map(x=>({text:x,options:{bold:true}})),
- ["長期評等", R.moody||"--", R.sp||"--", R.fitch||"--"],
- ["評等展望", R.moody_outlook||"--", R.sp_outlook||"--", R.fitch_outlook||"--"],
- ["最近評等動作", R.moody_date||"--", R.sp_date||"--", R.fitch_date||"--"],
-];
-t.addTable(r2, { x:M, y:6.46, w:W, colW:[2.2,1.72,1.72,1.73], rowH:0.32, fontSize:12, fontFace:F,
-  align:"center", valign:"middle", border:{type:"solid", color:"D9D9D9", pt:0.5} });
-
-t.addText("信評公司評析", { x:M, y:7.78, w:W, h:0.42, fontSize:21, bold:true, color:NAVY, align:"center", fontFace:F, isTextBox:true });
-t.addShape(p.ShapeType.line, { x:2.6, y:8.20, w:3.1, h:0, line:{color:BLUE, width:1.5} });
-// 依文字量估算卡片高度(每行約 44 個中文字,每行 0.19")
-const acChars = D.agency_comments.reduce((a,c)=>a+String(c[0]).length+String(c[1]).length, 0);
-const acLines = Math.ceil(acChars/42) + D.agency_comments.length;
-const acH = Math.max(1.05, Math.min(2.42, acLines*0.20 + 0.28));
-t.addShape(p.ShapeType.roundRect, { x:M, y:8.30, w:W, h:acH, fill:{color:"FFFFFF"}, line:{color:BLUE, width:1}, rectRadius:0.08 });
-let ac=[];
-D.agency_comments.forEach((c,i)=>{
-  ac.push({ text:c[0]+"－", options:{ bold:true, color:BLUE } });
-  ac.push({ text:c[1], options:{ breakLine:i<D.agency_comments.length-1, paraSpaceAfter:9 } });
-});
-t.addText(ac, { x:M+0.12, y:8.38, w:W-0.24, h:acH-0.14, fontSize:11, color:"333333", fontFace:F, lineSpacing:17, valign:"top", isTextBox:true });
-
-t.addText(D.source_note||"", { x:M, y:8.30+acH+0.08, w:W, h:0.22, fontSize:8.5, color:GRAY, fontFace:F, isTextBox:true });
-t.addText("「本內容僅供參考且不構成要約或要約引誘。特定標的之商品風險、申購之條件、限制與費用及其他相關權利義務，應依產品說明暨投資風險預告書等相關文件為準。」",
-  { x:M, y:8.30+acH+0.28, w:W, h:0.35, fontSize:8.5, color:GRAY, fontFace:F, isTextBox:true });
-t.addText("僅限內部教育訓練使用", { x:M, y:11.30, w:3.2, h:0.28, fontSize:12, bold:true, color:RED, fontFace:F, isTextBox:true });
-t.addText("台北富邦銀行", { x:M, y:11.30, w:W, h:0.28, fontSize:12, bold:true, color:NAVY, align:"right", fontFace:F, isTextBox:true });
-
-p.writeFile({ fileName: __OUT__ }).then(()=>console.log("OK"));
-"""
+PAGE_W, PAGE_H = Cm(21.0), Cm(29.7)
+M = Cm(1.15)
+W = PAGE_W - 2 * M
 
 
-def build_focus_pptx(out_path, data):
-    """產生 PPTX，回傳路徑；失敗丟例外"""
-    js = (TEMPLATE
-          .replace("__DATA__", json.dumps(data, ensure_ascii=False))
-          .replace("__OUT__", json.dumps(out_path, ensure_ascii=False)))
-    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
-        f.write(js)
-        js_path = f.name
-    try:
-        r = subprocess.run(["node", js_path], capture_output=True, text=True, timeout=120,
-                           cwd=os.path.dirname(os.path.abspath(out_path)) or ".")
-        if r.returncode != 0 or not os.path.exists(out_path):
-            raise RuntimeError((r.stderr or r.stdout or "node failed")[:400])
-        return out_path
-    finally:
+def _txt(slide, x, y, w, h, runs, size=12, color=DARK, bold=False, align=PP_ALIGN.LEFT,
+         line=1.35, anchor=MSO_ANCHOR.TOP, space_after=4):
+    """runs: str 或 [(文字, {bold, color, size}), ...]；每個 tuple 為一個段落"""
+    tb = slide.shapes.add_textbox(x, y, w, h)
+    tf = tb.text_frame
+    tf.word_wrap = True
+    tf.vertical_anchor = anchor
+    tf.margin_left = tf.margin_right = Cm(0.1)
+    tf.margin_top = tf.margin_bottom = 0
+    items = [(runs, {})] if isinstance(runs, str) else runs
+    for i, item in enumerate(items):
+        text, opt = (item if isinstance(item, tuple) else (item, {}))
+        para = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        para.alignment = align
+        para.line_spacing = line
+        para.space_after = Pt(opt.get("space_after", space_after))
+        for j, seg in enumerate(text if isinstance(text, list) else [(text, {})]):
+            s_text, s_opt = (seg if isinstance(seg, tuple) else (seg, {}))
+            r = para.add_run()
+            r.text = s_text
+            r.font.name = F
+            r.font.size = Pt(s_opt.get("size", opt.get("size", size)))
+            r.font.bold = s_opt.get("bold", opt.get("bold", bold))
+            r.font.color.rgb = s_opt.get("color", opt.get("color", color))
+    return tb
+
+
+def _rect(slide, x, y, w, h, fill=None, line_color=None, line_w=1.0):
+    from pptx.enum.shapes import MSO_SHAPE
+    sh = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, w, h)
+    sh.adjustments[0] = 0.04
+    if fill:
+        sh.fill.solid()
+        sh.fill.fore_color.rgb = fill
+    else:
+        sh.fill.background()
+    if line_color:
+        sh.line.color.rgb = line_color
+        sh.line.width = Pt(line_w)
+    else:
+        sh.line.fill.background()
+    sh.shadow.inherit = False
+    return sh
+
+
+def _line(slide, x, y, w, color=BLUE, width=1.6):
+    from pptx.enum.shapes import MSO_CONNECTOR
+    ln = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x, y, x + w, y)
+    ln.line.color.rgb = color
+    ln.line.width = Pt(width)
+    return ln
+
+
+def _table(slide, x, y, w, rows_data, col_w, row_h=Cm(1.0), font=12,
+           head_fill=None, body_fill=None, head_color=NAVY):
+    rows, cols = len(rows_data), len(rows_data[0])
+    tb = slide.shapes.add_table(rows, cols, x, y, w, row_h * rows).table
+    for j, cw in enumerate(col_w):
+        tb.columns[j].width = cw
+    for i, row in enumerate(rows_data):
+        tb.rows[i].height = row_h
+        for j, cell in enumerate(row):
+            text, opt = (cell if isinstance(cell, tuple) else (cell, {}))
+            c = tb.cell(i, j)
+            c.text = str(text)
+            c.vertical_anchor = MSO_ANCHOR.MIDDLE
+            c.margin_left = c.margin_right = Cm(0.08)
+            c.margin_top = c.margin_bottom = 0
+            p = c.text_frame.paragraphs[0]
+            p.alignment = PP_ALIGN.CENTER
+            for r in p.runs:
+                r.font.name = F
+                r.font.size = Pt(opt.get("size", font))
+                r.font.bold = opt.get("bold", i == 0)
+                r.font.color.rgb = opt.get("color", head_color if i == 0 else DARK)
+            c.fill.solid()
+            c.fill.fore_color.rgb = (head_fill or RGBColor(0xEA, 0xF3, 0xFA)) if i == 0 else (body_fill or WHITE)
+    return tb
+
+
+def _cjk_font():
+    """找中文字型(與 bond_sheet 共用邏輯)"""
+    base = os.path.dirname(os.path.abspath(__file__))
+    import glob
+    cands = [os.getenv("BOND_SHEET_FONT", "")]
+    for n in ("NotoSansTC-Regular.ttf", "NotoSansTC.ttf", "msjh.ttf"):
+        cands += [os.path.join(base, "fonts", n), os.path.join(base, n)]
+    cands += ["/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+              "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"]
+    cands += sorted(glob.glob(os.path.join(base, "fonts", "*.tt*")))
+    for c in cands:
         try:
-            os.remove(js_path)
+            if c and os.path.exists(c) and os.path.getsize(c) > 50 * 1024:
+                return c
         except Exception:
             pass
+    return None
+
+
+def _donut_png(rm):
+    """用 matplotlib 畫營收結構甜甜圈,回傳暫存 PNG 路徑(失敗回 None)"""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib import font_manager
+        fp = _cjk_font()
+        PROP = None
+        if fp:
+            try:
+                PROP = font_manager.FontProperties(fname=fp)
+                font_manager.fontManager.addfont(fp)
+                matplotlib.rcParams["font.family"] = PROP.get_name()
+            except Exception:
+                PROP = None
+        labels = list(rm.get("labels") or [])
+        values = [float(v) for v in rm.get("values") or []]
+        if not values:
+            return None
+        colors = ["#169B9B", "#1F8AC0", "#BFBFBF", "#7F7F7F", "#4472C4"]
+        fig, ax = plt.subplots(figsize=(4.2, 3.4), dpi=170)
+        total = sum(values)
+        wedges, _texts, autotexts = ax.pie(
+            values, startangle=90, counterclock=False,
+            colors=colors[:len(values)], wedgeprops=dict(width=0.42, edgecolor="white"),
+            autopct=lambda pct: f"{pct:.0f}%" if pct >= 5 else "",
+            pctdistance=0.78, textprops={"fontsize": 13, "color": "white",
+                                         "fontproperties": PROP, "weight": "bold"})
+        ax.legend(wedges, labels, loc="lower center", bbox_to_anchor=(0.5, -0.22),
+                  ncol=2, frameon=False, fontsize=9,
+                  prop=(PROP.copy() if PROP else None))
+        if PROP:
+            for lg in ax.get_legend().get_texts():
+                lg.set_fontproperties(PROP)
+                lg.set_fontsize(9)
+        ax.set(aspect="equal")
+        fig.tight_layout(pad=0.3)
+        f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        fig.savefig(f.name, bbox_inches="tight", facecolor="white", transparent=False)
+        plt.close(fig)
+        return f.name
+    except Exception as e:
+        print(f"[BondFocus] donut fail: {e}")
+        return None
+
+
+def build_focus_pptx(out_path, D):
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = PAGE_W, PAGE_H
+    blank = prs.slide_layouts[6]
+
+    # ================= P1 債市每日聚焦 =================
+    s = prs.slides.add_slide(blank)
+    _txt(s, M, Cm(0.75), Cm(1.6), Cm(1.4), "🔍", size=26)
+    _txt(s, M + Cm(1.6), Cm(0.7), Cm(12), Cm(1.5), "債市每日聚焦", size=30, bold=True, color=NAVY)
+    bar = s.shapes.add_shape(1, M, Cm(2.5), W, Cm(0.78))
+    bar.fill.solid(); bar.fill.fore_color.rgb = BLUE; bar.line.fill.background(); bar.shadow.inherit = False
+    _txt(s, M, Cm(2.58), W - Cm(0.3), Cm(0.7), D.get("date_str", ""), size=13, bold=True,
+         color=WHITE, align=PP_ALIGN.RIGHT)
+
+    _txt(s, M, Cm(3.65), Cm(6), Cm(1.0), "焦點新聞", size=20, bold=True, color=BLUE)
+    _line(s, M, Cm(4.65), Cm(5.6))
+    _txt(s, M, Cm(5.05), W, Cm(1.8), D.get("headline", ""), size=22, bold=True, color=DARK, line=1.25)
+
+    bullets = [([("・", {"color": BLUE, "bold": True}), (t, {})], {"space_after": 8})
+               for t in (D.get("news_bullets") or [])]
+    _txt(s, M, Cm(7.1), W, Cm(8.0), bullets, size=15.5, line=1.5)
+
+    _txt(s, M, Cm(16.0), Cm(6), Cm(1.0), "焦點債券", size=20, bold=True, color=BLUE)
+    _line(s, M, Cm(17.0), Cm(5.6))
+    if D.get("bond_tagline"):
+        _txt(s, M + Cm(6), Cm(16.1), W - Cm(6), Cm(0.9), D["bond_tagline"], size=14, bold=True,
+             color=NAVY, align=PP_ALIGN.RIGHT)
+
+    head = [("債券代碼", {}), ("債券名稱", {}), ("票面%", {}), ("YTM%", {}), ("到期日", {})]
+    body = []
+    for b in D.get("bonds", []):
+        body.append([(b.get("code", "-"), {}),
+                     (b.get("name", "-"), {"color": TEAL, "bold": True}),
+                     (str(b.get("coupon", "-")), {"color": RED, "bold": True}),
+                     (str(b.get("ytm", "-")), {}),
+                     (b.get("maturity", "-"), {})])
+    _table(s, M, Cm(17.5), W, [head] + body,
+           col_w=[Cm(4.5), Cm(4.6), Cm(2.5), Cm(2.4), Cm(4.7)],
+           row_h=Cm(1.05), font=13.5, head_fill=PEACH, body_fill=PEACH)
+    _txt(s, M, Cm(17.5) + Cm(1.05) * (len(body) + 1) + Cm(0.2), W, Cm(0.8),
+         "※ 報價與可承作與否以本行系統為準；商品條件依產品說明書。", size=10.5, color=GRAY)
+
+    _txt(s, M, Cm(27.8), Cm(8), Cm(0.8), "僅限內部教育訓練使用", size=12.5, bold=True, color=RED)
+    _txt(s, M, Cm(27.8), W, Cm(0.8), "台北富邦銀行", size=12.5, bold=True, color=NAVY, align=PP_ALIGN.RIGHT)
+
+    # ================= P2 富邦好債報 =================
+    t = prs.slides.add_slide(blank)
+    _rect(t, Cm(3.4), Cm(0.7), Cm(14.2), Cm(1.7), fill=DEEP)
+    _txt(t, Cm(3.4), Cm(0.95), Cm(14.2), Cm(1.2), "富 邦 好 債 報", size=24, bold=True,
+         color=WHITE, align=PP_ALIGN.CENTER)
+    _txt(t, M, Cm(2.7), W, Cm(1.2), D.get("issuer", ""), size=24, bold=True, align=PP_ALIGN.CENTER)
+    _txt(t, M, Cm(3.85), W, Cm(0.8), D.get("issuer_en", ""), size=13, bold=True,
+         color=GRAY, align=PP_ALIGN.CENTER)
+
+    _rect(t, M, Cm(4.75), W, Cm(3.0), fill=WHITE, line_color=BLUE)
+    _txt(t, M + Cm(0.3), Cm(4.95), W - Cm(0.6), Cm(2.6), D.get("intro", ""), size=12, line=1.45)
+
+    # 營運概況 / 營收結構
+    half = (W - Cm(0.5)) / 2
+    _txt(t, M, Cm(8.0), half, Cm(1.0), "營運概況", size=19, bold=True, color=NAVY, align=PP_ALIGN.CENTER)
+    _line(t, M + Cm(1.2), Cm(9.0), half - Cm(2.4))
+    _rect(t, M, Cm(9.25), half, Cm(6.0), fill=WHITE, line_color=BLUE)
+    ops = []
+    for blk in (D.get("ops_blocks") or []):
+        ops.append(([(str(blk[0]) + "：", {"bold": True, "color": BLUE})], {"space_after": 2}))
+        ops.append(([(str(blk[1]), {})], {"space_after": 8}))
+    _txt(t, M + Cm(0.25), Cm(9.45), half - Cm(0.5), Cm(5.6), ops, size=11, line=1.4)
+
+    x2 = M + half + Cm(0.5)
+    _txt(t, x2, Cm(8.0), half, Cm(1.0), "營收結構", size=19, bold=True, color=NAVY, align=PP_ALIGN.CENTER)
+    _line(t, x2 + Cm(1.2), Cm(9.0), half - Cm(2.4))
+    _rect(t, x2, Cm(9.25), half, Cm(6.0), fill=WHITE, line_color=BLUE)
+    rm = D.get("revenue_mix") or {}
+    png = _donut_png(rm) if rm.get("values") else None
+    if png:
+        # 以高度為準置中,避免圖超出卡片
+        try:
+            from PIL import Image as _PIL
+            iw, ih = _PIL.open(png).size
+            img_h = Cm(4.7)
+            img_w = int(img_h * iw / ih)
+            if img_w > half - Cm(0.4):
+                img_w = half - Cm(0.4)
+                img_h = int(img_w * ih / iw)
+            t.shapes.add_picture(png, x2 + (half - img_w) // 2, Cm(9.5), width=img_w, height=img_h)
+        except Exception:
+            t.shapes.add_picture(png, x2 + Cm(0.6), Cm(9.5), height=Cm(4.7))
+        _txt(t, x2, Cm(14.55), half, Cm(0.7), rm.get("unit_note", ""), size=9, color=GRAY,
+             align=PP_ALIGN.CENTER)
+        try:
+            os.remove(png)
+        except Exception:
+            pass
+    else:
+        _txt(t, x2, Cm(11.8), half, Cm(1.0), "（無公開部門別營收資料）", size=12, color=GRAY,
+             align=PP_ALIGN.CENTER)
+
+    # 信用評等
+    _txt(t, M, Cm(15.6), W, Cm(1.0), "信用評等", size=19, bold=True, color=NAVY, align=PP_ALIGN.CENTER)
+    _line(t, M + Cm(6.0), Cm(16.6), W - Cm(12.0))
+    R = D.get("ratings") or {}
+    rows2 = [[("信用評等", {}), ("穆迪", {}), ("標普", {}), ("惠譽", {})],
+             [("長期評等", {"bold": True}), (R.get("moody") or "--", {}), (R.get("sp") or "--", {}), (R.get("fitch") or "--", {})],
+             [("評等展望", {"bold": True}), (R.get("moody_outlook") or "--", {}), (R.get("sp_outlook") or "--", {}), (R.get("fitch_outlook") or "--", {})],
+             [("最近評等動作", {"bold": True}), (R.get("moody_date") or "--", {}), (R.get("sp_date") or "--", {}), (R.get("fitch_date") or "--", {})]]
+    _table(t, M, Cm(16.95), W, rows2,
+           col_w=[Cm(5.0), Cm(4.5), Cm(4.5), Cm(4.7)], row_h=Cm(0.95), font=12)
+
+    # 信評公司評析（高度依內容自動調整）
+    _txt(t, M, Cm(21.1), W, Cm(1.0), "信評公司評析", size=19, bold=True, color=NAVY, align=PP_ALIGN.CENTER)
+    _line(t, M + Cm(6.0), Cm(22.1), W - Cm(12.0))
+    ac = []
+    for c in (D.get("agency_comments") or []):
+        ac.append(([(str(c[0]) + "－", {"bold": True, "color": BLUE}), (str(c[1]), {})], {"space_after": 7}))
+    chars = sum(len(str(c[0])) + len(str(c[1])) for c in (D.get("agency_comments") or []))
+    lines = -(-chars // 40) + len(D.get("agency_comments") or [])
+    ac_h = min(Cm(5.6), max(Cm(2.4), Cm(0.62) * lines + Cm(0.7)))
+    _rect(t, M, Cm(22.5), W, ac_h, fill=WHITE, line_color=BLUE)
+    _txt(t, M + Cm(0.25), Cm(22.7), W - Cm(0.5), ac_h - Cm(0.4), ac, size=11, line=1.4)
+
+    y_note = Cm(22.5) + ac_h + Cm(0.15)
+    _txt(t, M, y_note, W, Cm(0.6), D.get("source_note", ""), size=8.5, color=GRAY)
+    _txt(t, M, y_note + Cm(0.55), W, Cm(1.0),
+         "「本內容僅供參考且不構成要約或要約引誘。特定標的之商品風險、申購之條件、限制與費用及其他相關權利義務，"
+         "應依產品說明暨投資風險預告書等相關文件為準。」", size=8.5, color=GRAY, line=1.25)
+
+    _txt(t, M, Cm(28.3), Cm(8), Cm(0.8), "僅限內部教育訓練使用", size=12, bold=True, color=RED)
+    _txt(t, M, Cm(28.3), W, Cm(0.8), "台北富邦銀行", size=12, bold=True, color=NAVY, align=PP_ALIGN.RIGHT)
+
+    prs.save(out_path)
+    return out_path
