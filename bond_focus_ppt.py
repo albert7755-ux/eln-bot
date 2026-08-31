@@ -318,3 +318,232 @@ def build_focus_pptx(out_path, D):
 
     prs.save(out_path)
     return out_path
+
+
+# ================= PDF 版（reportlab 直接產，不依賴 Drive 轉檔）=================
+def build_focus_pdf(out_path, D):
+    """與 PPTX 相同版型的 PDF（直式 A4 兩頁）。成功回傳路徑。"""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
+                                    TableStyle, PageBreak, Image as RLImage)
+    from reportlab.lib.styles import ParagraphStyle
+
+    # 字型
+    fp = _cjk_font()
+    FN = "MSung-Light"
+    if fp:
+        try:
+            pdfmetrics.registerFont(TTFont("CJK", fp, subfontIndex=0))
+            FN = "CJK"
+        except Exception as e:
+            print(f"[BondFocus] PDF font fail: {e}")
+            pdfmetrics.registerFont(UnicodeCIDFont("MSung-Light"))
+    else:
+        pdfmetrics.registerFont(UnicodeCIDFont("MSung-Light"))
+
+    NAVY_ = colors.HexColor("#1F4E79")
+    BLUE_ = colors.HexColor("#1F8AC0")
+    DEEP_ = colors.HexColor("#1B7FA8")
+    TEAL_ = colors.HexColor("#169B9B")
+    GRAY_ = colors.HexColor("#595959")
+    RED_ = colors.HexColor("#C00000")
+    PEACH_ = colors.HexColor("#FDF2EC")
+
+    W_ = 18.0 * cm
+    st_h1 = ParagraphStyle("h1", fontName=FN, fontSize=26, leading=32, textColor=NAVY_)
+    st_sec = ParagraphStyle("sec", fontName=FN, fontSize=17, leading=22, textColor=BLUE_,
+                            spaceBefore=10, spaceAfter=5)
+    st_secc = ParagraphStyle("secc", fontName=FN, fontSize=14, leading=18, textColor=NAVY_,
+                             alignment=1, spaceBefore=6, spaceAfter=3)
+    st_head = ParagraphStyle("hd", fontName=FN, fontSize=20, leading=27, textColor=colors.HexColor("#222222"))
+    st_body = ParagraphStyle("bd", fontName=FN, fontSize=14.5, leading=24,
+                             textColor=colors.HexColor("#333333"), spaceAfter=10)
+    st_small = ParagraphStyle("sm", fontName=FN, fontSize=8.5, leading=12, textColor=GRAY_)
+    st_cell = ParagraphStyle("cl", fontName=FN, fontSize=10.5, leading=14,
+                             textColor=colors.HexColor("#333333"))
+    st_white = ParagraphStyle("wt", fontName=FN, fontSize=16, leading=20,
+                              textColor=colors.white, alignment=1)
+    st_center = ParagraphStyle("ct", fontName=FN, fontSize=17, leading=22, alignment=1)
+    st_center_s = ParagraphStyle("cts", fontName=FN, fontSize=10.5, leading=14,
+                                 alignment=1, textColor=GRAY_)
+
+    def sec_bar(title, color=BLUE_, center=False):
+        t = Table([[Paragraph(f"<b>{title}</b>", st_secc if center else st_sec)]], colWidths=[W_])
+        t.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 1.2, color),
+                               ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                               ("BOTTOMPADDING", (0, 0), (-1, -1), 1)]))
+        return t
+
+    doc = SimpleDocTemplate(out_path, pagesize=A4,
+                            leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                            topMargin=1.2 * cm, bottomMargin=1.0 * cm)
+    el = []
+
+    # ---------- P1 ----------
+    el.append(Paragraph("🔍 <b>債市每日聚焦</b>", st_h1))
+    band = Table([[Paragraph(f"<b>{D.get('date_str','')}</b>",
+                             ParagraphStyle("bn", fontName=FN, fontSize=13, leading=17,
+                                            textColor=colors.white, alignment=2))]], colWidths=[W_])
+    band.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), BLUE_),
+                              ("TOPPADDING", (0, 0), (-1, -1), 4),
+                              ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                              ("RIGHTPADDING", (0, 0), (-1, -1), 6)]))
+    el.append(Spacer(1, 0.15 * cm))
+    el.append(band)
+    el.append(Spacer(1, 0.4 * cm))
+
+    el.append(sec_bar("焦點新聞"))
+    el.append(Paragraph(f"<b>{D.get('headline','')}</b>", st_head))
+    el.append(Spacer(1, 0.3 * cm))
+    for t in (D.get("news_bullets") or []):
+        el.append(Paragraph(f'<font color="#1F8AC0">・</font>{t}', st_body))
+
+    el.append(Spacer(1, 0.35 * cm))
+    tag = D.get("bond_tagline") or ""
+    hdr_row = Table([[Paragraph("<b>焦點債券</b>", st_sec),
+                      Paragraph(f"<b>{tag}</b>",
+                                ParagraphStyle("tg", fontName=FN, fontSize=14, leading=19,
+                                               textColor=NAVY_, alignment=2))]],
+                    colWidths=[W_ * 0.42, W_ * 0.58])
+    hdr_row.setStyle(TableStyle([("LINEBELOW", (0, 0), (0, 0), 1.2, BLUE_),
+                                 ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                 ("VALIGN", (0, 0), (-1, -1), "BOTTOM")]))
+    el.append(hdr_row)
+    el.append(Spacer(1, 0.2 * cm))
+
+    rows = [["債券代碼", "債券名稱", "票面%", "YTM%", "到期日"]]
+    for b in (D.get("bonds") or []):
+        rows.append([b.get("code", "-"), b.get("name", "-"), str(b.get("coupon", "-")),
+                     str(b.get("ytm", "-")), b.get("maturity", "-")])
+    tb = Table(rows, colWidths=[4.5 * cm, 4.3 * cm, 2.3 * cm, 3.0 * cm, 3.9 * cm], repeatRows=1)
+    tb_style = [("FONTNAME", (0, 0), (-1, -1), FN), ("FONTSIZE", (0, 0), (-1, -1), 13.5),
+                ("BACKGROUND", (0, 0), (-1, -1), PEACH_),
+                ("TEXTCOLOR", (0, 0), (-1, 0), NAVY_),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#E0D3CC")),
+                ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10)]
+    for i in range(1, len(rows)):
+        tb_style += [("TEXTCOLOR", (1, i), (1, i), TEAL_), ("TEXTCOLOR", (2, i), (2, i), RED_)]
+    tb.setStyle(TableStyle(tb_style))
+    el.append(tb)
+    el.append(Spacer(1, 0.15 * cm))
+    el.append(Paragraph("※ 報價與可承作與否以本行系統為準；商品條件依產品說明書。",
+                        ParagraphStyle("sm2", fontName=FN, fontSize=10, leading=14, textColor=GRAY_)))
+
+    el.append(PageBreak())
+
+    # ---------- P2 ----------
+    ttl = Table([[Paragraph("<b>富 邦 好 債 報</b>", st_white)]], colWidths=[12.0 * cm])
+    ttl.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), DEEP_),
+                             ("TOPPADDING", (0, 0), (-1, -1), 8),
+                             ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
+    hold = Table([[ttl]], colWidths=[W_])
+    hold.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                              ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
+    el.append(hold)
+    el.append(Spacer(1, 0.35 * cm))
+    el.append(Paragraph(f"<b>{D.get('issuer','')}</b>", st_center))
+    el.append(Paragraph(f"<b>{D.get('issuer_en','')}</b>", st_center_s))
+    el.append(Spacer(1, 0.3 * cm))
+
+    box = Table([[Paragraph(D.get("intro", ""), st_cell)]], colWidths=[W_])
+    box.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.8, BLUE_),
+                             ("TOPPADDING", (0, 0), (-1, -1), 8),
+                             ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                             ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                             ("RIGHTPADDING", (0, 0), (-1, -1), 8)]))
+    el.append(box)
+    el.append(Spacer(1, 0.3 * cm))
+
+    # 營運概況 + 營收結構（並排）
+    ops_flow = []
+    for blk in (D.get("ops_blocks") or []):
+        ops_flow.append(Paragraph(f'<font color="#1F8AC0"><b>{blk[0]}：</b></font>', st_cell))
+        ops_flow.append(Paragraph(str(blk[1]), st_cell))
+    rm = D.get("revenue_mix") or {}
+    png = _donut_png(rm) if rm.get("values") else None
+    right_flow = []
+    if png:
+        try:
+            from PIL import Image as _PIL
+            iw, ih = _PIL.open(png).size
+            h_ = 4.6 * cm
+            w_ = h_ * iw / ih
+            if w_ > 8.4 * cm:
+                w_ = 8.4 * cm
+                h_ = w_ * ih / iw
+            right_flow.append(RLImage(png, width=w_, height=h_))
+            if rm.get("unit_note"):
+                right_flow.append(Paragraph(rm["unit_note"], st_center_s))
+        except Exception as e:
+            print(f"[BondFocus] pdf donut embed: {e}")
+    else:
+        right_flow.append(Paragraph("（無公開部門別營收資料）", st_center_s))
+
+    heads = Table([[Paragraph("<b>營運概況</b>", st_secc), Paragraph("<b>營收結構</b>", st_secc)]],
+                  colWidths=[W_ / 2, W_ / 2])
+    heads.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 1.2, BLUE_),
+                               ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
+    el.append(heads)
+    two = Table([[ops_flow, right_flow]], colWidths=[W_ / 2 - 0.2 * cm, W_ / 2 - 0.2 * cm])
+    two.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                             ("BOX", (0, 0), (0, 0), 0.8, BLUE_),
+                             ("BOX", (1, 0), (1, 0), 0.8, BLUE_),
+                             ("TOPPADDING", (0, 0), (-1, -1), 8),
+                             ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                             ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                             ("RIGHTPADDING", (0, 0), (-1, -1), 7)]))
+    el.append(two)
+
+    el.append(sec_bar("信用評等", center=True))
+    R = D.get("ratings") or {}
+    r2 = [["信用評等", "穆迪", "標普", "惠譽"],
+          ["長期評等", R.get("moody") or "--", R.get("sp") or "--", R.get("fitch") or "--"],
+          ["評等展望", R.get("moody_outlook") or "--", R.get("sp_outlook") or "--", R.get("fitch_outlook") or "--"],
+          ["最近評等動作", R.get("moody_date") or "--", R.get("sp_date") or "--", R.get("fitch_date") or "--"]]
+    t2 = Table(r2, colWidths=[5.0 * cm, 4.3 * cm, 4.3 * cm, 4.4 * cm])
+    t2.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), FN), ("FONTSIZE", (0, 0), (-1, -1), 10.5),
+                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EAF3FA")),
+                            ("TEXTCOLOR", (0, 0), (-1, 0), NAVY_),
+                            ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D9D9D9")),
+                            ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
+    el.append(t2)
+
+    el.append(sec_bar("信評公司評析", center=True))
+    ac_flow = []
+    for c in (D.get("agency_comments") or []):
+        ac_flow.append(Paragraph(f'<font color="#1F8AC0"><b>{c[0]}－</b></font>{c[1]}', st_cell))
+    acbox = Table([[ac_flow]], colWidths=[W_])
+    acbox.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.8, BLUE_),
+                               ("TOPPADDING", (0, 0), (-1, -1), 8),
+                               ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                               ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                               ("RIGHTPADDING", (0, 0), (-1, -1), 8)]))
+    el.append(acbox)
+    el.append(Spacer(1, 0.2 * cm))
+    el.append(Paragraph(D.get("source_note", ""), st_small))
+    el.append(Paragraph("「本內容僅供參考且不構成要約或要約引誘。特定標的之商品風險、申購之條件、限制與費用及"
+                        "其他相關權利義務，應依產品說明暨投資風險預告書等相關文件為準。」", st_small))
+
+    def _footer(canv, doc_):
+        canv.saveState()
+        canv.setFont(FN, 10)
+        canv.setFillColor(RED_)
+        canv.drawString(1.5 * cm, 1.0 * cm, "僅限內部教育訓練使用")
+        canv.setFillColor(NAVY_)
+        canv.drawRightString(A4[0] - 1.5 * cm, 1.0 * cm, "台北富邦銀行")
+        canv.restoreState()
+
+    doc.build(el, onFirstPage=_footer, onLaterPages=_footer)
+    if png:
+        try:
+            os.remove(png)   # 需等 build 完成後再刪,reportlab 延後讀檔
+        except Exception:
+            pass
+    return out_path
