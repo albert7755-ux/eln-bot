@@ -2393,12 +2393,13 @@ def handle_text_message(event):
                     out = f"/tmp/債市每日聚焦_{iss_}_{today_:%Y%m%d}.pptx"
                     build_focus_pptx(out, data)
                     fname_ = f"債市每日聚焦_{iss_}_{today_:%Y%m%d}.pptx"
+                    pdf_err = ""
                     try:
                         from pdf_generator import upload_pptx_with_pdf
-                        link, pdf_link = upload_pptx_with_pdf(out, fname_)
+                        link, pdf_link, pdf_err = upload_pptx_with_pdf(out, fname_)
                     except Exception as e:
                         print(f"[BondFocus] 轉檔上傳失敗,改用一般上傳: {e}")
-                        link, pdf_link = upload_to_drive(out, fname_), None
+                        link, pdf_link, pdf_err = upload_to_drive(out, fname_), None, f"{type(e).__name__}: {str(e)[:120]}"
                     try:
                         os.remove(out)
                     except Exception:
@@ -2407,6 +2408,8 @@ def handle_text_message(event):
                              f"📊 PPTX（可編輯）\n{link}\n")
                     if pdf_link:
                         msg_f += f"\n📄 PDF（手機預覽用）\n{pdf_link}\n"
+                    elif pdf_err:
+                        msg_f += f"\n（PDF 轉檔未成功：{pdf_err}）\n"
                     msg_f += "\n⚠️ 內容由 AI 依公開資訊整理，發布前請人工核對評等、日期與財務數字。"
                     bot_api_ref.push_message(chat_id, TextSendMessage(text=msg_f))
                 except Exception as e:
