@@ -172,6 +172,28 @@ def _donut_png(rm):
         return None
 
 
+def _magnifier_png(size_px=220, color="#1F8AC0"):
+    """畫一個放大鏡圖示,取代在 PDF/PPT 無法顯示的 🔍 emoji"""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Circle, FancyBboxPatch
+        fig, ax = plt.subplots(figsize=(1.6, 1.6), dpi=size_px / 1.6)
+        ax.set_xlim(0, 10); ax.set_ylim(0, 10); ax.axis("off")
+        ax.add_patch(Circle((4.3, 6.0), 2.6, fill=False, lw=6.5, color=color))
+        ax.add_patch(Circle((4.3, 6.0), 2.1, facecolor="#DCEEF8", edgecolor="none", alpha=0.85))
+        ax.plot([6.2, 8.6], [4.0, 1.7], lw=7.5, color=color, solid_capstyle="round")
+        fig.tight_layout(pad=0)
+        f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        fig.savefig(f.name, transparent=True, bbox_inches="tight", pad_inches=0.02)
+        plt.close(fig)
+        return f.name
+    except Exception as e:
+        print(f"[BondFocus] magnifier fail: {e}")
+        return None
+
+
 def _bar_png(labels, series, title=""):
     """
     備援圖表:長條圖(可 1~2 組數列)。series = [(名稱, [值...]), ...]
@@ -290,8 +312,14 @@ def build_focus_pptx(out_path, D):
 
     # ================= P1 債市每日聚焦 =================
     s = prs.slides.add_slide(blank)
-    _txt(s, M, Cm(0.75), Cm(1.6), Cm(1.4), "🔍", size=26)
-    _txt(s, M + Cm(1.6), Cm(0.7), Cm(12), Cm(1.5), "債市每日聚焦", size=30, bold=True, color=NAVY)
+    mag = _magnifier_png()
+    if mag:
+        s.shapes.add_picture(mag, M, Cm(0.62), height=Cm(1.55))
+        try:
+            os.remove(mag)
+        except Exception:
+            pass
+    _txt(s, M + Cm(1.85), Cm(0.7), Cm(12), Cm(1.5), "債市每日聚焦", size=30, bold=True, color=NAVY)
     bar = s.shapes.add_shape(1, M, Cm(2.5), W, Cm(0.78))
     bar.fill.solid(); bar.fill.fore_color.rgb = BLUE; bar.line.fill.background(); bar.shadow.inherit = False
     _txt(s, M, Cm(2.58), W - Cm(0.3), Cm(0.7), D.get("date_str", ""), size=13, bold=True,
@@ -495,7 +523,18 @@ def build_focus_pdf(out_path, D):
     el = []
 
     # ---------- P1 ----------
-    el.append(Paragraph("🔍 <b>債市每日聚焦</b>", st_h1))
+    mag = _magnifier_png()
+    if mag:
+        from reportlab.platypus import Image as _RLImg
+        head_tbl = Table([[_RLImg(mag, width=1.05 * cm, height=1.05 * cm),
+                           Paragraph("<b>債市每日聚焦</b>", st_h1)]],
+                         colWidths=[1.35 * cm, W_ - 1.35 * cm])
+        head_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                      ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                      ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+        el.append(head_tbl)
+    else:
+        el.append(Paragraph("<b>債市每日聚焦</b>", st_h1))
     band = Table([[Paragraph(f"<b>{D.get('date_str','')}</b>",
                              ParagraphStyle("bn", fontName=FN, fontSize=13, leading=17,
                                             textColor=colors.white, alignment=2))]], colWidths=[W_])
@@ -651,6 +690,11 @@ def build_focus_pdf(out_path, D):
         canv.restoreState()
 
     doc.build(el, onFirstPage=_footer, onLaterPages=_footer)
+    if mag:
+        try:
+            os.remove(mag)
+        except Exception:
+            pass
     if png:
         try:
             os.remove(png)   # 需等 build 完成後再刪,reportlab 延後讀檔
