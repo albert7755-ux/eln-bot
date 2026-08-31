@@ -47,7 +47,7 @@ def _bond_price_dir() -> Path:
 BOND_PRICE_FILE = Path(os.getenv("BOND_PRICE_FILE", "")) if os.getenv("BOND_PRICE_FILE") else (_bond_price_dir() / "bond_pricing_latest.xlsx")
 
 # 海外債群組白名單：在該群裡龍蝦只回這些指令，其餘一律不理（比照 ELN 群）
-BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "bondalert", "rating", "move", "price", "sheet", "help"}
+BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "bondalert", "rating", "move", "price", "sheet", "focus", "help"}
 
 def is_bond_group_chat(chat_key: str) -> bool:
     """這個 chat 是不是用 /coupon settarget 設定的海外債群組"""
