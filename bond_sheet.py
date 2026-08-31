@@ -414,10 +414,10 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
                                  textColor=colors.white, alignment=1)
     st_mini_num = ParagraphStyle("mn", fontName=F, fontSize=11, leading=14,
                                  textColor=NAVY, alignment=1)
-    st_intro = ParagraphStyle("in", fontName=F, fontSize=9, leading=12.5, spaceAfter=1,
+    st_intro = ParagraphStyle("in", fontName=F, fontSize=8.6, leading=11.6, spaceAfter=0.8,
                               textColor="#222222")
-    st_sec = ParagraphStyle("sc", fontName=F, fontSize=10.5, leading=13, textColor=NAVY,
-                            spaceBefore=5, spaceAfter=2)
+    st_sec = ParagraphStyle("sc", fontName=F, fontSize=10, leading=12, textColor=NAVY,
+                            spaceBefore=3.5, spaceAfter=1.5)
     st_box_lbl = ParagraphStyle("bxl", fontName=F, fontSize=8.5, leading=11,
                                 textColor=colors.HexColor("#14547A"), alignment=1)
     st_box_num = ParagraphStyle("bxn", fontName=F, fontSize=13, leading=17,
@@ -476,7 +476,8 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
     el.append(sec_header("發行機構簡介"))
     if intro_bullets:
         for b_ in intro_bullets[:4]:
-            el.append(Paragraph("● " + b_, st_intro))
+            _b = b_ if len(b_) <= 62 else b_[:60].rstrip("，。；、") + "…"
+            el.append(Paragraph("● " + _b, st_intro))
     elif intro:
         el.append(Paragraph(intro, st_intro))
 
@@ -517,15 +518,17 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
     if fin_comment or peers:
         el.append(Spacer(1, 2.5*mm))
         if fin_comment:
-            el.append(Paragraph("<b>財務比率解讀</b>：" + fin_comment, st_note_box))
+            _fc = fin_comment if len(fin_comment) <= 140 else fin_comment[:138].rstrip("，。；、") + "…"
+            el.append(Paragraph("<b>財務比率解讀</b>：" + _fc, st_note_box))
         if peers:
-            el.append(Paragraph("<b>同業比較</b>：" + peers, st_note_box))
+            _pe = peers if len(peers) <= 130 else peers[:128].rstrip("，。；、") + "…"
+            el.append(Paragraph("<b>同業比較</b>：" + _pe, st_note_box))
     if peer_png:
         try:
             from reportlab.platypus import Image as RLImage
             from PIL import Image as PILImage
             iw, ih = PILImage.open(peer_png).size
-            pw = 68 * mm
+            pw = 46 * mm
             img = RLImage(peer_png, width=pw, height=pw * ih / iw)
             holder = Table([[img]], colWidths=[184*mm])
             holder.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
@@ -540,9 +543,11 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
             from reportlab.platypus import Image as RLImage
             from PIL import Image as PILImage
             iw, ih = PILImage.open(charts_png).size
-            disp_w = 170 * mm
+            disp_w = 138 * mm
             el.append(sec_header("近五季財報趨勢"))
             el.append(RLImage(charts_png, width=disp_w, height=disp_w * ih / iw))
+            if charts_comment and len(charts_comment) > 150:
+                charts_comment = charts_comment[:148].rstrip("，。；、") + "…"
             if charts_comment:
                 el.append(Paragraph("<b>圖表解讀</b>：" + charts_comment +
                                     "（資料來源：公開財報，單位為該公司報表幣別之億元）", st_note_box))
