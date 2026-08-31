@@ -2345,7 +2345,7 @@ def handle_text_message(event):
             _bot_api.reply_message(event.reply_token, TextSendMessage(
                 text=f"📰 製作 {f_iss} 債市每日聚焦 PPTX 中(查證信評與財報資料),約 60~90 秒..."))
 
-            def _run_focus(chat_id, bot_api_ref, iss_, bonds_, today_):
+            def _run_focus(chat_id, bot_api_ref, iss_, bonds_, today_, f_live_for_chart=()):
                 try:
                     from bond_focus_ppt import build_focus_pptx
                     from pdf_generator import upload_to_drive
@@ -2374,7 +2374,38 @@ def handle_text_message(event):
                     if not got:
                         bot_api_ref.push_message(chat_id, TextSendMessage(text="❌ 資料生成失敗(AI 服務不可用),請稍後再試。"))
                         return
+                    # 營收結構備援資料:近五季財報 + 架上債券到期分布
+                    quarterly = {}
+                    try:
+                        if ticker:
+                            from bond_sheet import get_quarterly_series
+                            quarterly = get_quarterly_series(ticker) or {}
+                    except Exception as e:
+                        print(f"[BondFocus] quarterly fail: {e}")
+                    mat_dist = {}
+                    try:
+                        from collections import Counter as _C
+                        _buckets = [("3年內", 0, 3), ("3–5年", 3, 5), ("5–10年", 5, 10),
+                                    ("10–20年", 10, 20), ("20年以上", 20, 999)]
+                        cnt = _C()
+                        for b in f_live_for_chart:
+                            _y = None
+                            if b.get("maturity"):
+                                _y = (b["maturity"] - today_).days / 365.25
+                            if _y is None:
+                                continue
+                            for lb, lo, hi in _buckets:
+                                if lo <= _y < hi:
+                                    cnt[lb] += 1
+                                    break
+                        labels_ = [lb for lb, _, _ in _buckets if cnt.get(lb)]
+                        if labels_:
+                            mat_dist = {"labels": labels_, "values": [cnt[lb] for lb in labels_]}
+                    except Exception as e:
+                        print(f"[BondFocus] maturity dist fail: {e}")
+
                     data = {
+                        "quarterly": quarterly, "maturity_dist": mat_dist,
                         "issuer": iss_, "issuer_en": got.get("issuer_en") or "",
                         "intro": got.get("intro") or "", "headline": got.get("headline") or f"{iss_} 焦點速報",
                         "news_bullets": got.get("news_bullets") or [],
@@ -2427,7 +2458,7 @@ def handle_text_message(event):
                     bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 製作失敗:{str(e)[:200]}"))
             import threading
             threading.Thread(target=_run_focus,
-                             args=(ck.split(":", 1)[1], _bot_api, f_iss, f_pick, f_today), daemon=True).start()
+                             args=(ck.split(":", 1)[1], _bot_api, f_iss, f_pick, f_today, f_live), daemon=True).start()
             return
         if cmd == "sheet":
             # /sheet 蘋果  → 發行機構參考資訊(LINE文字 + PDF連結)
