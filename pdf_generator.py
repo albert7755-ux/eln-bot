@@ -98,13 +98,13 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
 def upload_pptx_with_pdf(file_path: str, filename: str, folder_name: str = "龍蝦報告"):
     """
     上傳 PPTX，並利用 Google Drive 的轉檔能力另存一份 PDF（手機預覽較穩）。
-    回傳 (pptx_link, pdf_link)；PDF 轉檔失敗時 pdf_link 為 None。
+    回傳 (pptx_link, pdf_link, err)；PDF 轉檔失敗時 pdf_link 為 None、err 為原因字串。
     """
     import io as _io
     from googleapiclient.http import MediaIoBaseUpload
 
     pptx_link = upload_to_drive(file_path, filename, folder_name)
-    pdf_link = None
+    pdf_link, err = None, ""
     try:
         service = get_drive_service()
         query = (f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' "
@@ -144,8 +144,11 @@ def upload_pptx_with_pdf(file_path: str, filename: str, folder_name: str = "龍�
         except Exception as e:
             print(f"[Drive] 刪除轉檔暫存失敗: {e}")
     except Exception as e:
+        import traceback
+        err = f"{type(e).__name__}: {str(e)[:160]}"
         print(f"[Drive] PPTX→PDF 轉檔失敗: {e}")
-    return pptx_link, pdf_link
+        print(traceback.format_exc()[:600])
+    return pptx_link, pdf_link, err
 
 
 def cleanup_drive_folder(folder_name: str = "龍蝦報告", days: int = 30, dry_run: bool = False):
