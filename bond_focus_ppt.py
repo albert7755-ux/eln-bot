@@ -373,11 +373,11 @@ def build_focus_pptx(out_path, D):
 
     # ================= P2 富邦好債報 =================
     t = prs.slides.add_slide(blank)
-    _rect(t, Cm(3.4), Cm(0.7), Cm(14.2), Cm(1.7), fill=DEEP)
-    _txt(t, Cm(3.4), Cm(0.95), Cm(14.2), Cm(1.2), "富 邦 好 債 報", size=24, bold=True,
+    _rect(t, M, Cm(0.7), Cm(6.6), Cm(1.35), fill=DEEP)
+    _txt(t, M, Cm(0.86), Cm(6.6), Cm(1.0), "富 邦 好 債 報", size=20, bold=True,
          color=WHITE, align=PP_ALIGN.CENTER)
-    _txt(t, M, Cm(2.7), W, Cm(1.2), D.get("issuer", ""), size=24, bold=True, align=PP_ALIGN.CENTER)
-    _txt(t, M, Cm(3.85), W, Cm(0.8), D.get("issuer_en", ""), size=13, bold=True,
+    _txt(t, M, Cm(2.45), W, Cm(1.5), D.get("issuer", ""), size=32, bold=True, align=PP_ALIGN.CENTER)
+    _txt(t, M, Cm(3.95), W, Cm(0.8), D.get("issuer_en", ""), size=14, bold=True,
          color=GRAY, align=PP_ALIGN.CENTER)
 
     _rect(t, M, Cm(4.75), W, Cm(3.0), fill=WHITE, line_color=BLUE)
@@ -404,14 +404,14 @@ def build_focus_pptx(out_path, D):
         try:
             from PIL import Image as _PIL
             iw, ih = _PIL.open(png).size
-            img_h = Cm(4.7)
-            img_w = int(img_h * iw / ih)
-            if img_w > half - Cm(0.4):
-                img_w = half - Cm(0.4)
-                img_h = int(img_w * ih / iw)
-            t.shapes.add_picture(png, x2 + (half - img_w) // 2, Cm(9.5), width=img_w, height=img_h)
+            max_w, max_h = half - Cm(0.3), Cm(5.05)
+            img_w, img_h = max_w, int(max_w * ih / iw)
+            if img_h > max_h:
+                img_h, img_w = max_h, int(max_h * iw / ih)
+            t.shapes.add_picture(png, x2 + (half - img_w) // 2,
+                                 Cm(9.35) + (Cm(5.2) - img_h) // 2, width=img_w, height=img_h)
         except Exception:
-            t.shapes.add_picture(png, x2 + Cm(0.6), Cm(9.5), height=Cm(4.7))
+            t.shapes.add_picture(png, x2 + Cm(0.4), Cm(9.4), height=Cm(4.9))
         _txt(t, x2, Cm(14.55), half, Cm(0.7), png_note, size=9, color=GRAY,
              align=PP_ALIGN.CENTER)
         try:
@@ -587,16 +587,18 @@ def build_focus_pdf(out_path, D):
     el.append(PageBreak())
 
     # ---------- P2 ----------
-    ttl = Table([[Paragraph("<b>富 邦 好 債 報</b>", st_white)]], colWidths=[12.0 * cm])
+    ttl = Table([[Paragraph("<b>富 邦 好 債 報</b>", st_white)]], colWidths=[6.4 * cm])
     ttl.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), DEEP_),
-                             ("TOPPADDING", (0, 0), (-1, -1), 8),
-                             ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
+                             ("TOPPADDING", (0, 0), (-1, -1), 7),
+                             ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                             ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
     hold = Table([[ttl]], colWidths=[W_])
-    hold.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER"),
+    hold.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "LEFT"),
                               ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
     el.append(hold)
-    el.append(Spacer(1, 0.35 * cm))
-    el.append(Paragraph(f"<b>{D.get('issuer','')}</b>", st_center))
+    el.append(Spacer(1, 0.45 * cm))
+    el.append(Paragraph(f"<b>{D.get('issuer','')}</b>",
+                        ParagraphStyle("iss", fontName=FN, fontSize=26, leading=32, alignment=1)))
     el.append(Paragraph(f"<b>{D.get('issuer_en','')}</b>", st_center_s))
     el.append(Spacer(1, 0.3 * cm))
 
@@ -620,12 +622,14 @@ def build_focus_pdf(out_path, D):
         try:
             from PIL import Image as _PIL
             iw, ih = _PIL.open(png).size
-            h_ = 4.6 * cm
-            w_ = h_ * iw / ih
-            if w_ > 8.4 * cm:
-                w_ = 8.4 * cm
-                h_ = w_ * ih / iw
-            right_flow.append(RLImage(png, width=w_, height=h_))
+            w_ = 8.5 * cm
+            h_ = w_ * ih / iw
+            if h_ > 5.6 * cm:
+                h_ = 5.6 * cm
+                w_ = h_ * iw / ih
+            _img = RLImage(png, width=w_, height=h_)
+            _img.hAlign = "CENTER"
+            right_flow.append(_img)
             if png_note:
                 right_flow.append(Paragraph(png_note, st_center_s))
         except Exception as e:
