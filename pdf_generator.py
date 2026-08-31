@@ -83,8 +83,22 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
     else:
         mime = "application/pdf"
 
-    media = MediaFileUpload(file_path, mimetype=mime)
-    uploaded = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+    # Google Drive 偶發 500 Internal Error(暫時性),重試 3 次
+    import time as _t
+    last_err = None
+    uploaded = None
+    for _attempt in range(3):
+        try:
+            media = MediaFileUpload(file_path, mimetype=mime, resumable=False)
+            uploaded = service.files().create(body=file_metadata, media_body=media,
+                                              fields="id").execute()
+            break
+        except Exception as _e:
+            last_err = _e
+            print(f"[Drive] 上傳第 {_attempt+1} 次失敗: {str(_e)[:150]}")
+            _t.sleep(2 + _attempt * 3)
+    if uploaded is None:
+        raise last_err
     file_id = uploaded["id"]
 
     service.permissions().create(
@@ -97,57 +111,78 @@ def upload_to_drive(file_path: str, filename: str, folder_name: str = "龍蝦報
 
 def upload_pptx_with_pdf(file_path: str, filename: str, folder_name: str = "龍蝦報告"):
     """
-    上傳 PPTX，並利用 Google Drive 的轉檔能力另存一份 PDF（手機預覽較穩）。
-    回傳 (pptx_link, pdf_link, err)；PDF 轉檔失敗時 pdf_link 為 None、err 為原因字串。
+    上傳 PPTX，並產生一份 PDF（手機預覽較穩）。
+    流程：正常上傳 PPTX → 用 Drive「複製並轉檔」成 Google 簡報 → 匯出 PDF → 上傳 PDF → 刪暫存簡報。
+    比「上傳時直接轉檔」穩定（後者常回 500），並對暫時性錯誤重試。
+    回傳 (pptx_link, pdf_link, err)
     """
     import io as _io
+    import time as _time
     from googleapiclient.http import MediaIoBaseUpload
 
-    pptx_link = upload_to_drive(file_path, filename, folder_name)
+    service = get_drive_service()
+
+    # 找/建資料夾
+    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    folders = service.files().list(q=query, fields="files(id)").execute().get("files", [])
+    if folders:
+        folder_id = folders[0]["id"]
+    else:
+        folder_id = service.files().create(
+            body={"name": folder_name, "mimeType": "application/vnd.google-apps.folder"},
+            fields="id").execute()["id"]
+
+    # 1) 正常上傳 PPTX
+    media = MediaFileUpload(
+        file_path,
+        mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        resumable=False)
+    pptx = service.files().create(
+        body={"name": filename, "parents": [folder_id]}, media_body=media, fields="id").execute()
+    pptx_id = pptx["id"]
+    service.permissions().create(fileId=pptx_id, body={"type": "anyone", "role": "reader"}).execute()
+    pptx_link = f"https://drive.google.com/file/d/{pptx_id}/view"
+
     pdf_link, err = None, ""
-    try:
-        service = get_drive_service()
-        query = (f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' "
-                 f"and trashed=false")
-        folders = service.files().list(q=query, fields="files(id)").execute().get("files", [])
-        folder_id = folders[0]["id"] if folders else None
-
-        # 1) 上傳並轉成 Google 簡報（暫存）
-        media = MediaFileUpload(
-            file_path,
-            mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation")
-        tmp_meta = {"name": filename + "(轉檔暫存)",
-                    "mimeType": "application/vnd.google-apps.presentation"}
-        if folder_id:
-            tmp_meta["parents"] = [folder_id]
-        slides = service.files().create(body=tmp_meta, media_body=media, fields="id").execute()
-        slides_id = slides["id"]
-
-        # 2) 匯出 PDF
-        pdf_bytes = service.files().export(fileId=slides_id, mimeType="application/pdf").execute()
-
-        # 3) 上傳 PDF 本體
-        pdf_name = filename.rsplit(".", 1)[0] + ".pdf"
-        pdf_meta = {"name": pdf_name}
-        if folder_id:
-            pdf_meta["parents"] = [folder_id]
-        pdf_media = MediaIoBaseUpload(_io.BytesIO(pdf_bytes), mimetype="application/pdf")
-        pdf_file = service.files().create(body=pdf_meta, media_body=pdf_media,
-                                          fields="id").execute()
-        service.permissions().create(fileId=pdf_file["id"],
-                                     body={"type": "anyone", "role": "reader"}).execute()
-        pdf_link = f"https://drive.google.com/file/d/{pdf_file['id']}/view"
-
-        # 4) 刪掉轉檔暫存的 Google 簡報
+    slides_id = None
+    for attempt in range(3):
         try:
-            service.files().delete(fileId=slides_id).execute()
+            # 2) 複製並轉檔成 Google 簡報（比 upload 時轉檔穩定）
+            slides = service.files().copy(
+                fileId=pptx_id,
+                body={"name": filename + "(轉檔暫存)",
+                      "mimeType": "application/vnd.google-apps.presentation",
+                      "parents": [folder_id]},
+                fields="id").execute()
+            slides_id = slides["id"]
+
+            # 3) 匯出 PDF
+            pdf_bytes = service.files().export(fileId=slides_id,
+                                               mimeType="application/pdf").execute()
+
+            # 4) 上傳 PDF
+            pdf_name = filename.rsplit(".", 1)[0] + ".pdf"
+            pdf_media = MediaIoBaseUpload(_io.BytesIO(pdf_bytes), mimetype="application/pdf")
+            pdf_file = service.files().create(
+                body={"name": pdf_name, "parents": [folder_id]},
+                media_body=pdf_media, fields="id").execute()
+            service.permissions().create(fileId=pdf_file["id"],
+                                         body={"type": "anyone", "role": "reader"}).execute()
+            pdf_link = f"https://drive.google.com/file/d/{pdf_file['id']}/view"
+            err = ""
+            break
         except Exception as e:
-            print(f"[Drive] 刪除轉檔暫存失敗: {e}")
-    except Exception as e:
-        import traceback
-        err = f"{type(e).__name__}: {str(e)[:160]}"
-        print(f"[Drive] PPTX→PDF 轉檔失敗: {e}")
-        print(traceback.format_exc()[:600])
+            err = f"{type(e).__name__}: {str(e)[:120]}"
+            print(f"[Drive] PPTX→PDF 第 {attempt+1} 次失敗: {e}")
+            _time.sleep(2 + attempt * 3)   # 暫時性錯誤,退避後重試
+        finally:
+            if slides_id:
+                try:
+                    service.files().delete(fileId=slides_id).execute()
+                except Exception:
+                    pass
+                slides_id = None
+
     return pptx_link, pdf_link, err
 
 
