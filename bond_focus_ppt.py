@@ -210,12 +210,18 @@ def _bar_png(labels, series, title=""):
         ax.set_xticklabels(labels, fontsize=9, fontproperties=PROP)
         ax.tick_params(axis="y", labelsize=8)
         ax.spines[["top", "right"]].set_visible(False)
-        if title:
-            ax.set_title(title, fontsize=10.5, color="#0B2A4A", pad=8, fontproperties=PROP)
         if len(series) > 1:
-            ax.legend(fontsize=8, frameon=False, ncol=2, loc="lower left",
-                      bbox_to_anchor=(0, 1.0),
-                      prop=(PROP.copy() if PROP else None))
+            lg = ax.legend(fontsize=8, frameon=False, ncol=2, loc="lower center",
+                           bbox_to_anchor=(0.5, 1.005),
+                           prop=(PROP.copy() if PROP else None))
+            if PROP:
+                for tx in lg.get_texts():
+                    tx.set_fontproperties(PROP)
+                    tx.set_fontsize(8)
+        if title:
+            # 有圖例時標題再往上,避免與圖例重疊
+            ax.set_title(title, fontsize=10.5, color="#0B2A4A",
+                         pad=(26 if len(series) > 1 else 8), fontproperties=PROP)
         fig.tight_layout(pad=0.4)
         f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         fig.savefig(f.name, bbox_inches="tight", facecolor="white")
