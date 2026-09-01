@@ -273,7 +273,9 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
     for i, a in enumerate(ok):
         if a["last_trade"] != cur:
             cur = a["last_trade"]
-            tag = "⏳ 今日為配息前最後申購日" if cur == today else f"⏰ 配息前最後申購日 {cur:%m/%d}({wd[cur.weekday()]})"
+            tag = ("欲參與本期配息：申購截止 今日"
+                   if cur == today else
+                   f"欲參與本期配息：申購截止 {cur:%m/%d}({wd[cur.weekday()]})")
             lines.append(f"── {tag} ──")
         offer = a["offer"] if a["offer"] not in (None, "", 0, "#VALUE!") else "-"
         ytm = a["ytm"] if a["ytm"] not in (None, "", 0) else "-"
@@ -286,6 +288,8 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
         if i + 1 >= max_lines and i + 1 < len(ok):
             lines.append(f"…另有 {len(ok)-i-1} 檔，見Excel")
             break
+    lines.append("\n※ 未於上述日期前申購者，仍可於配息後申購，屆時前手息較低，"
+                 "並非錯失投資機會，僅為參與本期配息與否之差異。")
     if paid_txt:
         lines.append(paid_txt)
     if mat_txt:
