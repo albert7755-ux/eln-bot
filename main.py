@@ -49,6 +49,10 @@ BOND_PRICE_FILE = Path(os.getenv("BOND_PRICE_FILE", "")) if os.getenv("BOND_PRIC
 # 海外債群組白名單：在該群裡龍蝦只回這些指令，其餘一律不理（比照 ELN 群）
 BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "bondalert", "rating", "move", "price", "sheet", "focus", "help"}
 
+# ELN Bot(callback2)也開放的海外債指令:查詢類為主,燒 AI 的重型指令僅限 Albert 本人
+ELN_BOT_BOND_CMDS = {"price", "p", "價格", "報價", "issuer", "coupon", "move", "bondalert"}
+ELN_BOT_BOND_HEAVY = {"sheet", "focus", "rating"}   # 需要 Albert 本人才可用
+
 def is_bond_group_chat(chat_key: str) -> bool:
     """這個 chat 是不是用 /coupon settarget 設定的海外債群組"""
     try:
@@ -679,6 +683,8 @@ async def callback(request: Request):
 
 import threading
 _current_bot_api = threading.local()
+_current_bot_api.api = None
+_current_bot_api.is_eln = False
 
 @app.post("/callback2")
 async def callback2(request: Request):
@@ -696,6 +702,32 @@ async def callback2(request: Request):
             rtoken = ev.get("replyToken", "")
             uid = ev.get("source", {}).get("userId", "")
             print(f"[ELN-G USER] uid={uid} msg={repr(txt[:50])}")
+            _eln_bond_prefixes = tuple("/" + c for c in
+                                       (ELN_BOT_BOND_CMDS | ELN_BOT_BOND_HEAVY | {"help"}))
+            if tl.startswith(_eln_bond_prefixes):
+                # 海外債指令:轉交主處理器(共用同一套邏輯),回覆走 ELN Bot 頻道
+                try:
+                    from types import SimpleNamespace as _NS
+                    src = ev.get("source", {})
+                    _stype = src.get("type", "user")
+                    _ev = _NS(
+                        reply_token=rtoken,
+                        message=_NS(text=txt, id=ev.get("message", {}).get("id", "")),
+                        source=_NS(type=_stype,
+                                   user_id=src.get("userId", ""),
+                                   group_id=src.get("groupId", ""),
+                                   room_id=src.get("roomId", "")),
+                    )
+                    _current_bot_api.api = eln_group_bot_api
+                    _current_bot_api.is_eln = True
+                    handle_text_message(_ev)
+                except Exception as e:
+                    print(f"[ELN-G BOND ERR] {e}")
+                    print(_traceback.format_exc()[:400])
+                finally:
+                    _current_bot_api.api = None
+                    _current_bot_api.is_eln = False
+                continue
             if not (tl.startswith("/list") or tl.startswith("/detail") or tl.startswith("/end") or tl.startswith("/nc") or tl.startswith("/內規")):
                 continue
             from linebot.models import TextSendMessage as TSM
@@ -1375,13 +1407,25 @@ def handle_text_message(event):
         _sender_uid = event.source.user_id if hasattr(event.source, "user_id") else ""
         is_albert = (_sender_uid == _albert_uid)
         _agent_allowed = ("list", "detail", "nc")
+        _is_eln_channel = getattr(_current_bot_api, "is_eln", False)
         if not is_albert and not is_group and tl.startswith("/"):
-            if cmd not in _agent_allowed:
+            _ok = cmd in _agent_allowed
+            # ELN Bot 頻道:同時開放海外債查詢指令(不燒 AI 的那些)
+            if not _ok and _is_eln_channel and cmd in ELN_BOT_BOND_CMDS:
+                _ok = True
+            if not _ok and _is_eln_channel and cmd in ELN_BOT_BOND_HEAVY:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text="可用指令：\n/list 姓名\n/list detail 姓名\n/detail 商品代號\n/nc YYYYMM 姓名"
+                    text=f"/{cmd} 目前僅開放固定收益科使用，請洽科內同仁協助產出。"))
+                return
+            if not _ok:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=("可用指令：\n/list 姓名\n/list detail 姓名\n/detail 商品代號\n/nc YYYYMM 姓名"
+                          + ("\n\n💵 海外債查詢\n/price 26070003\n/issuer 蘋果\n/coupon"
+                             if _is_eln_channel else ""))
                 ))
                 return
-            ck = ELN_PERSONAL_CHAT_KEY
+            if cmd in _agent_allowed:
+                ck = ELN_PERSONAL_CHAT_KEY
         if not is_albert and not is_group and not tl.startswith("/"):
             return
         
