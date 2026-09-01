@@ -10,6 +10,8 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 import os
 import tempfile
 
+LAYOUT_VERSION = "v4-20260901"   # 放大鏡/靠左色帶/機構名32pt/圖表放大置中/圖例不重疊
+
 NAVY = RGBColor(0x1F, 0x4E, 0x79)
 BLUE = RGBColor(0x1F, 0x8A, 0xC0)
 DEEP = RGBColor(0x1B, 0x7F, 0xA8)
@@ -306,6 +308,7 @@ def _revenue_block_title(D):
 
 
 def build_focus_pptx(out_path, D):
+    print(f"[BondFocus] 版面 {LAYOUT_VERSION} 產生 PPTX")
     prs = Presentation()
     prs.slide_width, prs.slide_height = PAGE_W, PAGE_H
     blank = prs.slide_layouts[6]
@@ -461,6 +464,7 @@ def build_focus_pptx(out_path, D):
 # ================= PDF 版（reportlab 直接產，不依賴 Drive 轉檔）=================
 def build_focus_pdf(out_path, D):
     """與 PPTX 相同版型的 PDF（直式 A4 兩頁）。成功回傳路徑。"""
+    print(f"[BondFocus] 版面 {LAYOUT_VERSION} 產生 PDF")
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import cm
     from reportlab.lib import colors
