@@ -75,12 +75,15 @@ def is_bond_query_group(chat_key: str) -> bool:
         return False
 
 BOND_QUERY_HELP = (
-    "💵 本群可用指令\n"
+    "❤️ 愛債每一天｜債查一下 Claw Bot\n"
     "━━━━━━━━━━━━━\n"
     "🔍 查報價\n"
     "/price 26070003 → 產品代碼查（WMBB免打）\n"
     "/price 蘋果 2043 → 名稱＋到期年份\n"
     "/price US037833EN → ISIN查\n"
+    "\n📈 查價格走勢\n"
+    "/price 26070003 30 → 該檔近30天報價變化\n"
+    "（含期間漲跌幅與最高最低點，天數可自訂）\n"
     "\n🏦 查發行機構\n"
     "/issuer 蘋果 → 機構簡介＋架上所有債券\n"
     "（可用中文、英文、ISIN、產品代碼）\n"
@@ -88,13 +91,15 @@ BOND_QUERY_HELP = (
     "/coupon → 3個營業日內截止的配息債\n"
     "/coupon 7 → 改看7個營業日內\n"
     "/coupon all → 未來14天全部\n"
+    "（另附「剛配息完、前手息最低」名單）\n"
     "━━━━━━━━━━━━━\n"
     "🔒專投＝限專業投資人｜💎高資產＝高資產客戶專屬\n"
     "報價以本行系統為準，商品條件依產品說明書"
 )
 
 BOND_GROUP_HELP = (
-    "💰 海外債專區指令\n"
+    "❤️ 愛債每一天｜債查一下 Claw Bot\n"
+    "海外債專區指令\n"
     "━━━━━━━━━━━━━━━\n"
     "⏰ 每天自動推播\n"
     "06:38 債券市場日報　06:45 配息雷達　06:50 信評新聞\n"
@@ -1409,6 +1414,11 @@ def handle_text_message(event):
         _agent_allowed = ("list", "detail", "nc")
         _is_eln_channel = getattr(_current_bot_api, "is_eln", False)
         if not is_albert and not is_group and tl.startswith("/"):
+            # ELN Bot 頻道的 /help:只顯示海外債指令
+            # (ELN 的 /list /detail /nc 仍可正常使用,只是不主動列出,避免新同仁誤用)
+            if _is_eln_channel and cmd in ("help", "?", "指令", "幫助"):
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=BOND_QUERY_HELP))
+                return
             _ok = cmd in _agent_allowed
             # ELN Bot 頻道:同時開放海外債查詢指令(不燒 AI 的那些)
             if not _ok and _is_eln_channel and cmd in ELN_BOT_BOND_CMDS:
@@ -1418,11 +1428,10 @@ def handle_text_message(event):
                     text=f"/{cmd} 目前僅開放固定收益科使用，請洽科內同仁協助產出。"))
                 return
             if not _ok:
+                # ELN 頻道:錯誤指令只提示海外債用法,不列出 ELN 指令
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text=("可用指令：\n/list 姓名\n/list detail 姓名\n/detail 商品代號\n/nc YYYYMM 姓名"
-                          + ("\n\n💵 海外債查詢\n/price 26070003\n/issuer 蘋果\n/coupon"
-                             if _is_eln_channel else ""))
-                ))
+                    text=(BOND_QUERY_HELP if _is_eln_channel else
+                          "可用指令：\n/list 姓名\n/list detail 姓名\n/detail 商品代號\n/nc YYYYMM 姓名")))
                 return
             if cmd in _agent_allowed:
                 ck = ELN_PERSONAL_CHAT_KEY
