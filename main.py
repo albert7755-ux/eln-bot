@@ -118,7 +118,7 @@ BOND_QUERY_HELP = (
     "（另附「剛配息完、前手息最低」名單）\n"
     "━━━━━━━━━━━━━\n"
     "🔒專投＝限專業投資人｜💎高資產＝高資產客戶專屬\n"
-    "報價以本行系統為準，商品條件依產品說明書"
+    "報價以總行系統為準，商品條件依產品說明書"
 )
 
 BOND_GROUP_HELP = (
@@ -165,7 +165,7 @@ BOND_GROUP_HELP = (
     "/bonddaily focus 零息債 | 風險:無配息、有提前買回 → 設定當期主打方向與必講風險（off取消）\n"
     "━━━━━━━━━━━━━━━\n"
     "🔒專投＝限專業投資人｜💎高資產＝高資產客戶專屬\n"
-    "報價以本行系統為準，商品條件依產品說明書"
+    "報價以總行系統為準，商品條件依產品說明書"
 )
 
 
@@ -273,7 +273,7 @@ def price_movers(days_back=1, threshold_pct=2.0, top_n=15):
     if ups:
         lines.append("\n📈 漲幅")
         lines += [_fmt(m) for m in ups]
-    lines.append("\n※ 依本行報價檔 Offer 計算，跌多可能是買點也可能是信用事件，請搭配 /rating 與 /issuer 查看")
+    lines.append("\n※ 依總行報價檔 Offer 計算，跌多可能是買點也可能是信用事件，請搭配 /rating 與 /issuer 查看")
     return "\n".join(lines), base, latest
 
 def check_bond_alerts(bot_api=None, source="upload"):
@@ -2477,7 +2477,7 @@ def handle_text_message(event):
                     prompt = (
                         "你是銀行固定收益科的研究員,要製作一份「債市每日聚焦」內部教育訓練文件。"
                         f"對象發行機構:{iss_}" + (f"(上市主體:{parent}, 代碼:{ticker})" if ticker else "") + "。\n"
-                        "本行架上焦點債券:\n" + "\n".join(b_lines) + "\n\n"
+                        "總行架上焦點債券:\n" + "\n".join(b_lines) + "\n\n"
                         "請依你所知的公開資訊填寫下列欄位,並嚴格遵守:\n"
                         "- 只寫你有把握的事實;不確定的數字、日期、評等一律省略或填 --,絕對不要臆測。\n"
                         "- 評等只填確實知道的機構,不知道填 --。\n"
@@ -4169,7 +4169,7 @@ def run_rating_news_check(days=2, use_llm=True):
             for it in items:
                 conn.execute(text("INSERT INTO bond_rating_news_seen(link, issuer, title) VALUES (:l,:i,:t) ON CONFLICT DO NOTHING"),
                              {"l": it["link"], "i": iss, "t": it["title"][:300]})
-    blocks.append("※ 新聞為 AI 初篩，請點連結確認原文；本行報價檔的評等以總行更新為準")
+    blocks.append("※ 新聞為 AI 初篩，請點連結確認原文；報價檔的評等以總行更新為準")
     return "\n\n".join(blocks)
 
 def job_drive_cleanup():
