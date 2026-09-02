@@ -554,7 +554,7 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
         except Exception as e:
             print(f"[BondSheet] embed charts fail: {e}")
     # ── 債券標的:依年期分三段,各取 YTM 最高一檔 ──
-    el.append(sec_header("本行架上代表標的"))
+    el.append(sec_header("總行架上代表標的"))
     ust_curve = ust_curve or {}
     picks = []
     if picked_bonds:
