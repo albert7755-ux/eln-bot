@@ -26,12 +26,44 @@ from openpyxl import load_workbook
 FREQ_MONTHS = {"每月": 1, "每季": 3, "每半年": 6, "每年": 12}
 LOOKAHEAD_DAYS = 14
 
+def _num(v, nd=2):
+    """數值統一四捨五入;非數值原樣回傳"""
+    if isinstance(v, float):
+        return f"{round(v, nd):g}"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, str):
+        t = v.strip()
+        try:
+            return f"{round(float(t), nd):g}"
+        except ValueError:
+            return t
+    return "-"
+
+
+def _ytm_disp(v):
+    """
+    YTM 顯示:四捨五入、過濾異常值。
+    近到期券常出現 -41 或 84 這種失真數字,一律不顯示。
+    """
+    if v in (None, "", 0, "#VALUE!", "#N/A"):
+        return None
+    parts = []
+    for seg in str(v).split("/"):
+        try:
+            f = float(seg.strip())
+        except ValueError:
+            return None
+        if f < 0 or f > 25:      # 超出合理區間視為失真
+            return None
+        parts.append(f"{round(f, 2):g}")
+    return "/".join(parts) if parts else None
+
+
 DISCLAIMER = (
-    "\n⚠️ 已知限制\n"
-    "1. 配息日是從「到期日＋配息頻率」倒推的，少數債券付息日與到期日不同號，請以實際配息日為主\n"
-    "2. 營業日只避開週六日，未避開台美假日，假日前後請人工再確認\n"
-    "3. 🔒專投＝限專業投資人（依報價檔分頁或備註判斷）；💎高資產＝高資產客戶專屬\n"
-    "4. 本表僅列示配息時點資訊，非投資建議，亦非鼓勵於特定時點進場"
+    "\n⚠️ 未於截止日前申購者仍可於配息後申購，前手息較低，非錯失機會。"
+    "配息日由到期日＋頻率推算、營業日未含台美假日，請以實際為準。"
+    "🔒專投｜💎高資產。本表為時點資訊，非投資建議。"
 )
 
 def is_bond_pricing_file(path, filename=""):
@@ -238,7 +270,7 @@ def build_alerts(path, today=None, lookahead=LOOKAHEAD_DAYS):
     alerts.sort(key=lambda a: (a["coupon_date"], -a["lag"], a["name"]))
     return alerts
 
-def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3, max_lines=30, maturity_days=30):
+def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3, max_lines=10, maturity_days=30):
     """
     回傳給 LINE 用的純文字訊息。
     lookahead  : 往前看幾天的配息日（預設 14）
@@ -262,13 +294,12 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
                 f"{scope}無配息前申購截止的債券。\n"
                 f"（未來{lookahead}天共 {len(alerts)} 檔配息，配息前尚可申購 {len(ok_all)} 檔，可打 /coupon all 看全部）"
                 + paid_txt + mat_txt + DISCLAIMER)
+    ok = [a for a in ok if a["offer"] not in (None, "", 0, "#VALUE!", "#N/A")]   # 無報價不列
     ok.sort(key=lambda a: (a["last_trade"], -a["lag"], a["name"]))
     lines = [f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達",
              f"{scope}：{len(ok)} 檔",
              f"（未來{lookahead}天共 {len(alerts)} 檔配息｜配息前可申購 {len(ok_all)}｜本期已截止 {gone}）",
-             "📌 配息前申購需支付較高前手息；配息日過後申購，"
-             "應計利息重新起算，前手息最低。兩者經濟價值相當，差別在資金支付多寡，"
-             "請依客戶資金狀況評估，本表僅為時點資訊。\n"]
+             "📌 配息前申購前手息較高、配息後較低，經濟價值相當，差別在期初支付金額。\n"]
     cur = None
     for i, a in enumerate(ok):
         if a["last_trade"] != cur:
@@ -280,16 +311,15 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3
         offer = a["offer"] if a["offer"] not in (None, "", 0, "#VALUE!") else "-"
         ytm = a["ytm"] if a["ytm"] not in (None, "", 0) else "-"
         avail = "" if str(a["avail"]) == "有" else f"｜額度:{a['avail']}"
+        _y = _ytm_disp(a.get("ytm"))
         lines.append(
-            f"{a['code'] or '-'}\n"
-            f"{a['name']} {a['ccy']} {a['coupon']}% {a['freq']}｜{pi_tag(a)}\n"
-            f"  配息{a['coupon_date']:%m/%d}｜Offer {offer}｜YTM {ytm}{avail}"
+            f"{a['code'] or '-'}｜{a['name']} {a['ccy']} {_num(a['coupon'])}% {a['freq']}｜{pi_tag(a)}\n"
+            f"  配息{a['coupon_date']:%m/%d}｜Offer {_num(a.get('offer'))}"
+            + (f"｜YTM {_y}" if _y else "") + avail
         )
         if i + 1 >= max_lines and i + 1 < len(ok):
             lines.append(f"…另有 {len(ok)-i-1} 檔，見Excel")
             break
-    lines.append("\n※ 未於上述日期前申購者，仍可於配息後申購，屆時前手息較低，"
-                 "並非錯失投資機會，僅為參與本期配息與否之差異。")
     if paid_txt:
         lines.append(paid_txt)
     if mat_txt:
@@ -351,21 +381,18 @@ def just_paid(path, today=None, days_back=3):
     return out
 
 
-def format_just_paid(bonds, today=None, days_back=3, max_lines=8):
+def format_just_paid(bonds, today=None, days_back=3, max_lines=5):
     """組成訊息區塊:剛配息完、前手息最低的券"""
     if not bonds:
         return ""
     wd = "一二三四五六日"
-    lines = [f"\n💧 剛配息完（前手息最低）",
-             f"近{days_back}天已配息 {len(bonds)} 檔，應計利息重新起算，"
-             "此時申購支付的前手息最少，適合資金有限或希望降低期初支付金額的客戶。"]
+    lines = [f"\n💧 剛配息完（前手息最低）近{days_back}天 {len(bonds)} 檔"]
     for b in bonds[:max_lines]:
         d = b["coupon_date"]
-        offer = b["offer"] if b["offer"] not in (None, "", 0, "#VALUE!", "#N/A") else "-"
-        ytm = b["ytm"] if b["ytm"] not in (None, "", 0, "#N/A") else "-"
-        lines.append(f"{b.get('code') or '-'}")
-        lines.append(f"{b['name']} {b['ccy']} {b['coupon']}% {b['freq']}｜{pi_tag(b)}")
-        lines.append(f"  已配息{d:%m/%d}({wd[d.weekday()]})｜Offer {offer}｜YTM {ytm}")
+        _y = _ytm_disp(b.get("ytm"))
+        lines.append(f"{b.get('code') or '-'}｜{b['name']} {b['ccy']} {_num(b['coupon'])}% {b['freq']}｜{pi_tag(b)}")
+        lines.append(f"  已配息{d:%m/%d}({wd[d.weekday()]})｜Offer {_num(b.get('offer'))}"
+                     + (f"｜YTM {_y}" if _y else ""))
     if len(bonds) > max_lines:
         lines.append(f"…另有 {len(bonds)-max_lines} 檔")
     return "\n".join(lines)
@@ -380,18 +407,18 @@ def maturing_soon(path, today=None, days=30):
     out.sort(key=lambda b: (b["maturity"], b["name"]))
     return out
 
-def format_maturities(bonds, today=None, days=30, max_lines=15):
+def format_maturities(bonds, today=None, days=30, max_lines=5):
     today = today or date.today()
     if not bonds:
         return ""
     wd = "一二三四五六日"
-    lines = [f"\n💵 資金到期提醒（未來{days}天 {len(bonds)} 檔到期，本金將回流）"]
+    lines = [f"\n💵 到期提醒（未來{days}天 {len(bonds)} 檔）"]
     for b in bonds[:max_lines]:
         d = b["maturity"]
-        lines.append(f"▪ {d:%m/%d}({wd[d.weekday()]}) {b['name']} {b['ccy']} {b['coupon']}%｜{pi_tag(b)}")
+        lines.append(f"▪ {d:%m/%d}({wd[d.weekday()]}) {b['name']} {b['ccy']} {_num(b['coupon'])}%｜{pi_tag(b)}")
     if len(bonds) > max_lines:
         lines.append(f"…另有 {len(bonds)-max_lines} 檔")
-    lines.append("→ 建議提前聯絡持有客戶討論再投資")
+    lines.append("→ 可提前聯絡持有客戶討論再投資")
     return "\n".join(lines)
 
 # ---------- 報價檔快照與差異（信評異動 / 新上架 / 下架）----------
