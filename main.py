@@ -50,7 +50,8 @@ BOND_PRICE_FILE = Path(os.getenv("BOND_PRICE_FILE", "")) if os.getenv("BOND_PRIC
 BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "bondalert", "rating", "move", "price", "sheet", "focus", "help"}
 
 # ELN Bot(callback2)也開放的海外債指令:查詢類為主,燒 AI 的重型指令僅限 Albert 本人
-ELN_BOT_BOND_CMDS = {"price", "p", "價格", "報價", "issuer", "coupon", "move", "bondalert"}
+ELN_BOT_BOND_CMDS = {"price", "p", "價格", "報價", "issuer", "coupon", "move", "bondalert",
+                     "myid", "我的id"}
 ELN_BOT_BOND_HEAVY = {"sheet", "focus", "rating"}   # 需要 Albert 本人才可用
 
 def is_bond_group_chat(chat_key: str) -> bool:
@@ -60,6 +61,29 @@ def is_bond_group_chat(chat_key: str) -> bool:
         return bool(t.get("bond")) and t.get("bond_type") in ("group", "room") and chat_key.split(":", 1)[1] == t.get("bond")
     except Exception:
         return False
+
+def get_doc_users():
+    """可使用 /sheet /focus 等產文件指令的使用者清單(投資輔銷)"""
+    try:
+        return list((load_targets() or {}).get("doc_users", []))
+    except Exception:
+        return []
+
+
+def set_doc_users(uids):
+    t = load_targets() or {}
+    t["doc_users"] = list(dict.fromkeys(uids))
+    save_targets(t)
+
+
+def can_use_doc_cmd(uid):
+    """Albert 本人或名單內的使用者才能用產文件指令"""
+    if not uid:
+        return False
+    if uid == os.getenv("LINE_USER_ID", ""):
+        return True
+    return uid in get_doc_users()
+
 
 def get_bond_query_groups():
     try:
@@ -134,6 +158,7 @@ BOND_GROUP_HELP = (
     "/coupon settarget → 本群收每日推播（off取消）\n"
     "/price settarget → 本群只開放查價（off取消）\n"
     "/cleanup → 預覽Drive舊報告；/cleanup do → 清理\n"
+    "/sheetuser list → 產文件名單（add/del；對方先打 /myid 取得ID）\n"
     "\n📈 日報\n"
     "/bonddaily → 立即產生債券市場日報\n"
     "/bonddaily cache → 看最近一份\n"
@@ -708,7 +733,7 @@ async def callback2(request: Request):
             uid = ev.get("source", {}).get("userId", "")
             print(f"[ELN-G USER] uid={uid} msg={repr(txt[:50])}")
             _eln_bond_prefixes = tuple("/" + c for c in
-                                       (ELN_BOT_BOND_CMDS | ELN_BOT_BOND_HEAVY | {"help"}))
+                                       (ELN_BOT_BOND_CMDS | ELN_BOT_BOND_HEAVY | {"help", "myid"}))
             if tl.startswith(_eln_bond_prefixes):
                 # 海外債指令:轉交主處理器(共用同一套邏輯),回覆走 ELN Bot 頻道
                 try:
@@ -1424,9 +1449,13 @@ def handle_text_message(event):
             if not _ok and _is_eln_channel and cmd in ELN_BOT_BOND_CMDS:
                 _ok = True
             if not _ok and _is_eln_channel and cmd in ELN_BOT_BOND_HEAVY:
-                _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text=f"/{cmd} 目前僅開放固定收益科使用，請洽科內同仁協助產出。"))
-                return
+                if cmd in ("sheet", "focus") and can_use_doc_cmd(_sender_uid):
+                    _ok = True      # 名單內的投資輔銷可用
+                else:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text=f"/{cmd} 目前開放給投資輔銷同仁使用，"
+                             "請洽轄區投資輔銷協助產出。"))
+                    return
             if not _ok:
                 # ELN 頻道:錯誤指令只提示海外債用法,不列出 ELN 指令
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
@@ -2335,6 +2364,39 @@ def handle_text_message(event):
                     bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 清理失敗：{str(e)[:200]}"))
             import threading
             threading.Thread(target=_run_cleanup, args=(ck.split(":", 1)[1], _bot_api), daemon=True).start()
+            return
+        if cmd in ("myid", "我的id"):
+            _uid = getattr(event.source, "user_id", "") or ""
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=f"你的 LINE ID：\n{_uid}\n\n（如需開通產文件功能，請將此 ID 提供給固定收益科）"))
+            return
+        if cmd == "sheetuser":
+            # 僅 Albert 可管理名單
+            if not is_albert:
+                return
+            parts_u = raw_cmd.split()
+            act = parts_u[1].lower() if len(parts_u) > 1 else "list"
+            cur = get_doc_users()
+            if act in ("add", "加入") and len(parts_u) > 2:
+                for u in parts_u[2:]:
+                    if u.startswith("U") and len(u) >= 20 and u not in cur:
+                        cur.append(u)
+                set_doc_users(cur)
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=f"✅ 已加入，目前 {len(cur)} 人可使用 /sheet、/focus"))
+                return
+            if act in ("del", "remove", "移除") and len(parts_u) > 2:
+                cur = [u for u in cur if u not in parts_u[2:]]
+                set_doc_users(cur)
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=f"✅ 已移除，目前 {len(cur)} 人可使用 /sheet、/focus"))
+                return
+            body_u = [f"📋 產文件指令名單（{len(cur)} 人）", "可使用 /sheet、/focus", ""]
+            body_u += [f"・{u}" for u in cur] or ["（目前只有你自己可用）"]
+            body_u += ["", "新增：/sheetuser add U1a2b3...",
+                       "移除：/sheetuser del U1a2b3...",
+                       "（請對方打 /myid 取得自己的 ID）"]
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(body_u)[:4900]))
             return
         if cmd == "focus":
             # /focus 輝達            → 產生「債市每日聚焦 / 富邦好債報」PPTX(直式兩頁)
