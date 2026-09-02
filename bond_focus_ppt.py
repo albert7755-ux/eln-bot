@@ -276,7 +276,7 @@ def _chart_for_revenue_block(D):
     md = D.get("maturity_dist") or {}
     if md.get("labels"):
         return (_bar_png(md["labels"], [("檔數", md["values"])], "架上債券到期分布"),
-                "本行架上該發行機構之債券檔數")
+                "總行架上該發行機構之債券檔數")
     return None, ""
 
 
@@ -369,7 +369,7 @@ def build_focus_pptx(out_path, D):
            col_w=[Cm(4.5), Cm(4.3), Cm(2.3), Cm(3.2), Cm(4.4)],
            row_h=Cm(1.05), font=13.5, head_fill=PEACH, body_fill=PEACH)
     _txt(s, M, y_tbl + Cm(1.05) * (len(body) + 1) + Cm(0.2), W, Cm(0.8),
-         "※ 報價與可承作與否以本行系統為準；商品條件依產品說明書。", size=10.5, color=GRAY)
+         "※ 報價與可承作與否以總行系統為準；商品條件依產品說明書。", size=10.5, color=GRAY)
 
     _txt(s, M, Cm(27.8), Cm(8), Cm(0.8), "僅限內部教育訓練使用", size=12.5, bold=True, color=RED)
     _txt(s, M, Cm(27.8), W, Cm(0.8), "台北富邦銀行", size=12.5, bold=True, color=NAVY, align=PP_ALIGN.RIGHT)
@@ -585,7 +585,7 @@ def build_focus_pdf(out_path, D):
     tb.setStyle(TableStyle(tb_style))
     el.append(tb)
     el.append(Spacer(1, 0.15 * cm))
-    el.append(Paragraph("※ 報價與可承作與否以本行系統為準；商品條件依產品說明書。",
+    el.append(Paragraph("※ 報價與可承作與否以總行系統為準；商品條件依產品說明書。",
                         ParagraphStyle("sm2", fontName=FN, fontSize=10, leading=14, textColor=GRAY_)))
 
     el.append(PageBreak())
