@@ -235,11 +235,16 @@ def price_movers(days_back=1, threshold_pct=2.0, top_n=15):
         rows = conn.execute(text("""
             SELECT n.isin, n.bond_name, n.ccy, o.offer, n.offer, o.ytm, n.ytm
             FROM bond_price_history n JOIN bond_price_history o ON o.isin = n.isin AND o.snap_date = :b
-            WHERE n.snap_date = :l AND n.offer IS NOT NULL AND o.offer IS NOT NULL AND o.offer > 0
+            WHERE n.snap_date = :l
+              AND n.offer IS NOT NULL AND o.offer IS NOT NULL
+              AND n.offer > 1 AND o.offer > 1
         """), {"b": base, "l": latest}).fetchall()
     movers = []
     for isin, name, ccy, o_off, n_off, o_ytm, n_ytm in rows:
         chg = (n_off - o_off) / o_off * 100
+        if abs(chg) > 30:      # 單日/單週逾30%多為報價缺漏或資料異常,不列入
+            print(f"[BondMovers] 略過異常變動 {name} {o_off}→{n_off} ({chg:+.0f}%)")
+            continue
         if abs(chg) >= threshold_pct:
             movers.append((chg, isin, name, ccy, o_off, n_off, o_ytm, n_ytm))
     if not movers:
@@ -258,7 +263,9 @@ def price_movers(days_back=1, threshold_pct=2.0, top_n=15):
              f"跌 {len([m for m in movers if m[0] < 0])} 檔｜漲 {len([m for m in movers if m[0] > 0])} 檔"]
     def _fmt(m):
         chg, isin, name, ccy, o_off, n_off, o_ytm, n_ytm = m
-        y = f"｜YTM {o_ytm:g}→{n_ytm:g}" if (o_ytm is not None and n_ytm is not None) else ""
+        _valid = (o_ytm is not None and n_ytm is not None
+                  and 0 < o_ytm <= 25 and 0 < n_ytm <= 25)
+        y = f"｜YTM {round(o_ytm,2):g}→{round(n_ytm,2):g}" if _valid else ""
         return f"▪ {name} {ccy}｜{tags.get(isin, '')}\n  Offer {o_off:g}→{n_off:g}（{chg:+.1f}%）{y}"
     if downs:
         lines.append("\n📉 跌幅")
