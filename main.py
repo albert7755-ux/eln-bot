@@ -707,6 +707,128 @@ def whoami():
 # ==============================
 # Webhook endpoint
 # ==============================
+# ==============================
+# 報價檔網頁上傳（供無法用 LINE 傳檔時使用）
+# ==============================
+BOND_UPLOAD_TOKEN = os.getenv("BOND_UPLOAD_TOKEN", "")
+
+_BOND_UPLOAD_HTML = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>債券報價檔上傳</title>
+<style>
+ body{font-family:"Microsoft JhengHei",system-ui,sans-serif;background:#f4f7fa;margin:0;padding:24px}
+ .card{max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:28px;
+       box-shadow:0 2px 12px rgba(0,0,0,.07)}
+ h1{font-size:20px;color:#0B2A4A;margin:0 0 6px}
+ p.sub{color:#667;font-size:13px;margin:0 0 20px}
+ label{display:block;font-size:13px;color:#334;margin:14px 0 6px;font-weight:600}
+ input[type=password],input[type=file]{width:100%;padding:10px;border:1px solid #ccd;
+       border-radius:8px;font-size:14px;box-sizing:border-box;background:#fafbfc}
+ button{margin-top:20px;width:100%;padding:12px;background:#1F8AC0;color:#fff;border:0;
+       border-radius:8px;font-size:15px;font-weight:600;cursor:pointer}
+ button:disabled{background:#9bc;cursor:wait}
+ .msg{margin-top:16px;padding:12px;border-radius:8px;font-size:14px;line-height:1.6}
+ .ok{background:#e8f6ee;color:#1b6b3a}.err{background:#fdecec;color:#a12}
+ .note{margin-top:18px;font-size:12px;color:#889;line-height:1.7}
+</style></head><body>
+<div class="card">
+  <h1>債券報價檔上傳</h1>
+  <p class="sub">上傳後將自動更新報價、產生配息雷達，並比對信評異動與報價變動</p>
+  <form method="post" enctype="multipart/form-data" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='上傳處理中，請稍候…'">
+    <label>存取密碼</label>
+    <input type="password" name="token" required autocomplete="off">
+    <label>報價檔（.xlsx）</label>
+    <input type="file" name="file" accept=".xlsx,.xlsm" required>
+    <button type="submit">上傳並更新</button>
+  </form>
+  __MSG__
+  <div class="note">
+    ・檔名請保留日期（例如 09-02-2026-Bond Pricing Update.xlsx）<br>
+    ・檔名日期為今日或近 3 天：更新最新報價並跑完整流程<br>
+    ・檔名日期較舊：僅補歷史報價，不會覆蓋最新報價<br>
+    ・處理結果會同步推播到 LINE
+  </div>
+</div></body></html>"""
+
+
+@app.get("/bond-upload", response_class=HTMLResponse)
+def bond_upload_page():
+    return _BOND_UPLOAD_HTML.replace("__MSG__", "")
+
+
+@app.post("/bond-upload", response_class=HTMLResponse)
+async def bond_upload_post(token: str = Form(""), file: UploadFile = File(...)):
+    def _page(msg, ok=True):
+        cls = "ok" if ok else "err"
+        return _BOND_UPLOAD_HTML.replace("__MSG__", f'<div class="msg {cls}">{msg}</div>')
+
+    if not BOND_UPLOAD_TOKEN or token != BOND_UPLOAD_TOKEN:
+        return _page("❌ 密碼錯誤", ok=False)
+    if not _BOND_RADAR_OK:
+        return _page("❌ 報價模組未載入，請聯絡管理者", ok=False)
+    fname = file.filename or "upload.xlsx"
+    if not fname.lower().endswith((".xlsx", ".xlsm")):
+        return _page("❌ 請上傳 .xlsx 檔案", ok=False)
+
+    tmp_path = f"/tmp/upload_{int(datetime.now().timestamp())}_{os.path.basename(fname)}"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(await file.read())
+        if not _is_bond_pricing_file(tmp_path, fname):
+            os.remove(tmp_path)
+            return _page("❌ 這個檔案看起來不是海外債報價檔（找不到報價檔的工作表）", ok=False)
+
+        today_ = datetime.now(TZ_TAIPEI).date()
+        snap = parse_pricing_file_date(fname)
+        user_id = os.getenv("LINE_USER_ID", "")
+
+        # 舊檔 → 只補歷史
+        if snap and (today_ - snap).days >= 3:
+            n = save_price_history(snap_date=snap, path=tmp_path)
+            os.remove(tmp_path)
+            write_job_log("報價檔上傳(網頁)", "history", f"{snap} {n}筆")
+            return _page(f"✅ 已補入 {snap:%Y/%m/%d} 歷史報價快照（{n} 檔）<br>"
+                         "最新報價檔與配息雷達未變更。")
+
+        import shutil
+        BOND_PRICE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(tmp_path, str(BOND_PRICE_FILE))
+        os.remove(tmp_path)
+        write_job_log("報價檔上傳(網頁)", "file_updated", fname)
+
+        def _post_process():
+            try:
+                msg = _bond_build_alert(str(BOND_PRICE_FILE), today=today_)
+                if user_id:
+                    push_long_message(line_bot_api, user_id, "✅ 報價檔已更新（網頁上傳）\n\n" + msg)
+                diff_txt = snapshot_and_diff()
+                if diff_txt and user_id:
+                    push_long_message(line_bot_api, user_id, "📋 與上一份報價檔比對\n" + diff_txt)
+                save_price_history(snap_date=(snap if snap and snap <= today_ else None))
+                for db_, th_ in ((1, 2.0), (7, 3.0)):
+                    mv, _, _ = price_movers(days_back=db_, threshold_pct=th_)
+                    if mv and user_id:
+                        push_long_message(line_bot_api, user_id, mv)
+                check_bond_alerts(line_bot_api, source="upload")
+            except Exception as e:
+                print(f"[BondUpload post] {e}")
+                print(_traceback.format_exc()[:500])
+
+        import threading
+        threading.Thread(target=_post_process, daemon=True).start()
+        return _page(f"✅ 報價檔已更新（{fname}）<br>"
+                     "配息雷達、信評比對與報價異動正在背景處理，結果將推播到 LINE。")
+    except Exception as e:
+        print(f"[BondUpload] {e}")
+        print(_traceback.format_exc()[:500])
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        return _page(f"❌ 處理失敗：{str(e)[:200]}", ok=False)
+
+
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature")
