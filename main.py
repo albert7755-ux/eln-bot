@@ -1456,8 +1456,12 @@ def handle_text_message(event):
             if not _ok and _is_eln_channel and cmd in ELN_BOT_BOND_CMDS:
                 _ok = True
             if not _ok and _is_eln_channel and cmd in ELN_BOT_BOND_HEAVY:
-                if cmd in ("sheet", "focus") and can_use_doc_cmd(_sender_uid):
+                if cmd == "sheet" and can_use_doc_cmd(_sender_uid):
                     _ok = True      # 名單內的投資輔銷可用
+                elif cmd == "focus":
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text="/focus 目前僅開放固定收益科使用，請洽固定收益科協助產出。"))
+                    return
                 else:
                     _bot_api.reply_message(event.reply_token, TextSendMessage(
                         text=f"/{cmd} 目前開放給投資輔銷同仁使用，"
@@ -2390,15 +2394,15 @@ def handle_text_message(event):
                         cur.append(u)
                 set_doc_users(cur)
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text=f"✅ 已加入，目前 {len(cur)} 人可使用 /sheet、/focus"))
+                    text=f"✅ 已加入，目前 {len(cur)} 人可使用 /sheet"))
                 return
             if act in ("del", "remove", "移除") and len(parts_u) > 2:
                 cur = [u for u in cur if u not in parts_u[2:]]
                 set_doc_users(cur)
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text=f"✅ 已移除，目前 {len(cur)} 人可使用 /sheet、/focus"))
+                    text=f"✅ 已移除，目前 {len(cur)} 人可使用 /sheet"))
                 return
-            body_u = [f"📋 產文件指令名單（{len(cur)} 人）", "可使用 /sheet、/focus", ""]
+            body_u = [f"📋 產文件指令名單（{len(cur)} 人）", "可使用 /sheet（/focus 仍限固定收益科）", ""]
             body_u += [f"・{u}" for u in cur] or ["（目前只有你自己可用）"]
             body_u += ["", "新增：/sheetuser add U1a2b3...",
                        "移除：/sheetuser del U1a2b3...",
