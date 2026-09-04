@@ -160,6 +160,9 @@ BOND_GROUP_HELP = (
     "/coupon settarget → 本群收每日推播（off取消）\n"
     "/price settarget → 本群只開放查價（off取消）\n"
     "/cleanup → 預覽Drive舊報告；/cleanup do → 清理\n"
+    "/econ check → 立即檢查重要數據/央行會議是否剛公布\n"
+    "/econ list → 看追蹤清單（自動偵測公布會直接推播）\n"
+    "/econ calendar → 看本月事件確切日期（refresh強制更新）\n"
     "/sheetuser list → 產文件名單（add/del；對方先打 /myid 取得ID）\n"
     "\n📈 日報\n"
     "/bonddaily → 立即產生債券市場日報\n"
@@ -2465,6 +2468,72 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 診斷失敗：{str(e)[:300]}"))
             return
+        if cmd == "econ":
+            # /econ check → 立即檢查一次(忽略已推播記錄,強制重查今天)
+            # /econ list  → 看目前追蹤清單
+            parts_e = raw_cmd.split()
+            act_e = parts_e[1].lower() if len(parts_e) > 1 else ""
+            if act_e in ("calendar", "日曆"):
+                force = len(parts_e) > 2 and parts_e[2].lower() in ("refresh", "更新")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="📅 查詢中..." if force else "📅 讀取本月日曆..."))
+                def _run_cal(chat_id, bot_api_ref, force_):
+                    try:
+                        from econ_watch import (ensure_table, _month_key, has_month_calendar,
+                                                get_month_calendar, fetch_month_calendar,
+                                                save_month_calendar, ECON_ITEMS)
+                        ensure_table(engine, sql_text)
+                        mk = _month_key()
+                        if force_ or not has_month_calendar(engine, sql_text, mk):
+                            cal = fetch_month_calendar(claude_client, mk)
+                            if cal:
+                                save_month_calendar(engine, sql_text, mk, cal)
+                        else:
+                            cal = get_month_calendar(engine, sql_text, mk)
+                        label_map = {it["key"]: it["label"] for it in ECON_ITEMS}
+                        if not cal:
+                            bot_api_ref.push_message(chat_id, TextSendMessage(text=f"📅 {mk} 日曆查詢無結果，可能是本月無相關事件或查詢失敗。"))
+                            return
+                        lines_c = [f"📅 {mk} 追蹤事件日曆", ""]
+                        for k, d in sorted(cal.items(), key=lambda x: x[1]):
+                            lines_c.append(f"{d:%m/%d}({'一二三四五六日'[d.weekday()]}) {label_map.get(k, k)}")
+                        lines_c.append("\n偵測到公布會自動推播；/econ calendar refresh 可強制重新查詢")
+                        bot_api_ref.push_message(chat_id, TextSendMessage(text="\n".join(lines_c)))
+                    except Exception as e:
+                        print(f"[EconWatch calendar ERROR] {e}")
+                        bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 查詢失敗:{str(e)[:200]}"))
+                import threading
+                threading.Thread(target=_run_cal, args=(ck.split(":", 1)[1], _bot_api, force), daemon=True).start()
+                return
+            if act_e in ("list", "清單"):
+                try:
+                    from econ_watch import ECON_ITEMS
+                    body_e = ["📊 經濟數據/央行會議追蹤清單", ""]
+                    body_e += [f"・{it['label']}" for it in ECON_ITEMS]
+                    body_e.append("\n偵測到公布會自動推播；也可打 /econ check 立即檢查")
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(body_e)))
+                except Exception as e:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 讀取失敗:{str(e)[:150]}"))
+                return
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 檢查中，約30~60秒..."))
+            def _run_econ(chat_id, bot_api_ref):
+                try:
+                    from econ_watch import check_econ_events, already_pushed, ensure_table, _today_key
+                    ensure_table(engine, sql_text)
+                    today_k = _today_key()
+                    # /econ check 強制重查:清掉今天的已推播記錄(僅此次操作觸發的重查)
+                    with engine.begin() as conn:
+                        conn.execute(sql_text("DELETE FROM econ_event_seen WHERE day_key=:d"), {"d": today_k})
+                    hit = check_econ_events(engine, sql_text, claude_client,
+                                            lambda m: bot_api_ref.push_message(chat_id, TextSendMessage(text=m)))
+                    if not hit:
+                        bot_api_ref.push_message(chat_id, TextSendMessage(text="📊 目前沒有偵測到剛公布的數據或會議結果。"))
+                except Exception as e:
+                    print(f"[EconWatch manual ERROR] {e}")
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 檢查失敗:{str(e)[:200]}"))
+            import threading
+            threading.Thread(target=_run_econ, args=(ck.split(":", 1)[1], _bot_api), daemon=True).start()
+            return
         if cmd == "cleanup":
             # /cleanup        → 預覽:列出 30 天前的舊檔,不刪除
             # /cleanup do     → 實際清理(移到垃圾桶,可救回)
@@ -4377,6 +4446,36 @@ def job_drive_cleanup():
         write_job_log("Drive清理", "error", str(e))
         print(f"[DriveCleanup ERROR] {e}")
 
+def job_econ_watch():
+    """每 10 分鐘檢查一次重要經濟數據/央行會議是否剛公布(僅在合理時段內實際查詢)"""
+    try:
+        from econ_watch import check_econ_events
+    except Exception as e:
+        print(f"[EconWatch] 模組載入失敗: {e}")
+        return
+    _t = load_targets() or {}
+    user_id = os.getenv("LINE_USER_ID", "")
+    recipients = [t for t in dict.fromkeys([user_id, _t.get("bond", "")] + list(_t.get("bond_subscribers", []))) if t]
+    if not recipients:
+        return
+
+    def _push(msg):
+        for rid in recipients:
+            try:
+                push_long_message(line_bot_api, rid, msg)
+            except Exception as e:
+                print(f"[EconWatch] push fail {rid[:8]}...: {e}")
+
+    try:
+        hit = check_econ_events(engine, sql_text, claude_client, _push)
+        if hit:
+            write_job_log("經濟數據監控", "success", f"推播 {hit} 項")
+    except Exception as e:
+        print(f"[EconWatch ERROR] {e}")
+        print(_traceback.format_exc()[:500])
+        write_job_log("經濟數據監控", "error", str(e))
+
+
 def job_bond_rating_news():
     """每天 07:00 外部信評新聞掃描，推給配息雷達同一批對象"""
     now = datetime.now(TZ_TAIPEI_PYTZ)
@@ -4634,6 +4733,7 @@ def start_scheduler():
     scheduler.add_job(job_bond_coupon_radar, CronTrigger(day_of_week="mon-fri", hour=6, minute=25, timezone=TZ_TAIPEI_PYTZ), id="bond_coupon_radar", name="海外債配息雷達")
     scheduler.add_job(job_bond_rating_news, CronTrigger(day_of_week="mon-fri", hour=6, minute=50, timezone=TZ_TAIPEI_PYTZ), id="bond_rating_news", name="信評新聞雷達")
     scheduler.add_job(job_drive_cleanup, CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=TZ_TAIPEI_PYTZ), id="drive_cleanup", name="Drive清理")
+    scheduler.add_job(job_econ_watch, IntervalTrigger(minutes=10, timezone=TZ_TAIPEI_PYTZ), id="econ_watch", name="經濟數據監控")
     scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=40, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
     scheduler.add_job(job_bond_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ), id="bond_daily_report", name="債券日報")
     scheduler.add_job(job_auto_tracking, CronTrigger(day_of_week="mon-sat", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ), id="auto_tracking", name="ELN自動追蹤")
