@@ -148,6 +148,7 @@ BOND_GROUP_HELP = (
     "/issuer 蘋果 → 簡介＋架上所有債券\n"
     "/sheet 蘋果 → 參考資訊（信評+財務+圖表+標的，含PDF）\n"
     "/focus 輝達 → 債市每日聚焦 PPTX（直式兩頁，可編輯）\n"
+    "/stock intc → 個股完整分析報告（商業模式+財務+護城河+估值+多空辯論，文字摘要+PDF；輔銷可用）\n"
     "\n🚨 信評\n"
     "/rating → 立即掃外部信評新聞\n"
     "/rating list　/rating watch 台積電　/rating unwatch 蘋果\n"
@@ -2604,6 +2605,88 @@ def handle_text_message(event):
                        "移除：/sheetuser del U1a2b3...",
                        "（請對方打 /myid 取得自己的 ID）"]
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(body_u)[:4900]))
+            return
+        if cmd in ("stock", "個股", "分析"):
+            # /stock intc → 產生完整個股分析報告(PDF)+LINE摘要
+            kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
+            if not kw:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="📈 用法：/stock intc\n/stock nvda\n"
+                         "產出個股完整分析報告(商業模式、財務健康度、護城河評分、"
+                         "估值分析、成長潛力、多空辯論、投資評估)，文字摘要+PDF"))
+                return
+            ticker_in = re.sub(r"[^A-Za-z0-9\.\-]", "", kw.split()[0]).upper()
+            if not ticker_in:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="請提供有效的股票代碼，例如 /stock intc"))
+                return
+            if not (is_albert or can_use_doc_cmd(getattr(event.source, "user_id", ""))):
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="/stock 目前開放給投資輔銷同仁使用，請洽轄區投資輔銷協助產出。"))
+                return
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=f"📈 分析 {ticker_in} 中(抓取財務數據、搜尋公開資訊)，約 60~120 秒..."))
+
+            def _run_stock(chat_id, bot_api_ref, ticker_):
+                try:
+                    from stock_analysis import (get_5y_financials, get_peer_pe, simple_dcf_scenarios,
+                                                generate_analysis, build_financial_chart,
+                                                build_report_pdf, build_summary_text)
+                    fin = get_5y_financials(ticker_)
+                    if not fin:
+                        bot_api_ref.push_message(chat_id, TextSendMessage(
+                            text=f"❌ 查無「{ticker_}」的財務資料，請確認股票代碼是否正確（需為 Yahoo Finance 可辨識代碼）。"))
+                        return
+                    dcf = simple_dcf_scenarios(fin)
+
+                    # 同業:先讓 AI 給建議代碼,再用 yfinance 抓真實 PE(避免臆測數字)
+                    peers = []
+                    try:
+                        peer_prompt = (f"股票代碼「{ticker_}」的主要同業競爭對手有哪些?請給2~3家的股票代碼(美股代碼優先)。"
+                                       '只回傳JSON:{"peers":["TICKER1","TICKER2"]}')
+                        got, _, _ = llm_json_fallback(peer_prompt, max_tokens=200)
+                        peer_tickers = [str(x).upper() for x in (got or {}).get("peers", [])][:3]
+                        if peer_tickers:
+                            peers = get_peer_pe(peer_tickers)
+                    except Exception as e:
+                        print(f"[StockAnalysis] peers fail: {e}")
+
+                    analysis = generate_analysis(claude_client, ticker_, fin, peers, dcf)
+                    if not analysis:
+                        bot_api_ref.push_message(chat_id, TextSendMessage(text="❌ 分析生成失敗(AI服務不可用)，請稍後再試。"))
+                        return
+
+                    summary_txt = build_summary_text(ticker_, fin, analysis, dcf)
+                    push_long_message(bot_api_ref, chat_id, summary_txt)
+
+                    chart_png = None
+                    try:
+                        chart_png = build_financial_chart(fin)
+                    except Exception as e:
+                        print(f"[StockAnalysis] chart fail: {e}")
+
+                    today_ = datetime.now(TZ_TAIPEI).date()
+                    out_pdf = f"/tmp/個股分析_{ticker_}_{today_:%Y%m%d}.pdf"
+                    build_report_pdf(out_pdf, ticker_, fin, peers, dcf, analysis,
+                                     chart_png=chart_png, today=today_)
+                    if chart_png:
+                        try:
+                            os.remove(chart_png)
+                        except Exception:
+                            pass
+                    link = upload_to_drive(out_pdf, f"個股分析_{ticker_}_{today_:%Y%m%d}.pdf")
+                    try:
+                        os.remove(out_pdf)
+                    except Exception:
+                        pass
+                    bot_api_ref.push_message(chat_id, TextSendMessage(
+                        text=f"📄 {ticker_} 完整分析報告 PDF\n🔗 {link}"))
+                except Exception as e:
+                    print(f"[StockAnalysis ERROR] {e}")
+                    print(_traceback.format_exc())
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 分析失敗：{str(e)[:200]}"))
+
+            import threading
+            threading.Thread(target=_run_stock, args=(ck.split(":", 1)[1], _bot_api, ticker_in), daemon=True).start()
             return
         if cmd == "focus":
             # /focus 輝達            → 產生「債市每日聚焦 / 富邦好債報」PPTX(直式兩頁)
