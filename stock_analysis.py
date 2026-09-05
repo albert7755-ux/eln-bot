@@ -124,9 +124,43 @@ def get_5y_financials(ticker):
             "52w_low": info.get("fiftyTwoWeekLow"),
             "dividend_yield": info.get("dividendYield"),
         }
+        # 最新一季實績(供「Q2 實績」這類敘事用)
+        latest_q = {}
+        try:
+            qf = t.quarterly_financials
+            if qf is not None and not qf.empty:
+                cols_q = list(qf.columns)
+                c0 = cols_q[0]
+                rev_q = pick(qf, ["Total Revenue", "Operating Revenue"], c0)
+                ni_q = pick(qf, ["Net Income", "Net Income Common Stockholders"], c0)
+                gp_q = pick(qf, ["Gross Profit"], c0)
+                op_q = pick(qf, ["Operating Income"], c0)
+                rev_q_yoy = None
+                if len(cols_q) >= 5:
+                    rev_prev = pick(qf, ["Total Revenue", "Operating Revenue"], cols_q[4])
+                    if rev_prev:
+                        rev_q_yoy = (rev_q / rev_prev - 1) * 100 if rev_q else None
+                latest_q = {"period": f"{c0.year}Q{(c0.month-1)//3+1}", "revenue": rev_q, "net_income": ni_q,
+                            "gross_margin": (gp_q / rev_q * 100) if (gp_q and rev_q) else None,
+                            "op_margin": (op_q / rev_q * 100) if (op_q and rev_q) else None,
+                            "revenue_yoy": rev_q_yoy}
+        except Exception as e:
+            print(f"[StockAnalysis] quarterly fail: {e}")
+        # 年初至今漲幅、52週位置
+        try:
+            hist = t.history(period="ytd")
+            if hist is not None and len(hist) >= 2:
+                cur["ytd_pct"] = (hist["Close"].iloc[-1] / hist["Close"].iloc[0] - 1) * 100
+        except Exception:
+            pass
+        cur["gross_margin"] = (info.get("grossMargins") or 0) * 100 or None
+        cur["op_margin"] = (info.get("operatingMargins") or 0) * 100 or None
+        cur["target_mean"] = info.get("targetMeanPrice")
+        cur["analyst_count"] = info.get("numberOfAnalystOpinions")
+        cur["recommendation"] = info.get("recommendationKey")
         if not years and not cur.get("market_cap"):
             return None
-        return {"current": cur, "years": years}
+        return {"current": cur, "years": years, "latest_q": latest_q}
     except Exception as e:
         print(f"[StockAnalysis] {ticker} financials fail: {e}")
         return None
@@ -139,10 +173,19 @@ def get_peer_pe(tickers):
     for tk in tickers[:4]:
         try:
             info = yf.Ticker(tk).info or {}
+            ytd = None
+            try:
+                h = yf.Ticker(tk).history(period="ytd")
+                if h is not None and len(h) >= 2:
+                    ytd = (h["Close"].iloc[-1] / h["Close"].iloc[0] - 1) * 100
+            except Exception:
+                pass
             out.append({
                 "ticker": tk, "name": info.get("shortName") or tk,
-                "pe": info.get("trailingPE"), "market_cap": info.get("marketCap"),
-                "roe": info.get("returnOnEquity"),
+                "pe": info.get("trailingPE"), "pe_fwd": info.get("forwardPE"),
+                "market_cap": info.get("marketCap"), "roe": info.get("returnOnEquity"),
+                "gross_margin": (info.get("grossMargins") or 0) * 100 or None,
+                "revenue_ttm": info.get("totalRevenue"), "ytd_pct": ytd,
             })
         except Exception as e:
             print(f"[StockAnalysis] peer {tk} fail: {e}")
@@ -193,80 +236,119 @@ def simple_dcf_scenarios(fin, discount_rate=0.09, years=5):
 
 # ---------- AI 質化分析(Claude + web_search) ----------
 def generate_analysis(anthropic_client, ticker, fin, peers, dcf):
+    """
+    用 Claude + web_search 產生深度分析(對齊 sell-side 深度研究報告的敘事密度)。
+    財務數字由我們提供真實數據;AI 負責解讀、找近期事件、寫有觀點的敘事。
+    回傳 dict 或 None(失敗原因存於 generate_analysis.last_error)。
+    """
     generate_analysis.last_error = ""
-    """
-    用 Claude + web_search 產生質化分析內容。
-    財務數字已由我們提供真實數據,要求 AI 只根據提供的數字與搜尋到的公開資訊撰寫,
-    不得臆測未提供的具體數字。回傳 dict 或 None。
-    """
     cur = fin["current"]
     yrs = fin.get("years") or []
+    lq = fin.get("latest_q") or {}
+
+    def _r(v, nd=1):
+        return round(v, nd) if isinstance(v, (int, float)) else None
+
     fin_summary = {
         "公司": cur.get("name"), "產業": cur.get("industry"), "類別": cur.get("sector"),
-        "股價": cur.get("price"), "市值": cur.get("market_cap"),
-        "本益比_trailing": cur.get("pe_trailing"), "本益比_forward": cur.get("pe_forward"),
-        "5年財務": [{"年度": y["year"], "營收": y["revenue"], "淨利": y["net_income"],
-                    "自由現金流": y["fcf"], "淨利率%": round(y["net_margin"], 1) if y.get("net_margin") else None,
-                    "ROE%": round(y["roe"], 1) if y.get("roe") else None,
-                    "負債": y["debt"]} for y in yrs],
-        "同業本益比": [{"代碼": p["ticker"], "名稱": p["name"], "PE": p.get("pe")} for p in peers],
+        "股價": cur.get("price"), "市值": cur.get("market_cap"), "年初至今漲幅%": _r(cur.get("ytd_pct")),
+        "52週高": cur.get("52w_high"), "52週低": cur.get("52w_low"),
+        "本益比_trailing": _r(cur.get("pe_trailing")), "本益比_forward": _r(cur.get("pe_forward")),
+        "毛利率%": _r(cur.get("gross_margin")), "營業利益率%": _r(cur.get("op_margin")),
+        "分析師平均目標價": cur.get("target_mean"), "分析師人數": cur.get("analyst_count"),
+        "分析師共識": cur.get("recommendation"),
+        "最新一季": {"期間": lq.get("period"), "營收": lq.get("revenue"), "營收年增%": _r(lq.get("revenue_yoy")),
+                    "淨利": lq.get("net_income"), "毛利率%": _r(lq.get("gross_margin")),
+                    "營益率%": _r(lq.get("op_margin"))} if lq else None,
+        "近5年年度": [{"年度": y["year"], "營收": y["revenue"], "淨利": y["net_income"],
+                      "自由現金流": y["fcf"], "淨利率%": _r(y.get("net_margin")),
+                      "ROE%": _r(y.get("roe")), "總負債": y["debt"], "現金": y.get("cash")} for y in yrs],
+        "同業": [{"代碼": p["ticker"], "名稱": p["name"], "PE": _r(p.get("pe")), "預估PE": _r(p.get("pe_fwd")),
+                 "毛利率%": _r(p.get("gross_margin")), "年初至今%": _r(p.get("ytd_pct")),
+                 "市值": p.get("market_cap"), "營收TTM": p.get("revenue_ttm")} for p in peers],
     }
     dcf_summary = ""
     if dcf:
         sc = dcf["scenarios"]
-        dcf_summary = ("簡化DCF情境試算(每股價值,USD/當地貨幣): " +
-                       "; ".join(f"{k}:{v['value_per_share']:.1f}" if v.get("value_per_share") else f"{k}:N/A"
-                                for k, v in sc.items()))
+        dcf_summary = ("系統以最新FCF為起點、折現率9%做的簡化DCF每股價值: " +
+                       "; ".join(f"{k}(5年成長{v['growth']*100:.0f}%):{v['value_per_share']:.1f}"
+                                 if v.get("value_per_share") is not None else f"{k}:N/A"
+                                 for k, v in sc.items()) +
+                       "(僅供你參考,你可以在估值敘事中引用、也可以指出它的侷限)")
 
     prompt = (
-        f"你是一位華爾街資深股票分析師,請對「{ticker}」({cur.get('name')})進行完整分析。\n\n"
-        f"以下是真實財務數據,請基於這些數字進行判斷,不要臆測或編造其他具體數字:\n"
-        f"{json.dumps(fin_summary, ensure_ascii=False)}\n\n"
-        + (f"{dcf_summary}\n\n" if dcf_summary else "")
-        + "請上網搜尋這家公司最新的業務動態、產業地位、競爭對手、分析師觀點與相關新聞,"
-        "補充質化分析所需的資訊。\n\n"
-        "撰寫原則:\n"
-        "1. 用簡單易懂的方式解釋,但保有專業分析深度,像在跟同事解釋一樣。\n"
-        "2. 只根據我提供的真實數字與你搜尋到的公開資訊撰寫,不要臆測未經證實的具體數字"
-        "(例如不要編造精確的市占率百分比,除非你確實搜尋到)。\n"
-        "3. 多空論點都要有數據支持,不能空泛。\n"
-        "4. 最終結論用『市場評估角度』的中性表述(正向偏多／中性觀望／保守偏空),"
-        "不要用第一人稱『我建議』『你應該』這種語氣下投資決定。\n"
-        "5. 語氣專業中性,不做投資建議、不保證報酬。\n\n"
-        "只回傳以下 JSON 格式(不要有其他文字,不要用 markdown code block):\n"
+        f"你是一位華爾街資深股票分析師,要為「{ticker}」({cur.get('name')})寫一份深度研究報告,"
+        "讀者是銀行的理財專員與投資輔銷,他們要拿這份報告跟客戶討論。\n\n"
+        "=== 真實財務數據(由系統提供,請以此為準,不要改動或臆測其他具體數字) ===\n"
+        f"{json.dumps(fin_summary, ensure_ascii=False)}\n"
+        + (f"{dcf_summary}\n" if dcf_summary else "")
+        + "\n=== 你的任務 ===\n"
+        "請上網搜尋這家公司最近三個月的重大事件、最新一季財報重點、管理層說法、分析師觀點、"
+        "競爭對手動態與產業趨勢,然後寫出一份有觀點、有敘事、數字密集的深度報告。\n\n"
+        "=== 寫作風格(非常重要) ===\n"
+        "1. 像頂尖 sell-side 分析師寫給客戶的報告:有主張、有轉折、敢下判斷,不是資料堆砌。\n"
+        "2. 每一段都要有具體數字支撐(營收、年增率、毛利率、市占、目標價…),數字來自我提供的資料或你搜尋到的公開資訊;"
+        "沒有依據的具體數字寧可不寫。\n"
+        "3. 適度用生活化比喻幫助理解(例如把 IDM 比喻成『自己研發菜單也自己開廚房的餐廳』),但不要濫用。\n"
+        "4. 多空辯論要寫成兩位分析師的第一人稱發言,語氣像真人在辯論,各自引用數據互相反駁,"
+        "每方至少 150 字,不要條列。\n"
+        "5. 每個評分都要給分數和理由;和主要競爭對手比較時也給對手分數。\n"
+        "6. 繁體中文,專業但口語,句子不要太長。\n"
+        "7. 最後給明確評級(買入/持有/避免,可加修飾如『逢低分批買入』),並分別對「已持有者」「未持有者」「不適合的對象」給具體做法。"
+        "這是研究觀點,報告本身會附完整免責聲明。\n\n"
+        "=== 只回傳以下 JSON(不要有其他文字、不要用 markdown code block;所有字串用繁體中文) ===\n"
         "{\n"
-        '  "business_overview": "商業模式與主要收入來源,150-200字",\n'
-        '  "industry_trends": "產業趨勢,100-150字",\n'
+        '  "one_line": "一句話總結(80-120字,點出目前最核心的矛盾或機會,要有觀點)",\n'
+        '  "recent_changes": [{"item":"面向","before":"三個月前狀況","now":"現況","direction":"▲/▼/△ 一句話"}, ...共4-6項],\n'
+        '  "business": {\n'
+        '    "overview": "商業模式與收入來源,150-250字,可用比喻",\n'
+        '    "segments": [{"name":"事業群","desc":"做什麼","latest":"最新實績(含數字)"}, ...共2-5個],\n'
+        '    "ownership_note": "股東結構或其他值得注意的背景,0-120字,沒有就空字串"\n'
+        "  },\n"
         '  "moat": {\n'
-        '    "brand": "品牌影響力評述,40-60字",\n'
-        '    "network_effect": "網路效應評述,40-60字",\n'
-        '    "switching_cost": "轉換成本評述,40-60字",\n'
-        '    "cost_advantage": "成本優勢評述,40-60字",\n'
-        '    "patents_tech": "專利或獨家技術評述,40-60字",\n'
-        '    "peer_comparison": "與主要競爭對手的護城河比較,80-120字",\n'
-        '    "score": 數字(1-10),\n'
-        '    "score_rationale": "評分理由,50-80字"\n'
+        '    "dims": [{"name":"品牌影響力","comment":"評述(60-100字,含數字)","score":數字1-10},\n'
+        '             {"name":"網路效應",...}, {"name":"轉換成本",...}, {"name":"成本優勢",...}, {"name":"專利/獨家技術",...}],\n'
+        '    "score": 總分數字1-10, "verdict": "總評(80-150字)",\n'
+        '    "peers": [{"name":"競爭對手","score":數字,"note":"一句話"}, ...共2-4家]\n'
         "  },\n"
-        '  "financial_verdict": "根據提供的5年數據,判斷體質正在變強/變弱/持平,並說明理由,120-180字",\n'
-        '  "key_risks": ["風險1(30-50字)", "風險2", "風險3", "風險4"],\n'
+        '  "industry": [{"title":"趨勢標題","text":"說明(60-120字含數字)"}, ...共3-5項],\n'
+        '  "financials": {\n'
+        '    "year_notes": [{"year":年度,"note":"該年一句話註解(20-40字)"}, ...對應我提供的每個年度],\n'
+        '    "metrics": [{"name":"營收成長","verdict":"轉強/轉弱/持平/改善中","text":"判讀(60-120字含數字)"},\n'
+        '                {"name":"淨利趨勢",...},{"name":"自由現金流",...},{"name":"利潤率",...},{"name":"負債水準",...},{"name":"ROE",...}],\n'
+        '    "overall": "體質總判定(100-180字,要有結論句,例如「明確變強且斜率加速」)"\n'
+        "  },\n"
         '  "valuation": {\n'
-        '    "pe_comparison": "本益比與同業比較評述,80-120字",\n'
-        '    "dcf_narrative": "對DCF情境試算結果的解讀與意義,80-120字",\n'
-        '    "conclusion": "低估/合理/高估的結論與理由,60-100字"\n'
+        '    "table": [{"metric":"指標","self":"本公司數值","peer1":"對手1數值","peer2":"對手2數值","comment":"評語"}, ...共4-6列],\n'
+        '    "peer_names": ["對手1名稱","對手2名稱"],\n'
+        '    "dcf_reasoning": "DCF思路(150-250字):關鍵假設鏈 → 三情境合理股價區間(多/中/空各給區間)與現價的相對位置,可引用系統試算但要指出侷限",\n'
+        '    "scenarios": {"bull":{"range":"股價區間","cond":"條件"},"base":{"range":"...","cond":"..."},"bear":{"range":"...","cond":"..."}},\n'
+        '    "conclusion": "估值結論(100-180字):低估/合理/高估,引用分析師目標價與共識評級"\n'
         "  },\n"
-        '  "growth_potential": "未來5-10年成長潛力(市場規模/產業成長率/擴張機會/新產品/技術優勢),150-200字",\n'
-        '  "bull_case": ["多頭論點1(附數據,40-60字)", "論點2", "論點3"],\n'
-        '  "bear_case": ["空頭論點1(附數據,40-60字)", "論點2", "論點3"],\n'
-        '  "debate_synthesis": "中性綜合結論,80-120字",\n'
-        '  "outlook_short": "短期展望(1年內),60-100字",\n'
-        '  "outlook_long": "長期展望(5年以上),60-100字",\n'
-        '  "catalysts": ["催化因素1", "催化因素2", "催化因素3"],\n'
-        '  "market_lean": "正向偏多 或 中性觀望 或 保守偏空",\n'
-        '  "final_summary": "總結陳述,不做投資建議,100-150字"\n'
+        '  "growth": {\n'
+        '    "items": [{"title":"市場規模/產品路線/新產品/擴張機會等","text":"說明(60-120字含數字)"}, ...共3-5項],\n'
+        '    "scenarios_5_10y": {"bull":"樂觀情境描述(含營收/市值量級)","base":"基本情境","bear":"悲觀情境"}\n'
+        "  },\n"
+        '  "debate": {\n'
+        '    "bull": "多頭分析師第一人稱發言(150-300字,引用數據)",\n'
+        '    "bear": "空頭分析師第一人稱發言(150-300字,引用數據,要講出「沒人想聽的」)",\n'
+        '    "neutral": "中性結論(80-150字,點出真正的矛盾是什麼)"\n'
+        "  },\n"
+        '  "final": {\n'
+        '    "short_term": "短期展望1年內(100-180字,含催化與逆風,給股價區間預估)",\n'
+        '    "long_term": "長期展望5年以上(80-150字,點出單一最重要的觀察指標)",\n'
+        '    "catalysts": ["催化因素(含數字或時點)", ...共4-6項],\n'
+        '    "risks": ["主要風險", ...共4-6項],\n'
+        '    "rating": "買入 / 持有 / 避免(可加修飾,例如「持有 → 逢低分批買入」)",\n'
+        '    "holders": "已持有者怎麼做(40-80字)",\n'
+        '    "non_holders": "未持有者怎麼做(40-80字,可給區間)",\n'
+        '    "unsuitable": "不適合的對象(30-60字)"\n'
+        "  }\n"
         "}"
     )
+
     def _call(use_search, max_tokens):
-        kwargs = dict(model="claude-sonnet-4-6", max_tokens=max_tokens, temperature=0.3,
+        kwargs = dict(model="claude-sonnet-4-6", max_tokens=max_tokens, temperature=0.4,
                       messages=[{"role": "user", "content": prompt}])
         if use_search:
             kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
@@ -283,11 +365,9 @@ def generate_analysis(anthropic_client, ticker, fin, peers, dcf):
         except Exception as e:
             return None, f"JSON解析失敗:{str(e)[:80]}(stop={getattr(message, 'stop_reason', '?')})"
 
-    # 第一次:帶 web_search,輸出額度放大(長 JSON + 搜尋過程都很吃 token)
     last_err = ""
     try:
-        msg = _call(True, 8000)
-        got, err = _parse(msg)
+        got, err = _parse(_call(True, 16000))
         if got:
             return got
         last_err = err
@@ -295,20 +375,14 @@ def generate_analysis(anthropic_client, ticker, fin, peers, dcf):
     except Exception as e:
         last_err = f"{type(e).__name__}: {str(e)[:120]}"
         print(f"[StockAnalysis] API 呼叫失敗(含搜尋): {e}")
-
-    # 備援:不帶搜尋,只用我們提供的真實財務數據作答(仍有價值,但質化內容較少即時資訊)
     try:
-        msg = _call(False, 8000)
-        got, err = _parse(msg)
+        got, err = _parse(_call(False, 16000))
         if got:
             got["_note"] = "本次未能使用即時搜尋,質化內容以財務數據與既有知識為主"
             return got
         last_err = err
-        print(f"[StockAnalysis] 備援(不搜尋)失敗: {err}")
     except Exception as e:
         last_err = f"{type(e).__name__}: {str(e)[:120]}"
-        print(f"[StockAnalysis] API 呼叫失敗(不搜尋): {e}")
-
     generate_analysis.last_error = last_err
     return None
 
@@ -373,8 +447,18 @@ def build_financial_chart(fin, out_png=None):
 
 
 # ---------- PDF 報告 ----------
+def _g(d, *keys, default=""):
+    for k in keys:
+        if not isinstance(d, dict):
+            return default
+        d = d.get(k)
+        if d is None:
+            return default
+    return d
+
+
 def build_report_pdf(out_path, ticker, fin, peers, dcf, analysis, chart_png=None, today=None):
-    """產生多頁 PDF 股票分析報告"""
+    """深度研究報告 PDF(多頁,對齊 sell-side 報告層次)"""
     from datetime import date as _date
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import cm
@@ -383,7 +467,7 @@ def build_report_pdf(out_path, ticker, fin, peers, dcf, analysis, chart_png=None
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
-                                    TableStyle, Image as RLImage, PageBreak)
+                                    TableStyle, Image as RLImage, PageBreak, KeepTogether)
     from reportlab.lib.styles import ParagraphStyle
 
     today = today or _date.today()
@@ -391,8 +475,7 @@ def build_report_pdf(out_path, ticker, fin, peers, dcf, analysis, chart_png=None
     FN = "MSung-Light"
     if fp:
         try:
-            pdfmetrics.registerFont(TTFont("CJK", fp, subfontIndex=0))
-            FN = "CJK"
+            pdfmetrics.registerFont(TTFont("CJK", fp, subfontIndex=0)); FN = "CJK"
         except Exception:
             pdfmetrics.registerFont(UnicodeCIDFont("MSung-Light"))
     else:
@@ -401,233 +484,273 @@ def build_report_pdf(out_path, ticker, fin, peers, dcf, analysis, chart_png=None
     NAVY = colors.HexColor("#0B2A4A"); BLUE = colors.HexColor("#1F8AC0")
     GOLD = colors.HexColor("#C9A227"); GRAY = colors.HexColor("#666666")
     GREEN = colors.HexColor("#1B7A3D"); RED = colors.HexColor("#B23A2E")
-    LIGHT = colors.HexColor("#F2F6FA")
+    LIGHT = colors.HexColor("#F2F6FA"); CREAM = colors.HexColor("#FFF9E6")
     W = 18.0 * cm
 
-    st_title = ParagraphStyle("t", fontName=FN, fontSize=20, leading=26, textColor=NAVY)
-    st_sub = ParagraphStyle("s", fontName=FN, fontSize=10, leading=14, textColor=GRAY)
+    st_title = ParagraphStyle("t", fontName=FN, fontSize=19, leading=25, textColor=NAVY)
+    st_sub = ParagraphStyle("s", fontName=FN, fontSize=9.5, leading=13, textColor=GRAY)
     st_h = ParagraphStyle("h", fontName=FN, fontSize=13, leading=17, textColor=NAVY, spaceBefore=10, spaceAfter=4)
     st_h2 = ParagraphStyle("h2", fontName=FN, fontSize=10.5, leading=14, textColor=BLUE, spaceBefore=6, spaceAfter=2)
     st_p = ParagraphStyle("p", fontName=FN, fontSize=10, leading=15.5, textColor=colors.HexColor("#222222"))
+    st_cell = ParagraphStyle("c", fontName=FN, fontSize=8.5, leading=12, textColor=colors.HexColor("#222222"))
+    st_cellb = ParagraphStyle("cb", fontName=FN, fontSize=8.5, leading=12, textColor=NAVY)
     st_small = ParagraphStyle("sm", fontName=FN, fontSize=8, leading=11, textColor=GRAY)
-    st_bull = ParagraphStyle("bl", fontName=FN, fontSize=9.5, leading=14.5, leftIndent=8, spaceAfter=3)
-    st_bear = ParagraphStyle("br", fontName=FN, fontSize=9.5, leading=14.5, leftIndent=8, spaceAfter=3, textColor=RED)
-    st_bullp = ParagraphStyle("blp", fontName=FN, fontSize=9.5, leading=14.5, leftIndent=8, spaceAfter=3, textColor=GREEN)
+    st_bul = ParagraphStyle("bl", fontName=FN, fontSize=9.5, leading=14.5, leftIndent=8, spaceAfter=3)
+    st_quote = ParagraphStyle("q", fontName=FN, fontSize=9.8, leading=15.5, textColor=colors.HexColor("#222222"))
+    st_lead = ParagraphStyle("ld", fontName=FN, fontSize=11, leading=17, textColor=NAVY)
 
     def sec(title):
         t = Table([[Paragraph(f"<b>{title}</b>", st_h)]], colWidths=[W])
-        t.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 1.2, BLUE),
-                               ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                               ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
+        t.setStyle(TableStyle([("LINEBELOW", (0,0), (-1,-1), 1.2, BLUE),
+                               ("LEFTPADDING", (0,0), (-1,-1), 0), ("BOTTOMPADDING", (0,0), (-1,-1), 2)]))
         return t
 
-    def box(flowables, border=BLUE):
-        t = Table([[flowables]], colWidths=[W])
-        t.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.8, border),
-                               ("TOPPADDING", (0, 0), (-1, -1), 8),
-                               ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-                               ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                               ("RIGHTPADDING", (0, 0), (-1, -1), 8)]))
+    def box(flow, border=BLUE, bg=None):
+        t = Table([[flow]], colWidths=[W])
+        st = [("BOX", (0,0), (-1,-1), 0.9, border), ("TOPPADDING", (0,0), (-1,-1), 8),
+              ("BOTTOMPADDING", (0,0), (-1,-1), 8), ("LEFTPADDING", (0,0), (-1,-1), 9),
+              ("RIGHTPADDING", (0,0), (-1,-1), 9)]
+        if bg:
+            st.append(("BACKGROUND", (0,0), (-1,-1), bg))
+        t.setStyle(TableStyle(st))
         return t
 
-    def _n(v, unit="", nd=1):
+    def grid(rows, widths, head=True, font=8.5, zebra=True):
+        data = [[Paragraph(str(c), st_cellb if (head and r == 0) else st_cell) for c in row] for r, row in enumerate(rows)]
+        t = Table(data, colWidths=widths, repeatRows=1 if head else 0)
+        st = [("FONTNAME", (0,0), (-1,-1), FN), ("VALIGN", (0,0), (-1,-1), "TOP"),
+              ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#D9D9D9")),
+              ("TOPPADDING", (0,0), (-1,-1), 5), ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+              ("LEFTPADDING", (0,0), (-1,-1), 5), ("RIGHTPADDING", (0,0), (-1,-1), 5)]
+        if head:
+            st += [("BACKGROUND", (0,0), (-1,0), LIGHT)]
+        if zebra:
+            for r in range(1 if head else 0, len(rows)):
+                if r % 2 == 0:
+                    st.append(("BACKGROUND", (0,r), (-1,r), colors.HexColor("#FAFBFC")))
+        t.setStyle(TableStyle(st))
+        return t
+
+    def _n(v, nd=1):
         if v is None:
             return "-"
         if abs(v) >= 1e8:
-            return f"{v/1e8:,.{nd}f}億{unit}"
-        return f"{v:,.{nd}f}{unit}"
+            return f"{v/1e8:,.{nd}f}億"
+        return f"{v:,.{nd}f}"
 
-    cur = fin["current"]
-    a = analysis
+    cur = fin["current"]; a = analysis
     doc = SimpleDocTemplate(out_path, pagesize=A4, leftMargin=1.5*cm, rightMargin=1.5*cm,
-                            topMargin=1.3*cm, bottomMargin=1.2*cm)
+                            topMargin=1.3*cm, bottomMargin=1.3*cm)
     el = []
 
-    # ===== 封面資訊 =====
-    el.append(Paragraph(f"{cur.get('name', ticker)}（{ticker.upper()}）", st_title))
-    el.append(Paragraph(f"個股分析報告　{cur.get('sector') or ''} {('· ' + cur.get('industry')) if cur.get('industry') else ''}　{today:%Y/%m/%d}", st_sub))
-    el.append(Spacer(1, 0.3*cm))
+    # ===== 封面 =====
+    el.append(Paragraph(f"{cur.get('name', ticker)}（{ticker.upper()}）深度研究報告", st_title))
+    meta = f"華爾街觀點 × 12–24 個月展望｜{today:%Y/%m/%d}"
+    if cur.get("price"):
+        meta += f"｜現價 {cur['price']:.2f}"
+    if cur.get("ytd_pct") is not None:
+        meta += f"｜今年迄今 {cur['ytd_pct']:+.0f}%"
+    if cur.get("52w_high") and cur.get("price"):
+        meta += f"｜較52週高點 {(cur['price']/cur['52w_high']-1)*100:+.0f}%"
+    el.append(Paragraph(meta, st_sub))
+    el.append(Spacer(1, 0.25*cm))
+    if a.get("one_line"):
+        el.append(box(Paragraph(f"<b>一句話總結：</b>{a['one_line']}", st_lead), border=GOLD, bg=CREAM))
+    el.append(Spacer(1, 0.25*cm))
 
-    snap_rows = [
-        ["股價", "市值", "本益比(TTM)", "本益比(預估)", "殖利率"],
-        [_n(cur.get("price"), unit=cur.get("currency", "")[:0] or "", nd=2) if cur.get("price") else "-",
-         _n(cur.get("market_cap")),
-         f"{cur['pe_trailing']:.1f}x" if cur.get("pe_trailing") else "-",
-         f"{cur['pe_forward']:.1f}x" if cur.get("pe_forward") else "-",
-         f"{cur['dividend_yield']*100:.2f}%" if cur.get("dividend_yield") else "-"],
-    ]
-    t0 = Table(snap_rows, colWidths=[W/5]*5)
-    t0.setStyle(TableStyle([("FONTNAME", (0,0), (-1,-1), FN), ("FONTSIZE", (0,0), (-1,0), 9),
-                            ("FONTSIZE", (0,1), (-1,1), 13),
+    snap = [["股價", "市值", "本益比(TTM)", "本益比(預估)", "毛利率", "分析師目標價"],
+            [f"{cur['price']:.2f}" if cur.get("price") else "-", _n(cur.get("market_cap"), 0),
+             f"{cur['pe_trailing']:.1f}x" if cur.get("pe_trailing") else "-",
+             f"{cur['pe_forward']:.1f}x" if cur.get("pe_forward") else "-",
+             f"{cur['gross_margin']:.1f}%" if cur.get("gross_margin") else "-",
+             (f"{cur['target_mean']:.0f}（{cur.get('analyst_count') or '?'}位）" if cur.get("target_mean") else "-")]]
+    t0 = Table(snap, colWidths=[W/6]*6)
+    t0.setStyle(TableStyle([("FONTNAME", (0,0), (-1,-1), FN), ("FONTSIZE", (0,0), (-1,0), 8.5),
+                            ("FONTSIZE", (0,1), (-1,1), 11.5),
                             ("BACKGROUND", (0,0), (-1,0), NAVY), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
                             ("BACKGROUND", (0,1), (-1,1), LIGHT), ("TEXTCOLOR", (0,1), (-1,1), NAVY),
                             ("ALIGN", (0,0), (-1,-1), "CENTER"), ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
                             ("TOPPADDING", (0,0), (-1,-1), 6), ("BOTTOMPADDING", (0,0), (-1,-1), 6)]))
     el.append(t0)
-    el.append(Spacer(1, 0.3*cm))
 
-    # ===== 1. 商業模式與產業趨勢 =====
-    el.append(sec("商業模式與收入來源"))
-    el.append(Paragraph(a.get("business_overview", ""), st_p))
-    el.append(sec("產業趨勢"))
-    el.append(Paragraph(a.get("industry_trends", ""), st_p))
+    # ===== 〇 近期變化 =====
+    rc = a.get("recent_changes") or []
+    if rc:
+        el.append(sec("〇、最近三個月發生了什麼"))
+        rows = [["項目", "三個月前", "現況", "方向"]] + [[x.get("item",""), x.get("before",""), x.get("now",""), x.get("direction","")] for x in rc]
+        el.append(grid(rows, [W*0.16, W*0.30, W*0.36, W*0.18]))
 
-    # ===== 2. 財務健康度 =====
-    el.append(sec("財務健康狀況（近5年）"))
+    # ===== 一 商業模式 =====
+    el.append(sec("一、商業模式與收入來源"))
+    el.append(Paragraph(_g(a, "business", "overview"), st_p))
+    segs = _g(a, "business", "segments", default=[]) or []
+    if segs:
+        el.append(Spacer(1, 0.15*cm))
+        rows = [["事業群", "內容", "最新實績"]] + [[x.get("name",""), x.get("desc",""), x.get("latest","")] for x in segs]
+        el.append(grid(rows, [W*0.22, W*0.42, W*0.36]))
+    own = _g(a, "business", "ownership_note")
+    if own:
+        el.append(Spacer(1, 0.12*cm)); el.append(Paragraph(own, st_p))
+
+    # ===== 二 護城河 =====
+    moat = a.get("moat") or {}
+    el.append(sec(f"二、競爭護城河評估（總評 {moat.get('score','-')}/10）"))
+    dims = moat.get("dims") or []
+    if dims:
+        rows = [["護城河來源", "評估", "分數"]] + [[x.get("name",""), x.get("comment",""), f"{x.get('score','-')}/10"] for x in dims]
+        el.append(grid(rows, [W*0.18, W*0.70, W*0.12]))
+    if moat.get("verdict"):
+        el.append(Spacer(1, 0.12*cm))
+        pr = moat.get("peers") or []
+        peer_txt = ("　對比：" + "、".join(f"{x.get('name')}（{x.get('score','-')}/10，{x.get('note','')}）" for x in pr)) if pr else ""
+        el.append(box(Paragraph(f"<b>護城河總評：{moat.get('score','-')}/10</b>　{moat['verdict']}{peer_txt}", st_p)))
+
+    # ===== 三 產業趨勢 =====
+    ind = a.get("industry") or []
+    if ind:
+        el.append(sec("三、產業趨勢"))
+        for x in ind:
+            el.append(Paragraph(f"● <b>{x.get('title','')}：</b>{x.get('text','')}", st_bul))
+
+    el.append(PageBreak())
+
+    # ===== 四 財務 =====
+    el.append(sec("四、過去 5 年財務體質分析"))
     if chart_png:
         try:
             from PIL import Image as _PIL
             iw, ih = _PIL.open(chart_png).size
-            w_ = W; h_ = w_ * ih / iw
-            el.append(RLImage(chart_png, width=w_, height=h_))
+            el.append(RLImage(chart_png, width=W, height=W*ih/iw))
         except Exception as e:
             print(f"[StockAnalysis] chart embed fail: {e}")
     yrs = fin.get("years") or []
+    notes = {str(x.get("year")): x.get("note","") for x in (_g(a, "financials", "year_notes", default=[]) or [])}
     if yrs:
-        rows_f = [["年度", "營收", "淨利", "淨利率", "ROE", "自由現金流"]]
+        rows = [["年度", "營收", "淨利", "淨利率", "ROE", "自由現金流", "備註"]]
         for y in yrs:
-            rows_f.append([
-                str(y["year"]), _n(y.get("revenue")), _n(y.get("net_income")),
-                f"{y['net_margin']:.1f}%" if y.get("net_margin") else "-",
-                f"{y['roe']:.1f}%" if y.get("roe") else "-",
-                _n(y.get("fcf")),
-            ])
-        tf = Table(rows_f, colWidths=[W*0.12, W*0.22, W*0.18, W*0.15, W*0.13, W*0.20])
-        tf.setStyle(TableStyle([("FONTNAME", (0,0), (-1,-1), FN), ("FONTSIZE", (0,0), (-1,-1), 8.5),
-                                ("BACKGROUND", (0,0), (-1,0), NAVY), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-                                ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#D9D9D9")),
-                                ("ALIGN", (0,0), (-1,-1), "CENTER"), ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-                                ("TOPPADDING", (0,0), (-1,-1), 5), ("BOTTOMPADDING", (0,0), (-1,-1), 5)]))
-        el.append(Spacer(1, 0.15*cm)); el.append(tf)
-    el.append(Spacer(1, 0.15*cm))
-    el.append(box(Paragraph("<b>體質判斷：</b>" + a.get("financial_verdict", ""), st_p)))
+            rows.append([str(y["year"]), _n(y.get("revenue")), _n(y.get("net_income")),
+                         f"{y['net_margin']:.1f}%" if y.get("net_margin") is not None else "-",
+                         f"{y['roe']:.1f}%" if y.get("roe") is not None else "-",
+                         _n(y.get("fcf")), notes.get(str(y["year"]), "")])
+        el.append(Spacer(1, 0.12*cm))
+        el.append(grid(rows, [W*0.08, W*0.14, W*0.13, W*0.10, W*0.10, W*0.14, W*0.31]))
+    lq = fin.get("latest_q") or {}
+    if lq.get("revenue"):
+        el.append(Spacer(1, 0.1*cm))
+        el.append(Paragraph(f"最新一季（{lq.get('period')}）：營收 {_n(lq['revenue'])}"
+                            + (f"、年增 {lq['revenue_yoy']:+.0f}%" if lq.get("revenue_yoy") is not None else "")
+                            + (f"、毛利率 {lq['gross_margin']:.1f}%" if lq.get("gross_margin") else "")
+                            + (f"、營益率 {lq['op_margin']:.1f}%" if lq.get("op_margin") else ""), st_p))
+    mets = _g(a, "financials", "metrics", default=[]) or []
+    if mets:
+        el.append(Paragraph("六大指標判讀", st_h2))
+        for x in mets:
+            v = x.get("verdict", "")
+            col = "#1B7A3D" if ("強" in v or "改善" in v) else ("#B23A2E" if "弱" in v else "#555555")
+            el.append(Paragraph(f"● <b>{x.get('name','')}</b>：<font color='{col}'><b>{v}</b></font>　{x.get('text','')}", st_bul))
+    if _g(a, "financials", "overall"):
+        el.append(Spacer(1, 0.12*cm))
+        el.append(box(Paragraph(f"<b>判定：</b>{_g(a,'financials','overall')}", st_p)))
 
-    el.append(sec("關鍵風險"))
-    for r in (a.get("key_risks") or []):
-        el.append(Paragraph("● " + r, st_bull))
-
-    el.append(PageBreak())
-
-    # ===== 3. 護城河 =====
-    el.append(sec(f"競爭護城河評分：{a.get('moat', {}).get('score', '-')} / 10"))
-    moat = a.get("moat", {})
-    moat_rows = [["構面", "評述"],
-                 ["品牌影響力", moat.get("brand", "-")],
-                 ["網路效應", moat.get("network_effect", "-")],
-                 ["轉換成本", moat.get("switching_cost", "-")],
-                 ["成本優勢", moat.get("cost_advantage", "-")],
-                 ["專利/獨家技術", moat.get("patents_tech", "-")]]
-    tm = Table(moat_rows, colWidths=[W*0.18, W*0.82])
-    tm.setStyle(TableStyle([("FONTNAME", (0,0), (-1,-1), FN), ("FONTSIZE", (0,0), (-1,-1), 9),
-                            ("BACKGROUND", (0,0), (-1,0), NAVY), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-                            ("BACKGROUND", (0,1), (0,-1), LIGHT),
-                            ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#D9D9D9")),
-                            ("VALIGN", (0,0), (-1,-1), "TOP"),
-                            ("TOPPADDING", (0,0), (-1,-1), 6), ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-                            ("LEFTPADDING", (0,0), (-1,-1), 6)]))
-    el.append(tm)
-    el.append(Spacer(1, 0.15*cm))
-    el.append(Paragraph("<b>評分理由：</b>" + moat.get("score_rationale", ""), st_p))
-    el.append(Spacer(1, 0.1*cm))
-    el.append(Paragraph("<b>同業比較：</b>" + moat.get("peer_comparison", ""), st_p))
-
-    # ===== 4. 估值分析 =====
-    el.append(sec("估值分析"))
+    # ===== 五 估值 =====
+    el.append(sec("五、估值分析（投行視角）"))
+    val = a.get("valuation") or {}
+    vt = val.get("table") or []
+    pn = val.get("peer_names") or ["同業1", "同業2"]
+    if vt:
+        rows = [["指標", ticker.upper(), pn[0] if len(pn) > 0 else "同業1", pn[1] if len(pn) > 1 else "同業2", "評語"]]
+        rows += [[x.get("metric",""), x.get("self",""), x.get("peer1",""), x.get("peer2",""), x.get("comment","")] for x in vt]
+        el.append(grid(rows, [W*0.17, W*0.17, W*0.17, W*0.17, W*0.32]))
     if peers:
-        rows_p = [["公司", "代碼", "本益比(TTM)", "市值"]]
-        rows_p.append([cur.get("name", ticker), ticker.upper(),
-                       f"{cur['pe_trailing']:.1f}x" if cur.get("pe_trailing") else "-", _n(cur.get("market_cap"))])
-        for p in peers:
-            rows_p.append([p.get("name", p["ticker"]), p["ticker"],
-                           f"{p['pe']:.1f}x" if p.get("pe") else "-", _n(p.get("market_cap"))])
-        tp = Table(rows_p, colWidths=[W*0.34, W*0.14, W*0.24, W*0.28])
-        style_p = [("FONTNAME", (0,0), (-1,-1), FN), ("FONTSIZE", (0,0), (-1,-1), 9),
-                   ("BACKGROUND", (0,0), (-1,0), NAVY), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-                   ("BACKGROUND", (0,1), (-1,1), LIGHT),
-                   ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#D9D9D9")),
-                   ("ALIGN", (0,0), (-1,-1), "CENTER"), ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-                   ("TOPPADDING", (0,0), (-1,-1), 5), ("BOTTOMPADDING", (0,0), (-1,-1), 5)]
-        tp.setStyle(TableStyle(style_p))
-        el.append(tp)
-        el.append(Spacer(1, 0.12*cm))
-    el.append(Paragraph(a.get("valuation", {}).get("pe_comparison", ""), st_p))
-
+        el.append(Spacer(1, 0.1*cm))
+        rows = [["公司", "代碼", "PE(TTM)", "預估PE", "毛利率", "今年迄今", "市值"]]
+        rows.append([cur.get("name", ticker), ticker.upper(),
+                     f"{cur['pe_trailing']:.1f}x" if cur.get("pe_trailing") else "-",
+                     f"{cur['pe_forward']:.1f}x" if cur.get("pe_forward") else "-",
+                     f"{cur['gross_margin']:.0f}%" if cur.get("gross_margin") else "-",
+                     f"{cur['ytd_pct']:+.0f}%" if cur.get("ytd_pct") is not None else "-", _n(cur.get("market_cap"), 0)])
+        for p_ in peers:
+            rows.append([p_.get("name", p_["ticker"]), p_["ticker"],
+                         f"{p_['pe']:.1f}x" if p_.get("pe") else "-",
+                         f"{p_['pe_fwd']:.1f}x" if p_.get("pe_fwd") else "-",
+                         f"{p_['gross_margin']:.0f}%" if p_.get("gross_margin") else "-",
+                         f"{p_['ytd_pct']:+.0f}%" if p_.get("ytd_pct") is not None else "-", _n(p_.get("market_cap"), 0)])
+        el.append(Paragraph("同業實際數據（Yahoo Finance）", st_h2))
+        el.append(grid(rows, [W*0.26, W*0.10, W*0.12, W*0.12, W*0.12, W*0.13, W*0.15]))
+    if val.get("dcf_reasoning"):
+        el.append(Paragraph("簡化 DCF 思路", st_h2))
+        el.append(Paragraph(val["dcf_reasoning"], st_p))
+    scn = val.get("scenarios") or {}
+    if scn:
+        rows = [["情境", "合理股價區間", "成立條件"]]
+        for k, lab in (("bull", "樂觀"), ("base", "基本"), ("bear", "悲觀")):
+            x = scn.get(k) or {}
+            rows.append([lab, x.get("range", "-"), x.get("cond", "-")])
+        el.append(Spacer(1, 0.1*cm)); el.append(grid(rows, [W*0.12, W*0.25, W*0.63]))
     if dcf:
-        el.append(Spacer(1, 0.2*cm))
-        el.append(Paragraph("<b>簡化DCF情境敏感度</b>（示意模型，非專業估值，僅供參考）", st_h2))
         sc = dcf["scenarios"]
-        rows_d = [["情境", "5年成長假設", "永續成長假設", "估算每股價值"]]
-        for name in ("空頭", "中性", "多頭"):
-            v = sc.get(name, {})
-            vps = v.get("value_per_share")
-            rows_d.append([name, f"{v.get('growth', 0)*100:.0f}%", f"{v.get('terminal_growth', 0)*100:.1f}%",
-                           f"{vps:.1f}" if vps else "-"])
-        td = Table(rows_d, colWidths=[W*0.2, W*0.27, W*0.27, W*0.26])
-        td.setStyle(TableStyle([("FONTNAME", (0,0), (-1,-1), FN), ("FONTSIZE", (0,0), (-1,-1), 9),
-                                ("BACKGROUND", (0,0), (-1,0), NAVY), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-                                ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#D9D9D9")),
-                                ("ALIGN", (0,0), (-1,-1), "CENTER"), ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-                                ("TOPPADDING", (0,0), (-1,-1), 5), ("BOTTOMPADDING", (0,0), (-1,-1), 5)]))
-        el.append(td)
+        el.append(Paragraph("系統簡化 DCF 試算（折現率 9%，以最新 FCF 為起點）：" +
+                            "、".join(f"{k} {v['value_per_share']:.1f}" if v.get("value_per_share") is not None else f"{k} -"
+                                      for k, v in sc.items()) +
+                            "；僅為情境示意，非專業估值模型。", st_small))
+    if val.get("conclusion"):
         el.append(Spacer(1, 0.12*cm))
-        el.append(Paragraph(a.get("valuation", {}).get("dcf_narrative", ""), st_p))
-        _neg_note = ("起點自由現金流為負值時，模型估算之每股價值可能呈現負數，"
-                     "僅反映「若現金流未能轉正」的極端情境，不代表實際股價可能為負；"
-                     "" ) if dcf.get("fcf0", 0) < 0 else ""
-        el.append(Paragraph(f"※ 假設折現率 {dcf['discount_rate']*100:.0f}%，"
-                            f"以最近一期自由現金流（{_n(dcf['fcf0'])}）為起點推算，"
-                            + _neg_note +
-                            "實際價值受未來營運、利率環境與市場情緒影響，本表僅為情境示意，非專業估值模型。", st_small))
-    el.append(Spacer(1, 0.15*cm))
-    el.append(box(Paragraph("<b>估值結論：</b>" + a.get("valuation", {}).get("conclusion", ""), st_p), border=GOLD))
+        el.append(box(Paragraph(f"<b>估值結論：</b>{val['conclusion']}", st_p), border=GOLD, bg=CREAM))
 
     el.append(PageBreak())
 
-    # ===== 5. 成長潛力 =====
-    el.append(sec("未來成長潛力（5-10年展望）"))
-    el.append(Paragraph(a.get("growth_potential", ""), st_p))
+    # ===== 六 成長潛力 =====
+    el.append(sec("六、未來成長潛力（5–10 年）"))
+    for x in (_g(a, "growth", "items", default=[]) or []):
+        el.append(Paragraph(f"● <b>{x.get('title','')}：</b>{x.get('text','')}", st_bul))
+    gs = _g(a, "growth", "scenarios_5_10y", default={}) or {}
+    if gs:
+        el.append(Spacer(1, 0.1*cm))
+        rows = [["情境", "5–10 年圖像"], ["樂觀", gs.get("bull","")], ["基本", gs.get("base","")], ["悲觀", gs.get("bear","")]]
+        el.append(grid(rows, [W*0.12, W*0.88]))
 
-    # ===== 6. 多空辯論 =====
-    el.append(sec("多空辯論"))
-    el.append(Paragraph("🟢 多頭觀點", ParagraphStyle("bh", fontName=FN, fontSize=10, textColor=GREEN, spaceBefore=4)))
-    for pt in (a.get("bull_case") or []):
-        el.append(Paragraph("▲ " + pt, st_bullp))
-    el.append(Paragraph("🔴 空頭觀點", ParagraphStyle("brh", fontName=FN, fontSize=10, textColor=RED, spaceBefore=8)))
-    for pt in (a.get("bear_case") or []):
-        el.append(Paragraph("▼ " + pt, st_bear))
+    # ===== 七 多空辯論 =====
+    el.append(sec("七、多空辯論：兩位分析師的對話"))
+    db = a.get("debate") or {}
+    el.append(Paragraph("<b>多頭 Bull（看漲）</b>", ParagraphStyle("bh", fontName=FN, fontSize=10.5, textColor=GREEN, spaceBefore=4, spaceAfter=3)))
+    el.append(box(Paragraph("「" + db.get("bull", "") + "」", st_quote), border=GREEN))
     el.append(Spacer(1, 0.15*cm))
-    el.append(box(Paragraph("<b>綜合結論：</b>" + a.get("debate_synthesis", ""), st_p)))
+    el.append(Paragraph("<b>空頭 Bear（看跌）</b>", ParagraphStyle("brh", fontName=FN, fontSize=10.5, textColor=RED, spaceBefore=4, spaceAfter=3)))
+    el.append(box(Paragraph("「" + db.get("bear", "") + "」", st_quote), border=RED))
+    el.append(Spacer(1, 0.15*cm))
+    if db.get("neutral"):
+        el.append(box(Paragraph(f"<b>中性結論：</b>{db['neutral']}", st_p), border=GOLD, bg=CREAM))
 
-    # ===== 7. 投資評估 =====
-    el.append(sec("投資評估總結"))
-    lean = a.get("market_lean", "中性觀望")
-    lean_color = GREEN if "多" in lean else (RED if "空" in lean else GOLD)
-    lean_tbl = Table([[Paragraph(f"<b>市場評估角度：{lean}</b>", ParagraphStyle("lt", fontName=FN, fontSize=13, alignment=1, textColor=colors.white))]], colWidths=[W])
-    lean_tbl.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,-1), lean_color),
-                                  ("TOPPADDING", (0,0), (-1,-1), 8), ("BOTTOMPADDING", (0,0), (-1,-1), 8)]))
-    el.append(lean_tbl)
+    # ===== 八 最終評估 =====
+    el.append(sec("八、最終投資評估"))
+    fn_ = a.get("final") or {}
+    el.append(Paragraph("<b>短期展望（1 年內）</b>", st_h2)); el.append(Paragraph(fn_.get("short_term",""), st_p))
+    el.append(Paragraph("<b>長期展望（5 年以上）</b>", st_h2)); el.append(Paragraph(fn_.get("long_term",""), st_p))
+    two = [[[Paragraph("<b>關鍵催化因素</b>", st_h2)] + [Paragraph("● " + c, st_bul) for c in (fn_.get("catalysts") or [])],
+            [Paragraph("<b>主要風險</b>", st_h2)] + [Paragraph("● " + r, st_bul) for r in (fn_.get("risks") or [])]]]
+    tt = Table(two, colWidths=[W/2, W/2])
+    tt.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"), ("LEFTPADDING", (0,0), (-1,-1), 2)]))
+    el.append(tt)
+    rating = fn_.get("rating", "")
+    rcol = GREEN if ("買" in rating and "避" not in rating) else (RED if "避" in rating else GOLD)
     el.append(Spacer(1, 0.2*cm))
-    el.append(Paragraph("<b>短期展望（1年內）：</b>" + a.get("outlook_short", ""), st_p))
-    el.append(Spacer(1, 0.08*cm))
-    el.append(Paragraph("<b>長期展望（5年以上）：</b>" + a.get("outlook_long", ""), st_p))
-    el.append(Spacer(1, 0.15*cm))
-    el.append(Paragraph("<b>關鍵催化因素</b>", st_h2))
-    for c in (a.get("catalysts") or []):
-        el.append(Paragraph("● " + c, st_bull))
-    el.append(Spacer(1, 0.15*cm))
-    el.append(box(Paragraph(a.get("final_summary", ""), st_p)))
+    rt = Table([[Paragraph(f"<b>最終結論：{rating}</b>", ParagraphStyle("rt", fontName=FN, fontSize=13, alignment=1, textColor=colors.white))]], colWidths=[W])
+    rt.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,-1), rcol), ("TOPPADDING", (0,0), (-1,-1), 8), ("BOTTOMPADDING", (0,0), (-1,-1), 8)]))
+    el.append(KeepTogether([rt, Spacer(1, 0.15*cm),
+                            Paragraph(f"● <b>已持有者：</b>{fn_.get('holders','')}", st_bul),
+                            Paragraph(f"● <b>未持有者：</b>{fn_.get('non_holders','')}", st_bul),
+                            Paragraph(f"● <b>不適合對象：</b>{fn_.get('unsuitable','')}", st_bul)]))
 
     el.append(Spacer(1, 0.4*cm))
-    el.append(Paragraph(f"（資料來源：Yahoo Finance 財務數據、公開新聞與市場資訊，{today:%Y/%m/%d}）", st_small))
+    if a.get("_note"):
+        el.append(Paragraph("※ " + a["_note"], st_small))
+    el.append(Paragraph(f"（資料來源：Yahoo Finance 財務數據、公司財報與 SEC 申報、公開新聞與分析師報告，資料截至 {today:%Y/%m/%d}）", st_small))
     el.append(Paragraph(ANALYST_DISCLAIMER, st_small))
 
     def _footer(canv, doc_):
-        canv.saveState()
-        canv.setFont(FN, 8)
-        canv.setFillColor(RED)
-        canv.drawString(1.5*cm, 0.9*cm, "僅限內部研究與教育訓練使用，非投資建議")
-        canv.setFillColor(GRAY)
-        canv.drawRightString(A4[0]-1.5*cm, 0.9*cm, f"{ticker.upper()} 分析報告 · {today:%Y/%m/%d}")
+        canv.saveState(); canv.setFont(FN, 8)
+        canv.setFillColor(RED); canv.drawString(1.5*cm, 0.9*cm, "僅限內部研究與教育訓練使用，非投資建議")
+        canv.setFillColor(GRAY); canv.drawRightString(A4[0]-1.5*cm, 0.9*cm, f"{ticker.upper()} 深度研究報告 · {today:%Y/%m/%d} · 第 {doc_.page} 頁")
         canv.restoreState()
 
     doc.build(el, onFirstPage=_footer, onLaterPages=_footer)
@@ -636,25 +759,18 @@ def build_report_pdf(out_path, ticker, fin, peers, dcf, analysis, chart_png=None
 
 def build_summary_text(ticker, fin, analysis, dcf=None):
     """LINE 用的精簡文字摘要"""
-    cur = fin["current"]
-    a = analysis
-    lines = [f"📈 {cur.get('name', ticker)}（{ticker.upper()}）分析摘要", ""]
-    lines.append(f"市值 {cur['market_cap']/1e8:.0f}億" if cur.get("market_cap") else "市值 -")
-    if cur.get("pe_trailing"):
-        lines.append(f"本益比(TTM) {cur['pe_trailing']:.1f}x")
-    lines.append("")
-    lines.append("【護城河評分】" + str(a.get("moat", {}).get("score", "-")) + " / 10")
-    lines.append(a.get("moat", {}).get("score_rationale", "")[:80])
-    lines.append("")
-    lines.append("【體質判斷】")
-    lines.append(a.get("financial_verdict", "")[:150])
-    lines.append("")
-    lines.append("【估值結論】")
-    lines.append(a.get("valuation", {}).get("conclusion", "")[:100])
-    lines.append("")
-    lines.append(f"【市場評估角度】{a.get('market_lean', '-')}")
-    lines.append(a.get("final_summary", "")[:150])
-    lines.append("")
-    lines.append("（完整報告含財務圖表、護城河分析、DCF情境、多空辯論，見PDF）")
+    cur = fin["current"]; a = analysis; fn_ = a.get("final") or {}
+    lines = [f"📈 {cur.get('name', ticker)}（{ticker.upper()}）深度研究摘要"]
+    hdr = []
+    if cur.get("price"): hdr.append(f"現價 {cur['price']:.2f}")
+    if cur.get("ytd_pct") is not None: hdr.append(f"今年迄今 {cur['ytd_pct']:+.0f}%")
+    if cur.get("target_mean"): hdr.append(f"分析師目標價 {cur['target_mean']:.0f}")
+    if hdr: lines.append("｜".join(hdr))
+    lines += ["", "【一句話總結】", a.get("one_line", "")]
+    lines += ["", f"【護城河】{(a.get('moat') or {}).get('score','-')}/10", (a.get("moat") or {}).get("verdict", "")[:120]]
+    lines += ["", "【財務體質】", _g(a, "financials", "overall")[:150]]
+    lines += ["", "【估值】", _g(a, "valuation", "conclusion")[:150]]
+    lines += ["", f"【最終結論】{fn_.get('rating','-')}", f"已持有：{fn_.get('holders','')}", f"未持有：{fn_.get('non_holders','')}"]
+    lines += ["", "（完整報告含近期變化、事業群、護城河評分、六大指標判讀、估值比較表、DCF情境、成長情境、多空辯論，見PDF）"]
     lines.append(ANALYST_DISCLAIMER)
     return "\n".join(lines)
