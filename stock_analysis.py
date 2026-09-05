@@ -193,6 +193,7 @@ def simple_dcf_scenarios(fin, discount_rate=0.09, years=5):
 
 # ---------- AI 質化分析(Claude + web_search) ----------
 def generate_analysis(anthropic_client, ticker, fin, peers, dcf):
+    generate_analysis.last_error = ""
     """
     用 Claude + web_search 產生質化分析內容。
     財務數字已由我們提供真實數據,要求 AI 只根據提供的數字與搜尋到的公開資訊撰寫,
@@ -264,28 +265,52 @@ def generate_analysis(anthropic_client, ticker, fin, peers, dcf):
         '  "final_summary": "總結陳述,不做投資建議,100-150字"\n'
         "}"
     )
+    def _call(use_search, max_tokens):
+        kwargs = dict(model="claude-sonnet-4-6", max_tokens=max_tokens, temperature=0.3,
+                      messages=[{"role": "user", "content": prompt}])
+        if use_search:
+            kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
+        return anthropic_client.messages.create(**kwargs)
+
+    def _parse(message):
+        full_text = "".join(getattr(b, "text", "") for b in message.content)
+        raw = re.sub(r"^```(?:json)?|```$", "", full_text.strip(), flags=re.M).strip()
+        m = re.search(r"\{.*\}", raw, re.S)
+        if not m:
+            return None, f"回覆中找不到JSON(stop={getattr(message, 'stop_reason', '?')}, 長度{len(full_text)})"
+        try:
+            return json.loads(m.group(0)), ""
+        except Exception as e:
+            return None, f"JSON解析失敗:{str(e)[:80]}(stop={getattr(message, 'stop_reason', '?')})"
+
+    # 第一次:帶 web_search,輸出額度放大(長 JSON + 搜尋過程都很吃 token)
+    last_err = ""
     try:
-        message = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4000,
-            temperature=0.3,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": prompt}],
-        )
+        msg = _call(True, 8000)
+        got, err = _parse(msg)
+        if got:
+            return got
+        last_err = err
+        print(f"[StockAnalysis] 第一次(含搜尋)失敗: {err}")
     except Exception as e:
-        print(f"[StockAnalysis] API 呼叫失敗: {e}")
-        return None
-    full_text = "".join(getattr(b, "text", "") for b in message.content)
-    raw = re.sub(r"^```(?:json)?|```$", "", full_text.strip(), flags=re.M).strip()
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        print(f"[StockAnalysis] 無法解析回傳內容")
-        return None
+        last_err = f"{type(e).__name__}: {str(e)[:120]}"
+        print(f"[StockAnalysis] API 呼叫失敗(含搜尋): {e}")
+
+    # 備援:不帶搜尋,只用我們提供的真實財務數據作答(仍有價值,但質化內容較少即時資訊)
     try:
-        return json.loads(m.group(0))
+        msg = _call(False, 8000)
+        got, err = _parse(msg)
+        if got:
+            got["_note"] = "本次未能使用即時搜尋,質化內容以財務數據與既有知識為主"
+            return got
+        last_err = err
+        print(f"[StockAnalysis] 備援(不搜尋)失敗: {err}")
     except Exception as e:
-        print(f"[StockAnalysis] JSON 解析失敗: {e}")
-        return None
+        last_err = f"{type(e).__name__}: {str(e)[:120]}"
+        print(f"[StockAnalysis] API 呼叫失敗(不搜尋): {e}")
+
+    generate_analysis.last_error = last_err
+    return None
 
 
 # ---------- 圖表 ----------
