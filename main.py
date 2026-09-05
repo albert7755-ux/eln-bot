@@ -2628,6 +2628,7 @@ def handle_text_message(event):
 
             def _run_stock(chat_id, bot_api_ref, ticker_):
                 try:
+                    from pdf_generator import upload_to_drive   # 需在本函式內 import,避免外層作用域遮蔽
                     from stock_analysis import (get_5y_financials, get_peer_pe, simple_dcf_scenarios,
                                                 generate_analysis, build_financial_chart,
                                                 build_report_pdf, build_summary_text)
