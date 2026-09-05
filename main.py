@@ -2652,7 +2652,9 @@ def handle_text_message(event):
 
                     analysis = generate_analysis(claude_client, ticker_, fin, peers, dcf)
                     if not analysis:
-                        bot_api_ref.push_message(chat_id, TextSendMessage(text="❌ 分析生成失敗(AI服務不可用)，請稍後再試。"))
+                        _err = getattr(generate_analysis, "last_error", "") or "未知原因"
+                        bot_api_ref.push_message(chat_id, TextSendMessage(
+                            text=f"❌ 分析生成失敗，請稍後再試。\n（原因：{_err}）"))
                         return
 
                     summary_txt = build_summary_text(ticker_, fin, analysis, dcf)
