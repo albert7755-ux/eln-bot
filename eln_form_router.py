@@ -159,7 +159,14 @@ async def add_product(request: Request):
             })
         return {"success": True, "message": f"✅ {data.get('bond_id')} 新增成功"}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"新增失敗：{str(e)}")
+        err = str(e)
+        if "duplicate key" in err or "UniqueViolation" in err:
+            bid = data.get("bond_id", "").strip()
+            raise HTTPException(
+                status_code=400,
+                detail=f"代號 {bid} 已經存在，不能重複新增。如需修改請聯絡 Albert。"
+            )
+        raise HTTPException(status_code=400, detail=f"新增失敗：{err[:200]}")
 
 
 @router.get("/eln-form/export")
