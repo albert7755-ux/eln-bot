@@ -47,10 +47,10 @@ def _bond_price_dir() -> Path:
 BOND_PRICE_FILE = Path(os.getenv("BOND_PRICE_FILE", "")) if os.getenv("BOND_PRICE_FILE") else (_bond_price_dir() / "bond_pricing_latest.xlsx")
 
 # 海外債群組白名單：在該群裡龍蝦只回這些指令，其餘一律不理（比照 ELN 群）
-BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "bondalert", "rating", "move", "price", "bid", "sheet", "focus", "help"}
+BOND_GROUP_ALLOWED_CMDS = {"coupon", "issuer", "bondalert", "rating", "move", "price", "bid", "find", "sector", "weekly", "sheet", "focus", "help"}
 
 # ELN Bot(callback2)也開放的海外債指令:查詢類為主,燒 AI 的重型指令僅限 Albert 本人
-ELN_BOT_BOND_CMDS = {"price", "p", "價格", "報價", "bid", "賣回", "贖回",
+ELN_BOT_BOND_CMDS = {"price", "p", "價格", "報價", "bid", "賣回", "贖回", "find", "篩選", "找",
                      "issuer", "coupon", "move", "bondalert", "myid", "我的id"}
 ELN_BOT_BOND_HEAVY = {"sheet", "focus", "rating"}   # 需要 Albert 本人才可用
 
@@ -109,6 +109,9 @@ BOND_QUERY_HELP = (
     "/price 26070003 30 → 該檔近30天報價變化\n"
     "\n💰 查賣回價\n"
     "/bid 26070003 → 賣回價(Bid)與買賣價差\n"
+    "\n🔎 條件篩選\n"
+    "/find usd ytm>5 10年內 → 依幣別/殖利率/當期收益率/年期篩選\n"
+    "/find aud cy>4.5 5-10年（cy＝當期收益率）\n"
     "（含期間漲跌幅與最高最低點，天數可自訂）\n"
     "\n🏦 查發行機構\n"
     "/issuer 蘋果 → 機構簡介＋架上所有債券\n"
@@ -142,6 +145,8 @@ BOND_GROUP_HELP = (
     "\n📊 異動與追蹤\n"
     "/move → 全架 vs 上一份報價，變動≥1%\n"
     "/move 7 3 → vs 7天前，≥3%\n"
+    "/sector → 各產業 YTM/當期/較美債利差/近30天變化\n"
+    "/weekly → 本週回顧（每週五17:30自動推）\n"
     "/bondalert 蘋果 2043 ytm>5.2 → 單檔到價通知\n"
     "/bondalert list　/bondalert del 3\n"
     "\n🏦 發行機構\n"
@@ -1551,7 +1556,7 @@ def handle_text_message(event):
             if cmd == "help":
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text=BOND_QUERY_HELP))
                 return
-            if cmd not in ("price", "p", "價格", "報價", "issuer", "coupon"):
+            if cmd not in ("price", "p", "價格", "報價", "issuer", "coupon", "find", "篩選", "找", "bid", "賣回", "贖回"):
                 return
             # 查價群的 /coupon 只給查詢用法,設定類子指令不開放
             if cmd == "coupon":
@@ -3182,6 +3187,73 @@ def handle_text_message(event):
             lines.append(f"\n📎 報價檔 {mtime}｜到價追蹤：/bondalert {kw} ytm>{ytm if isinstance(ytm,(int,float)) else 5}")
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(str(x) for x in lines)[:4900]))
             return
+        if cmd in ("find", "篩選", "找"):
+            # /find usd ytm>5 10年內   /find aud cy>4.5 5-10年   /find 一般 ytm>5.5 20年以上
+            kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
+            if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔。"))
+                return
+            if not kw:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="🔎 條件篩選用法\n"
+                         "/find usd ytm>5 10年內\n"
+                         "/find aud cy>4.5 5-10年（cy＝當期收益率）\n"
+                         "/find 一般 ytm>5.5 20年以上\n"
+                         "/find usd 票面>4 年期<8\n"
+                         "/find 蘋果 usd\n\n"
+                         "可組合：幣別、ytm、cy(當期)、票面、年期、一般/專投/高資產、關鍵字"))
+                return
+            try:
+                from bond_screener import parse_find, run_find, format_find
+                _today = datetime.now(TZ_TAIPEI).date()
+                f = parse_find(kw)
+                rows, total = run_find(str(BOND_PRICE_FILE), f, _today, limit=15)
+                mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI).strftime("%m/%d %H:%M")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=format_find(rows, total, f, _today, mtime)[:4900]))
+            except Exception as e:
+                print(f"[Find ERROR] {e}")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 篩選失敗：{str(e)[:200]}"))
+            return
+        if cmd in ("sector", "產業"):
+            # /sector → 各產業中位 YTM/當期/較美債利差/近30天變化(USD)
+            if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔。"))
+                return
+            _ccy = (raw_cmd.split()[1].upper() if len(raw_cmd.split()) > 1 else "USD")
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="🏭 計算產業概況中（首次需分類發行機構，約30~60秒）..."))
+            def _run_sector(chat_id, bot_api_ref, ccy_):
+                try:
+                    from bond_screener import format_sector
+                    _today = datetime.now(TZ_TAIPEI).date()
+                    rows = build_sector_rows(_today, do_classify=True)
+                    if ccy_ != "USD":
+                        from bond_screener import load_sector_map, sector_summary
+                        rows = sector_summary(str(BOND_PRICE_FILE), _today, load_sector_map(engine, sql_text),
+                                              None, None, _offer_change_fn(30), ccy=ccy_)
+                    mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI).strftime("%m/%d %H:%M")
+                    push_long_message(bot_api_ref, chat_id, format_sector(rows, _today, ccy_, mtime))
+                except Exception as e:
+                    print(f"[Sector ERROR] {e}")
+                    print(_traceback.format_exc()[:500])
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 產業分析失敗：{str(e)[:200]}"))
+            import threading
+            threading.Thread(target=_run_sector, args=(ck.split(":", 1)[1], _bot_api, _ccy), daemon=True).start()
+            return
+        if cmd in ("weekly", "週回顧", "本週回顧"):
+            if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔。"))
+                return
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📆 整理本週回顧中..."))
+            def _run_weekly(chat_id, bot_api_ref):
+                try:
+                    push_long_message(bot_api_ref, chat_id, build_weekly_review_text(datetime.now(TZ_TAIPEI).date()))
+                except Exception as e:
+                    print(f"[Weekly ERROR] {e}")
+                    bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 週回顧失敗：{str(e)[:200]}"))
+            import threading
+            threading.Thread(target=_run_weekly, args=(ck.split(":", 1)[1], _bot_api), daemon=True).start()
+            return
         if cmd in ("bid", "賣回", "贖回"):
             # /bid 26070003 → 只看賣回(Bid)價,客戶臨時問「現在賣大概多少」時用
             kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
@@ -4733,6 +4805,110 @@ def get_rating_outlook(issuer):
         print(f"[BondSheet outlook] {e}")
         return ""
 
+def _offer_change_fn(days=30):
+    """回傳 fn(isin) -> 近 N 天 Offer 變化 %(用 bond_price_history),查不到回 None"""
+    cache = {}
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(sql_text("""
+                WITH latest AS (SELECT MAX(snap_date) d FROM bond_price_history),
+                     old AS (SELECT MAX(snap_date) d FROM bond_price_history
+                             WHERE snap_date <= (SELECT d FROM latest) - :n * INTERVAL '1 day')
+                SELECT n.isin, o.offer, n.offer
+                FROM bond_price_history n
+                JOIN bond_price_history o ON o.isin = n.isin AND o.snap_date = (SELECT d FROM old)
+                WHERE n.snap_date = (SELECT d FROM latest)
+                  AND n.offer > 1 AND o.offer > 1"""), {"n": days}).fetchall()
+        for isin, o_off, n_off in rows:
+            chg = (n_off - o_off) / o_off * 100
+            if abs(chg) <= 30:
+                cache[isin] = chg
+    except Exception as e:
+        print(f"[Sector] hist change fail: {e}")
+    return lambda isin: cache.get(isin)
+
+
+def build_sector_rows(today, do_classify=True):
+    """產業概況資料列(含分類快取、美債曲線、近30天變化)"""
+    from bond_screener import (ensure_sector_table, load_sector_map, classify_issuers, sector_summary)
+    from bond_coupon_alert import read_bonds, issuer_of
+    ensure_sector_table(engine, sql_text)
+    issuers = sorted({issuer_of(b["name"]) for b in read_bonds(str(BOND_PRICE_FILE))
+                      if b.get("maturity") and b["maturity"] > today})
+    if do_classify:
+        try:
+            n = classify_issuers(engine, sql_text, llm_json_fallback, issuers)
+            if n:
+                print(f"[Sector] 新分類 {n} 家發行機構")
+        except Exception as e:
+            print(f"[Sector] classify fail: {e}")
+    smap = load_sector_map(engine, sql_text)
+    curve, interp = None, None
+    try:
+        from bond_sheet import get_ust_curve, _interp_ust
+        curve, interp = get_ust_curve(), _interp_ust
+    except Exception as e:
+        print(f"[Sector] ust curve fail: {e}")
+    return sector_summary(str(BOND_PRICE_FILE), today, smap, curve, interp, _offer_change_fn(30))
+
+
+def build_weekly_review_text(today):
+    from bond_screener import weekly_review
+    movers_txt = ""
+    try:
+        mv, _, _ = price_movers(days_back=7, threshold_pct=2.0)
+        if mv:
+            # 只取「跌幅/漲幅」清單本體,去掉標題與註腳
+            body = [l for l in mv.split("\n") if l.startswith(("▪", "  ", "📉", "📈"))]
+            movers_txt = "\n".join(body[:16])
+    except Exception as e:
+        print(f"[Weekly] movers fail: {e}")
+    new_names, gone_names = [], []
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(sql_text("""
+                WITH latest AS (SELECT MAX(snap_date) d FROM bond_price_history),
+                     old AS (SELECT MAX(snap_date) d FROM bond_price_history
+                             WHERE snap_date <= (SELECT d FROM latest) - INTERVAL '7 day')
+                SELECT
+                  (SELECT string_agg(bond_name, '|') FROM bond_price_history WHERE snap_date=(SELECT d FROM latest)
+                     AND isin NOT IN (SELECT isin FROM bond_price_history WHERE snap_date=(SELECT d FROM old))),
+                  (SELECT string_agg(bond_name, '|') FROM bond_price_history WHERE snap_date=(SELECT d FROM old)
+                     AND isin NOT IN (SELECT isin FROM bond_price_history WHERE snap_date=(SELECT d FROM latest)))
+            """)).fetchone()
+        if rows:
+            new_names = [x for x in (rows[0] or "").split("|") if x]
+            gone_names = [x for x in (rows[1] or "").split("|") if x]
+    except Exception as e:
+        print(f"[Weekly] new/gone fail: {e}")
+    sector_rows = []
+    try:
+        sector_rows = build_sector_rows(today, do_classify=False)   # 週回顧不觸發 AI 分類,只用快取
+    except Exception as e:
+        print(f"[Weekly] sector fail: {e}")
+    return weekly_review(str(BOND_PRICE_FILE), today, movers_txt=movers_txt,
+                         new_names=new_names, gone_names=gone_names, sector_rows=sector_rows)
+
+
+def job_weekly_review():
+    """每週五 17:30 推本週回顧到主群 + Albert"""
+    now = datetime.now(TZ_TAIPEI_PYTZ)
+    try:
+        if not BOND_PRICE_FILE.exists():
+            return
+        txt = build_weekly_review_text(now.date())
+        _t = load_targets() or {}
+        user_id = os.getenv("LINE_USER_ID", "")
+        for rid in dict.fromkeys([user_id, _t.get("bond", "")]):
+            if rid:
+                push_long_message(line_bot_api, rid, txt)
+        write_job_log("本週回顧", "success", now.strftime("%Y-%m-%d"))
+    except Exception as e:
+        print(f"[Weekly ERROR] {e}")
+        print(_traceback.format_exc()[:500])
+        write_job_log("本週回顧", "error", str(e))
+
+
 def get_charts_comment(issuer, q):
     """對近五季四張圖做 AI 解讀:正向、建設性,但不得捏造或美化負面數字"""
     if not q:
@@ -4820,6 +4996,7 @@ def start_scheduler():
     scheduler.add_job(job_bond_rating_news, CronTrigger(day_of_week="mon-fri", hour=6, minute=50, timezone=TZ_TAIPEI_PYTZ), id="bond_rating_news", name="信評新聞雷達")
     scheduler.add_job(job_drive_cleanup, CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=TZ_TAIPEI_PYTZ), id="drive_cleanup", name="Drive清理")
     scheduler.add_job(job_econ_watch, IntervalTrigger(minutes=10, timezone=TZ_TAIPEI_PYTZ), id="econ_watch", name="經濟數據監控")
+    scheduler.add_job(job_weekly_review, CronTrigger(day_of_week="fri", hour=17, minute=30, timezone=TZ_TAIPEI_PYTZ), id="weekly_review", name="本週回顧")
     scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=40, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
     scheduler.add_job(job_bond_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ), id="bond_daily_report", name="債券日報")
     scheduler.add_job(job_auto_tracking, CronTrigger(day_of_week="mon-sat", hour=7, minute=0, timezone=TZ_TAIPEI_PYTZ), id="auto_tracking", name="ELN自動追蹤")
