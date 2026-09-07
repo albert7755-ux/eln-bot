@@ -266,11 +266,12 @@ def format_sector(rows, today, ccy="USD", file_time=""):
         if r["avg_chg30"] is not None: seg.append(f"近30天 {r['avg_chg30']:+.1f}%")
         lines.append("▪ " + "｜".join(seg))
     lines.append("")
-    note = "利差＝該產業債券 YTM 中位數減同年期美債；利差窄代表市場要求的風險補償低。"
+    note = ("利差＝每檔債券 YTM 減「同剩餘年期」的美債殖利率（美債曲線 3M/2Y/5Y/10Y/20Y/30Y 內插），"
+            "再取該產業中位數；利差窄代表市場要求的風險補償低。")
     if has_chg:
         note += "近30天為該產業 Offer 平均變化，正值代表價格上漲(殖利率下行)。"
     lines.append(note)
-    lines.append("各產業平均年期不同，利差比較僅供參考。")
+    lines.append("各產業平均年期不同，利差比較僅供參考。/sector list 看分類，/sector 核心消費 看該產業機構。")
     if file_time:
         lines.append(f"📎 報價檔 {file_time}")
     return "\n".join(lines)
