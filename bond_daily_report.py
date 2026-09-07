@@ -481,12 +481,14 @@ def generate_bond_commentary(snapshot_text: str) -> str:
         "- 禁止空泛的呼籲句和集體喊話,例如「大家來想想」「不妨思考」「讓我們一起」「值得我們深思」;"
         "要嘛給具體的觀察或做法,要嘛不寫。\n"
         "- 純文字輸出,禁用任何markdown符號(**粗體**、#標題、-條列),LINE不支援會變亂碼。\n"
-        "- 總長度精簡,適合手機閱讀:四段文字合計不超過400字,寧可少寫也不要湊字數。\n\n"
+        "- 總長度精簡,適合手機閱讀:四段文字合計約350~480字,寧可少寫也不要湊字數,但每段不可空白。\n\n"
         "輸出格式必須完全如下:\n\n"
         "【前言】\n(內容)\n\n"
         "【殖利率動向解讀】\n(內容)\n\n"
         "【今日專題】\n(內容)\n\n"
         "【今日操作思維】\n(內容)\n"
+        "格式硬性規定:四個標籤各自獨立成一行、標籤後換行再寫內容、每段都要有內容;"
+        "不要粗體、不要 markdown、不要分隔線、不要把兩個標籤寫在同一行、不要改標籤名稱。\n"
     )
 
     try:
@@ -513,21 +515,72 @@ def generate_bond_commentary(snapshot_text: str) -> str:
     return full_text.strip()
 
 
-def extract_section(text: str, title: str) -> str:
+SECTION_ALIASES = {
+    "前言": ["前言", "開場", "摘要"],
+    "殖利率動向解讀": ["殖利率動向解讀", "殖利率解讀", "動向解讀", "殖利率動向"],
+    "今日專題": ["今日專題", "專題", "主題"],
+    "今日操作思維": ["今日操作思維", "操作思維", "操作建議", "今日思維"],
+}
+
+
+def _normalize_commentary(text: str) -> str:
+    """去掉 markdown 裝飾與分隔線,讓標籤解析不受格式漂移影響"""
     import re
-    pattern = rf"【{re.escape(title)}】\s*(.*?)(?=\n【|$)"
-    m = re.search(pattern, text, re.S)
-    return m.group(1).strip() if m else ""
+    t = text.replace("\r", "")
+    t = re.sub(r"\*\*|__|`", "", t)                       # 粗體/底線/程式碼記號
+    t = re.sub(r"^\s*#+\s*", "", t, flags=re.M)           # markdown 標題
+    t = re.sub(r"^\s*[-=─—]{3,}\s*$", "", t, flags=re.M)  # 分隔線
+    t = re.sub(r"[［\[]", "【", t); t = re.sub(r"[］\]]", "】", t)  # 全形/半形方括號視為同一種
+    return t
+
+
+def parse_sections(text: str) -> dict:
+    """
+    容錯解析:標籤不必在行首、可帶冒號、可用別名。
+    回傳 {canonical_title: content}
+    """
+    import re
+    t = _normalize_commentary(text or "")
+    alias_to_canon = {a: c for c, al in SECTION_ALIASES.items() for a in al}
+    pat = re.compile(r"【\s*(" + "|".join(map(re.escape, alias_to_canon.keys())) + r")\s*】\s*[:：]?\s*")
+    hits = list(pat.finditer(t))
+    out = {}
+    for i, m in enumerate(hits):
+        canon = alias_to_canon[m.group(1)]
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(t)
+        body = t[m.end():end].strip()
+        if body and canon not in out:            # 同名標籤只取第一個有內容的
+            out[canon] = body
+    return out
+
+
+def extract_section(text: str, title: str) -> str:
+    return parse_sections(text).get(title, "")
 
 
 def build_final_bond_report(data: dict) -> str:
     snapshot = build_bond_snapshot(data)
     commentary = generate_bond_commentary(snapshot)
 
-    intro = extract_section(commentary, "前言")
-    yields = extract_section(commentary, "殖利率動向解讀")
-    topic = extract_section(commentary, "今日專題")
-    action = extract_section(commentary, "今日操作思維")
+    secs = parse_sections(commentary)
+    need = ("前言", "殖利率動向解讀", "今日專題", "今日操作思維")
+    missing = [k for k in need if not secs.get(k)]
+    if missing:
+        print(f"[BondDaily] 段落解析缺少 {missing},重試一次。原始輸出前400字:\n{(commentary or '')[:400]}")
+        try:
+            commentary2 = generate_bond_commentary(
+                snapshot + "\n\n【格式再次提醒】四個段落標題必須各自獨立成一行、只用這四個標籤:"
+                           "【前言】【殖利率動向解讀】【今日專題】【今日操作思維】,"
+                           "標籤後換行再寫內容,不要粗體、不要分隔線、不要把兩個標籤寫在同一行。")
+            secs2 = parse_sections(commentary2)
+            if sum(1 for k in need if secs2.get(k)) > sum(1 for k in need if secs.get(k)):
+                secs = secs2
+        except Exception as e:
+            print(f"[BondDaily] 重試失敗: {e}")
+    intro = secs.get("前言", "")
+    yields = secs.get("殖利率動向解讀", "")
+    topic = secs.get("今日專題", "")
+    action = secs.get("今日操作思維", "")
 
     tw_tz = pytz.timezone("Asia/Taipei")
     weekday = datetime.now(tw_tz).weekday()
