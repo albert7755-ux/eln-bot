@@ -307,6 +307,36 @@ def _etf_line(label: str, d: dict) -> str:
     return f"{label}:{d['price']:.2f} {arrow}{abs(d['change']):.2f} ({d['pct']:+.2f}%)"
 
 
+def _last_us_trading_day(today_tw):
+    """台北的今天,對應『昨晚應該有的美國交易日』= 台北日期減一天;週日/週一往前回推到週五"""
+    from datetime import timedelta as _td
+    d = today_tw.date() - _td(days=1)
+    while d.weekday() >= 5:        # 週六/週日
+        d -= _td(days=1)
+    return d
+
+
+def detect_us_closed(data, today_tw):
+    """
+    比對財政部曲線日期與『昨晚應有的交易日』,不一致代表美債昨晚休市(假日)。
+    回傳 (is_closed, expected_date, actual_date) ; actual_date 可能為 None
+    """
+    from datetime import datetime as _dt
+    src = data.get("CURVE_SOURCE") or {}
+    raw = src.get("date")
+    actual = None
+    if raw:
+        for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+            try:
+                actual = _dt.strptime(str(raw).strip(), fmt).date(); break
+            except Exception:
+                continue
+    expected = _last_us_trading_day(today_tw)
+    if actual is None:
+        return False, expected, None
+    return actual < expected, expected, actual
+
+
 def build_bond_snapshot(data):
     tw_tz = pytz.timezone("Asia/Taipei")
     today = datetime.now(tw_tz)
@@ -317,6 +347,12 @@ def build_bond_snapshot(data):
     lines.append("")
     lines.append("__INTRO__")
     lines.append("")
+    closed, exp_d, act_d = detect_us_closed(data, today)
+    if closed and act_d:
+        wdm = ["一", "二", "三", "四", "五", "六", "日"]
+        lines.append(f"⚠️ 美債昨日（{exp_d:%m/%d} 週{wdm[exp_d.weekday()]}）休市，"
+                     f"以下為 {act_d:%m/%d}（週{wdm[act_d.weekday()]}）收盤數據，變動為該日對前一交易日。")
+        lines.append("")
     src = data.get("CURVE_SOURCE")
     star = "" if src else "*"          # 資料源統一時不需要星號註記
     lines.append("一、美債殖利率曲線")
@@ -411,8 +447,13 @@ def generate_bond_commentary(snapshot_text: str) -> str:
     prompt = (
         "你是銀行固定收益科的債券晨報編輯,讀者是分行的理財同仁,"
         "他們服務的高資產客戶持有海外債券(以投資等級債為主)、債券基金與結構型商品。\n\n"
-        f"今天台北時間是 {today_str}。以下是昨晚(美國時間)收盤的債券市場數據:\n\n"
+        f"今天台北時間是 {today_str}。以下是最新一個美國交易日收盤的債券市場數據:\n\n"
         f"{snapshot_text}\n\n"
+        + ("【極重要-休市】上方數據標示美債昨日休市(美國假日)。昨晚『沒有交易』,"
+           "所以不可以寫『昨晚殖利率走升/回落』『假期後首個交易日』這類描述,"
+           "也不要把數據的變動說成昨晚發生的事。前言與殖利率解讀請改寫成:"
+           "說明昨日休市、上一交易日的收盤水位、以及今晚開盤市場將面對的事件(數據/會議)。\n\n"
+           if "美債昨日" in snapshot_text and "休市" in snapshot_text else "") +
         "【極重要-利差方向】上方數據中的『2年/10年利差』與『20年/30年利差』已由系統計算完成,"
         "括號內若標示『正斜率』代表 30年殖利率高於 20年(曲線扭曲已修復);"
         "若標示『倒掛(20Y高於30Y)』代表 20年高於 30年(扭曲尚未修復)。"
