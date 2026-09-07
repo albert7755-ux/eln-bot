@@ -46,7 +46,12 @@ def parse_find(query: str):
     q = query.strip()
     f = {"ccy": None, "ytm_min": None, "ytm_max": None, "cy_min": None, "cy_max": None,
          "yr_min": None, "yr_max": None, "cpn_min": None, "tag": None, "kw": []}
+    # 正規化:全形符號 → 半形、去掉數字後的 %
+    q = (q.replace("＞", ">").replace("＜", "<").replace("＝", "=")
+          .replace("％", "%").replace("～", "~").replace("－", "-"))
+    q = re.sub(r"(\d)\s*%", r"\1", q)          # ytm>5% → ytm>5, 4.5% → 4.5
     toks = [t for t in re.split(r"\s+", q) if t]
+    f["bad"] = []
     for t in toks:
         tl = t.lower()
         if tl in CCY_ALIAS:
@@ -84,6 +89,9 @@ def parse_find(query: str):
             v = float(m.group(3))
             if m.group(2) in (">", ">="): f["yr_min"] = v
             else: f["yr_max"] = v
+            continue
+        if re.search(r"[<>=]", t) or re.search(r"\d+\s*年", t):
+            f["bad"].append(t)          # 像條件但寫法不對,回報給使用者
             continue
         f["kw"].append(t)
     return f
@@ -145,6 +153,17 @@ def describe_filters(f):
 
 
 def format_find(rows, total, filters, today, file_time=""):
+    bad = filters.get("bad") or []
+    if bad:
+        return (f"🔎 這幾個條件我看不懂：{'、'.join(bad)}\n\n"
+                "支援的寫法：\n"
+                "・ytm>5、ytm>=5.5、ytm<6（可加%）\n"
+                "・cy>4.5（當期收益率）\n"
+                "・票面>4\n"
+                "・10年內、20年以上、5-10年、年期<8\n"
+                "・usd / aud / nzd / gbp / eur\n"
+                "・一般 / 專投 / 高資產\n\n"
+                "例：/find usd ytm>5 15-35年")
     if not rows:
         return (f"🔎 條件：{describe_filters(filters)}\n目前沒有符合的債券。\n\n"
                 "用法範例：\n/find usd ytm>5 10年內\n/find aud cy>4.5 5-10年\n/find 一般 ytm>5.5 20年以上")
