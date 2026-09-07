@@ -246,6 +246,37 @@ def parse_tv_csv(csv_path: str) -> dict:
 def fallback_get_current_price(driver) -> dict | None:
     """Fallback: 多種方式嘗試抓當前價格"""
     import re
+
+    def _valid(v):
+        return 40 < v < 140
+
+    # 方法1：直接抓 TradingView 的最新價元素（最準）
+    try:
+        selectors = [
+            "[class*='lastPrice']",
+            "[class*='last-'] span",
+            "span[class*='last']",
+            "[data-field='last_price']",
+            ".js-symbol-last",
+            "[class*='priceWrapper'] span",
+            "[class*='symbol-header'] [class*='price']",
+        ]
+        for sel in selectors:
+            try:
+                for el in driver.find_elements(By.CSS_SELECTOR, sel)[:5]:
+                    txt = (el.text or "").strip().replace(",", "")
+                    m = re.search(r'(\d{2,3}\.\d{1,4})', txt)
+                    if m:
+                        val = float(m.group(1))
+                        if _valid(val):
+                            print(f"  💡 Fallback（元素 {sel}）抓到價格：{val}")
+                            return {TODAY: val}
+            except:
+                continue
+    except:
+        pass
+
+    # 方法2：頁面文字 regex（放寬到 40~140）
     try:
         page_text = driver.find_element(By.TAG_NAME, "body").text
         patterns = [
@@ -253,14 +284,13 @@ def fallback_get_current_price(driver) -> dict | None:
             r'Last\s+([\d]{2,3}\.[\d]{1,4})',
             r'Price\s+([\d]{2,3}\.[\d]{1,4})',
             r'Close\s+([\d]{2,3}\.[\d]{1,4})',
-            r'\b((?:9[0-9]|1[0-1][0-9]|120)\.[\d]{1,4})\b',
+            r'\b((?:[4-9][0-9]|1[0-3][0-9])\.[\d]{2,4})\b',
         ]
         for pattern in patterns:
-            match = re.search(pattern, page_text, re.IGNORECASE)
-            if match:
-                val = float(match.group(1))
-                if 50 < val < 200:
-                    print(f"  💡 Fallback 抓到價格：{val}")
+            for m in re.finditer(pattern, page_text, re.IGNORECASE):
+                val = float(m.group(1))
+                if _valid(val):
+                    print(f"  💡 Fallback（文字）抓到價格：{val}")
                     return {TODAY: val}
         print(f"  ⚠️ Fallback 也找不到價格")
     except Exception as e:
