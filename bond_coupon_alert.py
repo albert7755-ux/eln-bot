@@ -63,7 +63,7 @@ def _ytm_disp(v):
 DISCLAIMER = (
     "\n⚠️ 未於截止日前申購者仍可於配息後申購，前手息較低，非錯失機會。"
     "配息日由到期日＋頻率推算、營業日未含台美假日，請以實際為準。"
-    "🔒專投｜💎高資產。本表為時點資訊，非投資建議。"
+    "🔒專投＝限專業投資人｜💎高資產＝高資產客戶專屬。本表為時點資訊，非投資建議。"
 )
 
 def is_bond_pricing_file(path, filename=""):
@@ -270,58 +270,67 @@ def build_alerts(path, today=None, lookahead=LOOKAHEAD_DAYS):
     alerts.sort(key=lambda a: (a["coupon_date"], -a["lag"], a["name"]))
     return alerts
 
-def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=3, max_lines=10, maturity_days=30):
+def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=2, max_lines=12, maturity_days=30):
     """
-    回傳給 LINE 用的純文字訊息。
-    lookahead  : 往前看幾天的配息日（預設 14）
-    days_ahead : 只顯示『最晚下單日』落在今天起 N 個營業日內的（預設 3）；None = 全部顯示
+    回傳給 LINE 用的純文字訊息。順序:
+      1. 💧 剛配息完(前手息最低) — 近 2 天
+      2. 📅 欲參與本期配息 — 申購截止日在 2 個營業日內
+      3. 💵 到期提醒
+    days_ahead : 截止日往後看幾個營業日(預設 2);None = 全部
     """
     today = today or date.today()
+    wd = "一二三四五六日"
+
+    # ---- 1) 剛配息完(近2天) ----
+    paid_txt = format_just_paid(just_paid(path, today, 2), today, 2, max_lines=10)
+
+    # ---- 2) 欲參與本期配息(2個營業日內) ----
     alerts = build_alerts(path, today, lookahead)
     ok_all = [a for a in alerts if a["status"].startswith("✅")]
     gone = len(alerts) - len(ok_all)
-    wd = "一二三四五六日"
     if days_ahead is None:
         ok, cutoff = ok_all, None
     else:
         cutoff = biz_days_after(today, days_ahead)
         ok = [a for a in ok_all if a["last_trade"] <= cutoff]
-    scope = f"配息前申購截止日在 {days_ahead} 個營業日內（～{cutoff:%m/%d}）" if cutoff else f"未來{lookahead}天全部"
-    mat_txt = format_maturities(maturing_soon(path, today, maturity_days), today, maturity_days) if maturity_days else ""
-    paid_txt = format_just_paid(just_paid(path, today, 3), today, 3)
-    if not ok:
-        return (f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達\n"
-                f"{scope}無配息前申購截止的債券。\n"
-                f"（未來{lookahead}天共 {len(alerts)} 檔配息，配息前尚可申購 {len(ok_all)} 檔，可打 /coupon all 看全部）"
-                + paid_txt + mat_txt + DISCLAIMER)
     ok = [a for a in ok if a["offer"] not in (None, "", 0, "#VALUE!", "#N/A")]   # 無報價不列
     ok.sort(key=lambda a: (a["last_trade"], -a["lag"], a["name"]))
-    lines = [f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達",
-             f"{scope}：{len(ok)} 檔",
-             f"（未來{lookahead}天共 {len(alerts)} 檔配息｜配息前可申購 {len(ok_all)}｜本期已截止 {gone}）",
-             "📌 配息前申購前手息較高、配息後較低，經濟價值相當，差別在期初支付金額。\n"]
-    cur = None
-    for i, a in enumerate(ok):
-        if a["last_trade"] != cur:
-            cur = a["last_trade"]
-            tag = ("欲參與本期配息：申購截止 今日"
-                   if cur == today else
-                   f"欲參與本期配息：申購截止 {cur:%m/%d}({wd[cur.weekday()]})")
-            lines.append(f"── {tag} ──")
-        offer = a["offer"] if a["offer"] not in (None, "", 0, "#VALUE!") else "-"
-        ytm = a["ytm"] if a["ytm"] not in (None, "", 0) else "-"
-        avail = "" if str(a["avail"]) == "有" else f"｜額度:{a['avail']}"
-        _y = _ytm_disp(a.get("ytm"))
-        lines.append(
-            f"{a['code'] or '-'}｜{a['name']} {a['ccy']} {_num(a['coupon'])}% {a['freq']}｜{pi_tag(a)}\n"
-            f"  配息{a['coupon_date']:%m/%d}｜Offer {_num(a.get('offer'))}"
-            + (f"｜YTM {_y}" if _y else "") + avail
-        )
-        if i + 1 >= max_lines and i + 1 < len(ok):
-            lines.append(f"…另有 {len(ok)-i-1} 檔，見Excel")
-            break
+
+    lines = [f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達"]
     if paid_txt:
         lines.append(paid_txt)
+    else:
+        lines.append("\n💧 近2天無剛配息完成之債券。")
+
+    scope = (f"申購截止日在 {days_ahead} 個營業日內（～{cutoff:%m/%d}）" if cutoff
+             else f"未來{lookahead}天全部")
+    if ok:
+        lines.append(f"\n📅 欲參與本期配息（{scope}）：{len(ok)} 檔")
+        lines.append("📌 配息前申購前手息較高、配息後較低，經濟價值相當，差別在期初支付金額。")
+        cur = None
+        for i, a in enumerate(ok):
+            if a["last_trade"] != cur:
+                cur = a["last_trade"]
+                tag = ("申購截止 今日" if cur == today
+                       else f"申購截止 {cur:%m/%d}({wd[cur.weekday()]})")
+                lines.append(f"── {tag} ──")
+            avail = "" if str(a["avail"]) == "有" else f"｜額度:{a['avail']}"
+            _y = _ytm_disp(a.get("ytm"))
+            lines.append(
+                f"{a['code'] or '-'}｜{a['name']} {a['ccy']} {_num(a['coupon'])}% {a['freq']}｜{pi_tag(a)}\n"
+                f"  配息{a['coupon_date']:%m/%d}｜Offer {_num(a.get('offer'))}"
+                + (f"｜YTM {_y}" if _y else "") + avail
+            )
+            if i + 1 >= max_lines and i + 1 < len(ok):
+                lines.append(f"…另有 {len(ok)-i-1} 檔，見 /coupon table")
+                break
+    else:
+        lines.append(f"\n📅 {scope}無配息前申購截止的債券"
+                     f"（未來{lookahead}天共 {len(alerts)} 檔配息，配息前尚可申購 {len(ok_all)} 檔，"
+                     "可打 /coupon all 看全部）")
+
+    # ---- 3) 到期提醒 ----
+    mat_txt = format_maturities(maturing_soon(path, today, maturity_days), today, maturity_days) if maturity_days else ""
     if mat_txt:
         lines.append(mat_txt)
     lines.append(DISCLAIMER)
