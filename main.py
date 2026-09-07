@@ -146,6 +146,8 @@ BOND_GROUP_HELP = (
     "/move → 全架 vs 上一份報價，變動≥1%\n"
     "/move 7 3 → vs 7天前，≥3%\n"
     "/sector → 各產業 YTM/當期/較美債利差/近30天變化\n"
+    "/sector list → 各產業有哪些發行機構；/sector 核心消費 → 該產業機構\n"
+    "/sector fix 沃爾瑪 核心消費 → 修正分類\n"
     "/weekly → 本週回顧（每週五17:30自動推）\n"
     "/bondalert 蘋果 2043 ytm>5.2 → 單檔到價通知\n"
     "/bondalert list　/bondalert del 3\n"
@@ -3220,7 +3222,81 @@ def handle_text_message(event):
             if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔。"))
                 return
-            _ccy = (raw_cmd.split()[1].upper() if len(raw_cmd.split()) > 1 else "USD")
+            _parts = raw_cmd.split()
+            _arg = _parts[1] if len(_parts) > 1 else ""
+            from bond_screener import SECTORS as _SECTORS, ensure_sector_table, load_sector_map
+            # /sector list                → 各產業有哪些發行機構
+            # /sector 核心消費             → 該產業的發行機構與檔數
+            # /sector fix 沃爾瑪 核心消費   → 手動修正分類(僅 Albert)
+            if _arg in ("list", "清單", "分類"):
+                try:
+                    from bond_coupon_alert import read_bonds, issuer_of
+                    ensure_sector_table(engine, sql_text)
+                    smap = load_sector_map(engine, sql_text)
+                    _today = datetime.now(TZ_TAIPEI).date()
+                    cnt = {}
+                    for b in read_bonds(str(BOND_PRICE_FILE)):
+                        if b.get("maturity") and b["maturity"] > _today:
+                            iss = issuer_of(b["name"]); cnt[iss] = cnt.get(iss, 0) + 1
+                    by_sec = {}
+                    for iss, n_ in cnt.items():
+                        by_sec.setdefault(smap.get(iss, "未分類"), []).append((iss, n_))
+                    lines_s = ["🏭 發行機構產業分類（發行機構 檔數）", ""]
+                    for sec in _SECTORS + ["未分類"]:
+                        items = sorted(by_sec.get(sec, []), key=lambda x: -x[1])
+                        if not items: continue
+                        lines_s.append(f"【{sec}】{len(items)} 家")
+                        lines_s.append("、".join(f"{i}({n_})" for i, n_ in items))
+                        lines_s.append("")
+                    lines_s.append("修正分類：/sector fix 發行機構 產業\n可用產業：" + "、".join(_SECTORS))
+                    push_long_message(_bot_api, ck.split(":", 1)[1], "\n".join(lines_s))
+                except Exception as e:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 讀取失敗：{str(e)[:200]}"))
+                return
+            if _arg in ("fix", "修正", "改") and len(_parts) >= 4:
+                if not is_albert:
+                    return
+                _iss, _sec = _parts[2], _parts[3]
+                if _sec not in _SECTORS:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="產業名稱不在清單內，可用：" + "、".join(_SECTORS)))
+                    return
+                try:
+                    ensure_sector_table(engine, sql_text)
+                    smap = load_sector_map(engine, sql_text)
+                    hit = [k for k in smap if _iss == k or _iss in k]
+                    if not hit:
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"找不到發行機構「{_iss}」，用 /sector list 確認名稱。"))
+                        return
+                    with engine.begin() as conn:
+                        for k in hit:
+                            conn.execute(sql_text("UPDATE bond_issuer_sector SET sector=:s, updated_at=NOW() WHERE issuer=:i"),
+                                         {"s": _sec, "i": k})
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text="✅ 已修正：" + "、".join(f"{k} → {_sec}" for k in hit)))
+                except Exception as e:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 修正失敗：{str(e)[:200]}"))
+                return
+            if _arg in _SECTORS:
+                try:
+                    from bond_coupon_alert import read_bonds, issuer_of
+                    ensure_sector_table(engine, sql_text)
+                    smap = load_sector_map(engine, sql_text)
+                    _today = datetime.now(TZ_TAIPEI).date()
+                    cnt = {}
+                    for b in read_bonds(str(BOND_PRICE_FILE)):
+                        if b.get("maturity") and b["maturity"] > _today:
+                            iss = issuer_of(b["name"])
+                            if smap.get(iss) == _arg:
+                                cnt[iss] = cnt.get(iss, 0) + 1
+                    items = sorted(cnt.items(), key=lambda x: -x[1])
+                    body = [f"🏭 {_arg}：{len(items)} 家發行機構、{sum(cnt.values())} 檔", ""]
+                    body += [f"▪ {i}（{n_}檔）" for i, n_ in items]
+                    body.append("\n/issuer 名稱 可看各機構架上債券；分類有誤請 /sector fix 發行機構 產業")
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(body)[:4900]))
+                except Exception as e:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 讀取失敗：{str(e)[:200]}"))
+                return
+            _ccy = _arg.upper() if _arg else "USD"
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="🏭 計算產業概況中（首次需分類發行機構，約30~60秒）..."))
             def _run_sector(chat_id, bot_api_ref, ccy_):
                 try:
