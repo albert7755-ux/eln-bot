@@ -3138,12 +3138,10 @@ def handle_text_message(event):
                 step = max(1, len(offs) // 12)   # 太多筆時等距抽樣,避免訊息過長
                 for d, o, bd, y in offs[::step]:
                     lines_h.append(f"{d:%m/%d}  Offer {o:g}"
-                                  + (f"｜Bid {bd:g}" if bd is not None else "")
                                   + (f"｜YTM {y:g}" if y is not None else ""))
                 if offs and offs[-1] not in offs[::step]:
                     d, o, bd, y = offs[-1]
                     lines_h.append(f"{d:%m/%d}  Offer {o:g}"
-                                  + (f"｜Bid {bd:g}" if bd is not None else "")
                                   + (f"｜YTM {y:g}" if y is not None else ""))
                 if len(offs) >= 2:
                     o_first, o_last = offs[0][1], offs[-1][1]
@@ -3586,9 +3584,9 @@ def handle_text_message(event):
                 days_ahead = None
             else:
                 try:
-                    days_ahead = max(1, min(int(arg), 30)) if arg else 3
+                    days_ahead = max(1, min(int(arg), 30)) if arg else 0
                 except ValueError:
-                    days_ahead = 3
+                    days_ahead = 0
             try:
                 msg = _bond_build_alert(str(BOND_PRICE_FILE), today=_today, lookahead=14, days_ahead=days_ahead)
                 mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI).strftime("%m/%d %H:%M")
@@ -5040,7 +5038,7 @@ def job_bond_coupon_radar():
                 line_bot_api.push_message(user_id, TextSendMessage(text="📭 配息雷達：還沒有海外債報價檔，請把 Bond_Pricing Excel 傳給我。"))
             write_job_log("海外債配息雷達", "skipped", "無報價檔")
             return
-        msg = _bond_build_alert(str(BOND_PRICE_FILE), today=now.date(), lookahead=14, days_ahead=3)
+        msg = _bond_build_alert(str(BOND_PRICE_FILE), today=now.date(), lookahead=14, days_ahead=0)
         mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI_PYTZ)
         age_days = (now.date() - mtime.date()).days
         msg += f"\n📎 報價檔更新於 {mtime:%m/%d %H:%M}｜/coupon all 看全部｜/coupon table 出Excel"
