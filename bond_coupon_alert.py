@@ -270,11 +270,11 @@ def build_alerts(path, today=None, lookahead=LOOKAHEAD_DAYS):
     alerts.sort(key=lambda a: (a["coupon_date"], -a["lag"], a["name"]))
     return alerts
 
-def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=2, max_lines=12, maturity_days=30):
+def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=0, max_lines=12, maturity_days=30):
     """
     回傳給 LINE 用的純文字訊息。順序:
       1. 💧 剛配息完(前手息最低) — 近 2 天
-      2. 📅 欲參與本期配息 — 申購截止日在 2 個營業日內
+      2. 📅 欲參與本期配息 — 預設只列「申購截止今日」(days_ahead=0);/coupon N 可看 N 個營業日內
       3. 💵 到期提醒
     days_ahead : 截止日往後看幾個營業日(預設 2);None = 全部
     """
@@ -302,8 +302,12 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=2
     else:
         lines.append("\n💧 近2天無剛配息完成之債券。")
 
-    scope = (f"申購截止日在 {days_ahead} 個營業日內（～{cutoff:%m/%d}）" if cutoff
-             else f"未來{lookahead}天全部")
+    if cutoff is None:
+        scope = f"未來{lookahead}天全部"
+    elif days_ahead == 0:
+        scope = "申購截止今日"
+    else:
+        scope = f"申購截止日在 {days_ahead} 個營業日內（～{cutoff:%m/%d}）"
     if ok:
         lines.append(f"\n📅 欲參與本期配息（{scope}）：{len(ok)} 檔")
         lines.append("📌 配息前申購前手息較高、配息後較低，經濟價值相當，差別在期初支付金額。")
