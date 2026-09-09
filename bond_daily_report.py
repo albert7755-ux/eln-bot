@@ -225,7 +225,7 @@ def jgb_month_line(series):
     pts = [series[0], series[max(0, len(series)//2 - 1)], series[-6], series[-1]]
     chg_bp = (series[-1] - series[0]) * 100
     trail = " → ".join(f"{v:.2f}" for v in pts)
-    return f"近一月走勢:{trail}%(約{chg_bp:+.0f}bp)"
+    return f"近一月走勢:{trail}%(約{chg_bp:+.0f}bp,財務省基準)"
 
 def get_jgb_10y():
     """
@@ -281,9 +281,27 @@ def get_jgb_10y_te():
     return None
 
 
+def get_jgb_10y_yf():
+    """市場收盤:yfinance 的日本10年期公債殖利率(與行情軟體同口徑)"""
+    for sym in ("JP10Y-JP", "^TNX.JP", "JP10YT=RR"):
+        try:
+            h = yf.Ticker(sym).history(period="10d")
+            if h is None or len(h) < 2:
+                continue
+            last, prev = float(h["Close"].iloc[-1]), float(h["Close"].iloc[-2])
+            d = h.index[-1].date()
+            print(f"[BondDaily] JGB 市場收盤 {sym}: {d} {last:.3f}(前收 {prev:.3f})")
+            return {"price": round(last, 3), "change": round(last - prev, 3), "pct": 0.0,
+                    "date": d, "source": "市場收盤"}
+        except Exception as e:
+            print(f"[BondDaily] JGB yfinance {sym} 失敗: {e}")
+    return None
+
+
 def get_jgb_10y_checked():
     """
-    MOF 為主;若 MOF 日期落後預期交易日、或與 TE 同日差距 > 4bp,改用 TE 並註記。
+    優先序:市場收盤(yfinance) → TradingEconomics(市場口徑) → 財務省基準利回り。
+    財務省是自編基準,與行情軟體收盤約差 2~4bp,理專對不起來,故降為最後備援並標註口徑。
     預期交易日 = 台北今天的前一個日本營業日(週末往前推)。
     """
     from datetime import timedelta as _td
@@ -291,18 +309,21 @@ def get_jgb_10y_checked():
     exp = datetime.now(tw).date() - _td(days=1)
     while exp.weekday() >= 5:
         exp -= _td(days=1)
-    mof = get_jgb_10y()
+
+    yfd = get_jgb_10y_yf()
+    if yfd and yfd.get("date") == exp:
+        return yfd
     te = get_jgb_10y_te()
-    if mof and mof.get("date") == exp:
-        if te and te.get("date") == exp and abs(te["price"] - mof["price"]) > 0.04:
-            print(f"[BondDaily] JGB MOF({mof['price']}) 與 TE({te['price']}) 差距逾4bp,改用 TE")
-            return te
-        return mof
     if te and te.get("date") == exp:
-        print(f"[BondDaily] JGB MOF 日期 {mof.get('date') if mof else None} ≠ 預期 {exp},改用 TE")
         return te
-    pick = mof or te
-    return dict(pick, stale=True) if pick else None
+    mof = get_jgb_10y()
+    if mof and mof.get("date") == exp:
+        print(f"[BondDaily] JGB 市場來源不可用,改用財務省基準 {mof['price']}")
+        return dict(mof, source="財務省基準")
+    for cand in (yfd, te, mof):
+        if cand:
+            return dict(cand, stale=True, source=cand.get("source") or "財務省基準")
+    return None
 
 
 def get_bond_market_data():
@@ -469,7 +490,10 @@ def build_bond_snapshot(data):
     _jl = _yield_line("日本10年期公債", _j)
     if _j and _j.get("date"):
         _jl += f"（{_j['date']:%m/%d}"
-        if _j.get("source") == "TradingEconomics":
+        _src = _j.get("source") or ""
+        if _src == "財務省基準":
+            _jl += "·財務省基準"          # 與市場收盤約差2~4bp
+        elif _src == "TradingEconomics":
             _jl += "·TE"
         if _j.get("stale"):
             _jl += "·資料未更新"
