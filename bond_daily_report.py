@@ -282,19 +282,11 @@ def get_jgb_10y_te():
 
 
 def get_jgb_10y_yf():
-    """市場收盤:yfinance 的日本10年期公債殖利率(與行情軟體同口徑)"""
-    for sym in ("JP10Y-JP", "^TNX.JP", "JP10YT=RR"):
-        try:
-            h = yf.Ticker(sym).history(period="10d")
-            if h is None or len(h) < 2:
-                continue
-            last, prev = float(h["Close"].iloc[-1]), float(h["Close"].iloc[-2])
-            d = h.index[-1].date()
-            print(f"[BondDaily] JGB 市場收盤 {sym}: {d} {last:.3f}(前收 {prev:.3f})")
-            return {"price": round(last, 3), "change": round(last - prev, 3), "pct": 0.0,
-                    "date": d, "source": "市場收盤"}
-        except Exception as e:
-            print(f"[BondDaily] JGB yfinance {sym} 失敗: {e}")
+    """
+    Yahoo Finance 沒有可用的日本10年期公債殖利率商品代號
+    (JP10Y-JP / ^TNX.JP / JP10YT=RR 實測皆 404 或無資料),
+    保留函式介面但直接回 None,主要來源改用 TradingEconomics。
+    """
     return None
 
 
@@ -306,7 +298,8 @@ def get_jgb_10y_checked():
     """
     from datetime import timedelta as _td
     tw = pytz.timezone("Asia/Taipei")
-    exp = datetime.now(tw).date() - _td(days=1)
+    today_tw = datetime.now(tw).date()
+    exp = today_tw - _td(days=1)
     while exp.weekday() >= 5:
         exp -= _td(days=1)
 
@@ -314,7 +307,8 @@ def get_jgb_10y_checked():
     if yfd and yfd.get("date") == exp:
         return yfd
     te = get_jgb_10y_te()
-    if te and te.get("date") == exp:
+    # TE 顯示的是最新市場值,日期可能是「今天(交易中)」或「昨日收盤」,兩者都採用
+    if te and te.get("date") and exp <= te["date"] <= today_tw:
         return te
     mof = get_jgb_10y()
     if mof and mof.get("date") == exp:
