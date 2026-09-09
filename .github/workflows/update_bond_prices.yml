@@ -31,7 +31,7 @@ jobs:
           sudo apt-get install -y google-chrome-stable
       - name: Install Python dependencies
         run: |
-          pip install selenium webdriver-manager gspread google-auth pandas requests beautifulsoup4
+          pip install selenium webdriver-manager gspread google-auth pandas requests beautifulsoup4 websocket-client
       - name: Run daily update
         if: ${{ github.event_name == 'schedule' || inputs.mode == 'update' }}
         env:
