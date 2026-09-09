@@ -21,6 +21,8 @@ from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager
 import csv
 import io
+import string
+from datetime import UTC
 # ==========================================
 # 設定
 # ==========================================
@@ -128,6 +130,114 @@ def create_driver():
     )
     return driver
 
+
+# ==========================================
+# TradingView WebSocket API（主要資料來源）
+# ==========================================
+_TV_AUTH_TOKEN = None
+
+def get_tv_auth_token():
+    """用 sessionid 換取付費帳號 auth_token（只取一次）"""
+    global _TV_AUTH_TOKEN
+    if _TV_AUTH_TOKEN is not None:
+        return _TV_AUTH_TOKEN
+    _TV_AUTH_TOKEN = "unauthorized_user_token"
+    if TV_SESSION_ID:
+        try:
+            import re as _re
+            r = requests.get(
+                "https://www.tradingview.com/disclaimer/",
+                cookies={"sessionid": TV_SESSION_ID},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=15,
+            )
+            m = _re.search(r'"auth_token":"(.+?)"', r.text)
+            if m:
+                _TV_AUTH_TOKEN = m.group(1)
+                print(f"✅ 取得付費帳號 auth_token（長度 {len(_TV_AUTH_TOKEN)}）")
+            else:
+                print("⚠️ 找不到 auth_token，改用未登入模式")
+        except Exception as e:
+            print(f"⚠️ 取得 auth_token 失敗：{e}")
+    return _TV_AUTH_TOKEN
+
+
+def fetch_tv_api(symbol: str, bars: int = 500) -> dict | None:
+    """
+    從 TradingView WebSocket API 抓日線歷史。
+    symbol 格式：EXCHANGE:CODE，例如 SWB:US717081DK61
+    回傳 {日期: 收盤價}
+    """
+    import re as _re
+    try:
+        from websocket import create_connection
+    except ImportError:
+        print("  ⚠️ 缺少 websocket-client 套件，略過 API")
+        return None
+
+    def _gen(prefix):
+        return prefix + "".join(random.choice(string.ascii_lowercase) for _ in range(12))
+
+    def _msg(func, params):
+        body = json.dumps({"m": func, "p": params}, separators=(",", ":"))
+        return f"~m~{len(body)}~m~{body}"
+
+    ws = None
+    try:
+        ws = create_connection(
+            "wss://data.tradingview.com/socket.io/websocket",
+            headers={"Origin": "https://data.tradingview.com"},
+            timeout=20,
+        )
+        cs = _gen("cs_")
+        qs = _gen("qs_")
+        ws.send(_msg("set_auth_token", [get_tv_auth_token()]))
+        ws.send(_msg("chart_create_session", [cs, ""]))
+        ws.send(_msg("quote_create_session", [qs]))
+        ws.send(_msg("resolve_symbol", [
+            cs, "symbol_1",
+            '={"symbol":"' + symbol + '","adjustment":"splits"}'
+        ]))
+        ws.send(_msg("create_series", [cs, "s1", "s1", "symbol_1", "1D", bars]))
+
+        raw = ""
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            try:
+                chunk = ws.recv()
+                raw += chunk
+                if "series_completed" in chunk:
+                    break
+                if "symbol_error" in chunk or "critical_error" in chunk:
+                    break
+            except Exception:
+                break
+    except Exception as e:
+        print(f"  ⚠️ API 連線失敗：{e}")
+        return None
+    finally:
+        try:
+            if ws:
+                ws.close()
+        except Exception:
+            pass
+
+    result = {}
+    for m in _re.finditer(r'\{"i":\d+,"v":\[([\d\.eE\+\-,]+)\]\}', raw):
+        parts = m.group(1).split(",")
+        if len(parts) < 5:
+            continue
+        try:
+            ts = float(parts[0])
+            close = float(parts[4])
+            d = datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%d")
+            if 0 < close < 1000:
+                result[d] = close
+        except Exception:
+            continue
+    return result if result else None
+
+
 def download_tv_csv(driver, exchange: str, symbol: str) -> dict | None:
     """從 TradingView 下載歷史 CSV，回傳 {日期: 收盤價} 的 dict"""
     tv_symbol = f"{exchange}-{symbol}"
@@ -165,10 +275,13 @@ def download_tv_csv(driver, exchange: str, symbol: str) -> dict | None:
 
                 menu_items = driver.find_elements(By.CSS_SELECTOR, "[class*='item'], [role='menuitem'], [class*='menu'] span")
                 download_item = None
+                KEYWORDS = ["download", "chart data", "export",
+                            "下載圖表數據", "下載圖表資料", "下載數據", "匯出圖表", "匯出資料"]
                 for item in menu_items:
                     try:
                         text = (item.text or "").strip()
-                        if "download" in text.lower() or "chart data" in text.lower():
+                        low = text.lower()
+                        if any(k in low for k in KEYWORDS):
                             download_item = item
                             print(f"  找到下載選項：{text}")
                             break
@@ -176,18 +289,28 @@ def download_tv_csv(driver, exchange: str, symbol: str) -> dict | None:
                         continue
 
                 if not download_item:
-                    spans = driver.find_elements(By.XPATH, "//*[contains(text(), 'Download chart data') or contains(text(), 'download chart')]")
+                    xpath = ("//*[contains(text(), 'Download chart data')"
+                             " or contains(text(), 'download chart')"
+                             " or contains(text(), 'Export chart data')"
+                             " or contains(text(), '下載圖表數據')"
+                             " or contains(text(), '下載圖表資料')"
+                             " or contains(text(), '匯出圖表')]")
+                    spans = driver.find_elements(By.XPATH, xpath)
                     if spans:
                         download_item = spans[0]
-                        print(f"  找到下載選項（XPath）")
+                        print(f"  找到下載選項（XPath）：{(spans[0].text or '').strip()}")
 
                 if download_item:
                     download_item.click()
                     time.sleep(2)
-                    download_btns = driver.find_elements(By.XPATH, "//button[contains(text(), 'Download')]")
+                    btn_xpath = ("//button[contains(text(), 'Download')"
+                                 " or contains(text(), 'Export')"
+                                 " or contains(text(), '下載')"
+                                 " or contains(text(), '匯出')]")
+                    download_btns = driver.find_elements(By.XPATH, btn_xpath)
                     if download_btns:
                         download_btns[-1].click()
-                        print(f"  點擊 Download 確認")
+                        print(f"  點擊下載確認：{(download_btns[-1].text or '').strip()}")
                         time.sleep(3)
                         for _ in range(20):
                             files = os.listdir(DOWNLOAD_DIR)
@@ -437,13 +560,26 @@ def main():
                 "USH4209EU71":  "UBS5728143",
             }
             tv_symbol = FINRA_ISIN_TO_TICKER.get(isin, isin) if exchange.upper() == "FINRA" else isin
-            tv_data = download_tv_csv(driver, exchange, tv_symbol)
+
+            # 先走 API（可拿完整日線歷史）
+            tv_data = None
+            if exchange:
+                tv_data = fetch_tv_api(f"{exchange}:{tv_symbol}", bars=500)
+                if tv_data:
+                    ds = sorted(tv_data.keys())
+                    print(f"  📡 API 取得 {len(tv_data)} 筆（{ds[0]} ~ {ds[-1]}）")
+
+            # API 失敗才退回瀏覽器抓當日價
+            if not tv_data:
+                print(f"  ↩️ API 無資料，改用瀏覽器抓當日價...")
+                tv_data = download_tv_csv(driver, exchange, tv_symbol)
+
             if not tv_data:
                 print(f"  ❌ 無法取得數據")
                 failed.append(isin)
                 continue
 
-            cutoff = (date.today() - timedelta(days=60)).strftime("%Y-%m-%d")
+            cutoff = (date.today() - timedelta(days=500)).strftime("%Y-%m-%d")
             missing = {
                 d: p for d, p in tv_data.items()
                 if d not in existing_dates and d >= cutoff and d <= TODAY
