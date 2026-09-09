@@ -6,6 +6,7 @@
 import os
 import csv
 import io
+import re
 import requests
 import yfinance as yf
 from datetime import datetime
@@ -140,27 +141,52 @@ def get_fred_yield(series_id: str):
 JGB_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 
-def _parse_jgb_10y_csv(text: str):
-    """從 MOF CSV 內容解析出 10 年期欄位的所有數值(自動偵測 10Y/10年 在第幾欄)"""
+def _parse_jgb_date(raw: str):
+    """MOF 日期格式:2026/9/8、2026-09-08、R8.9.8(令和)"""
+    from datetime import datetime as _dt, date as _date
+    t = raw.strip()
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y.%m.%d"):
+        try:
+            return _dt.strptime(t, fmt).date()
+        except ValueError:
+            pass
+    m = re.match(r"^[RＲ](\d+)[.．/](\d+)[.．/](\d+)$", t)
+    if m:
+        try:
+            return _date(2018 + int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_jgb_10y_series(text: str):
+    """從 MOF CSV 解析 (日期, 10年期殖利率) 序列,依日期排序;日期解析失敗的列跳過"""
     rows = [r for r in csv.reader(io.StringIO(text)) if len(r) >= 11]
-    col = 10  # 預設:日期(0), 1年(1)...10年(10)
+    col = 10
     for r in rows:
         cells = [c.strip() for c in r]
         if "10Y" in cells:
-            col = cells.index("10Y")
-            break
+            col = cells.index("10Y"); break
         if "10年" in cells:
-            col = cells.index("10年")
-            break
-    values = []
+            col = cells.index("10年"); break
+    series = []
     for r in rows:
         if len(r) <= col:
             continue
+        d = _parse_jgb_date(r[0])
+        if d is None:
+            continue
         try:
-            values.append(float(r[col].strip()))
+            series.append((d, float(r[col].strip())))
         except ValueError:
-            continue  # 跳過表頭、"-"、註解列
-    return values
+            continue
+    series.sort(key=lambda x: x[0])
+    return series
+
+
+def _parse_jgb_10y_csv(text: str):
+    """相容舊呼叫:只回傳數值序列(已依日期排序)"""
+    return [v for _, v in _parse_jgb_10y_series(text)]
 
 
 def get_jgb_10y_month():
@@ -220,18 +246,63 @@ def get_jgb_10y():
             if resp.status_code != 200:
                 print(f"[BondDaily] MOF {fname} HTTP {resp.status_code},換下一個來源")
                 continue
-            values = _parse_jgb_10y_csv(resp.content.decode(enc, errors="ignore"))
-            if len(values) >= 2:
-                prev, last = values[-2], values[-1]
-                return {
-                    "price": round(last, 3),
-                    "change": round(last - prev, 3),
-                    "pct": 0.0,
-                }
-            print(f"[BondDaily] MOF {fname} 有效數值不足({len(values)}筆),換下一個來源")
+            series = _parse_jgb_10y_series(resp.content.decode(enc, errors="ignore"))
+            if len(series) >= 2:
+                (d_prev, prev), (d_last, last) = series[-2], series[-1]
+                print(f"[BondDaily] JGB 來源 {fname}: {d_prev} {prev} → {d_last} {last}")
+                return {"price": round(last, 3), "change": round(last - prev, 3), "pct": 0.0,
+                        "date": d_last, "source": "MOF"}
+            print(f"[BondDaily] MOF {fname} 有效數值不足({len(series)}筆),換下一個來源")
         except Exception as e:
             print(f"[BondDaily] MOF {fname} 抓取失敗: {e}")
     return None
+
+
+def get_jgb_10y_te():
+    """備援/交叉比對:Trading Economics 頁面上的最新值與日變化"""
+    try:
+        resp = requests.get("https://tradingeconomics.com/japan/government-bond-yield",
+                            headers=JGB_HEADERS, timeout=20)
+        if resp.status_code != 200:
+            return None
+        html = resp.text
+        m = re.search(r"(?:eased|fell|rose|climbed|increased|decreased|edged (?:up|down)) to ([\d.]+)% on ([A-Z][a-z]+ \d{1,2}, \d{4})", html)
+        m2 = re.search(r"marking a ([\d.]+) percentage points (increase|decrease)", html)
+        if not m:
+            return None
+        val = float(m.group(1))
+        d = datetime.strptime(m.group(2), "%B %d, %Y").date()
+        chg = float(m2.group(1)) * (1 if m2.group(2) == "increase" else -1) if m2 else 0.0
+        print(f"[BondDaily] JGB TE: {d} {val} ({chg:+.3f})")
+        return {"price": round(val, 3), "change": round(chg, 3), "pct": 0.0,
+                "date": d, "source": "TradingEconomics"}
+    except Exception as e:
+        print(f"[BondDaily] JGB TE 失敗: {e}")
+    return None
+
+
+def get_jgb_10y_checked():
+    """
+    MOF 為主;若 MOF 日期落後預期交易日、或與 TE 同日差距 > 4bp,改用 TE 並註記。
+    預期交易日 = 台北今天的前一個日本營業日(週末往前推)。
+    """
+    from datetime import timedelta as _td
+    tw = pytz.timezone("Asia/Taipei")
+    exp = datetime.now(tw).date() - _td(days=1)
+    while exp.weekday() >= 5:
+        exp -= _td(days=1)
+    mof = get_jgb_10y()
+    te = get_jgb_10y_te()
+    if mof and mof.get("date") == exp:
+        if te and te.get("date") == exp and abs(te["price"] - mof["price"]) > 0.04:
+            print(f"[BondDaily] JGB MOF({mof['price']}) 與 TE({te['price']}) 差距逾4bp,改用 TE")
+            return te
+        return mof
+    if te and te.get("date") == exp:
+        print(f"[BondDaily] JGB MOF 日期 {mof.get('date') if mof else None} ≠ 預期 {exp},改用 TE")
+        return te
+    pick = mof or te
+    return dict(pick, stale=True) if pick else None
 
 
 def get_bond_market_data():
@@ -269,7 +340,7 @@ def get_bond_market_data():
         results["US20Y"] = get_fred_yield("DGS20")
         results["FRED10Y"] = get_fred_yield("DGS10")
         results["FRED30Y"] = get_fred_yield("DGS30")
-    results["JGB10Y"] = get_jgb_10y()
+    results["JGB10Y"] = get_jgb_10y_checked()
     try:
         results["JGB10Y_MONTH"] = get_jgb_10y_month()
     except Exception as e:
@@ -394,7 +465,16 @@ def build_bond_snapshot(data):
 
     lines.append("")
     lines.append("二、日債與匯率")
-    lines.append(_yield_line("日本10年期公債", data.get("JGB10Y")))
+    _j = data.get("JGB10Y")
+    _jl = _yield_line("日本10年期公債", _j)
+    if _j and _j.get("date"):
+        _jl += f"（{_j['date']:%m/%d}"
+        if _j.get("source") == "TradingEconomics":
+            _jl += "·TE"
+        if _j.get("stale"):
+            _jl += "·資料未更新"
+        _jl += "）"
+    lines.append(_jl)
     _jm = jgb_month_line(data.get("JGB10Y_MONTH") or [])
     if _jm:
         lines.append(_jm)
