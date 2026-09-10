@@ -330,6 +330,8 @@ def get_bond_market_data():
         "LQD": "LQD",         # 投資等級公司債 ETF(信用市場溫度計)
         "HYG": "HYG",         # 非投資等級債 ETF
         "TLT": "TLT",         # 20年期以上美債 ETF(長債價格方向)
+        "WTI": "CL=F",        # WTI 原油期貨(通膨預期的即時代理指標)
+        "BRENT": "BZ=F",      # Brent 原油期貨
     }
 
     results = {}
@@ -509,6 +511,15 @@ def build_bond_snapshot(data):
     lines.append(_etf_line("LQD 投資等級債", data.get("LQD")))
     lines.append(_etf_line("HYG 非投資等級債", data.get("HYG")))
 
+    _w, _b = data.get("WTI"), data.get("BRENT")
+    if _w or _b:
+        lines.append("")
+        lines.append("〔原油·通膨預期觀察〕")
+        if _w:
+            lines.append(_etf_line("WTI 原油", _w))
+        if _b:
+            lines.append(_etf_line("Brent 原油", _b))
+
     return "\n".join(lines)
 
 
@@ -552,6 +563,10 @@ def generate_bond_commentary(snapshot_text: str) -> str:
            "也不要把數據的變動說成昨晚發生的事。前言與殖利率解讀請改寫成:"
            "說明昨日休市、上一交易日的收盤水位、以及今晚開盤市場將面對的事件(數據/會議)。\n\n"
            if "美債昨日" in snapshot_text and "休市" in snapshot_text else "") +
+        "【極重要-油價】上方數據區已提供 WTI 與 Brent 的『昨晚收盤價與漲跌幅』(與美債同一交易日)。"
+        "文中提到油價時,必須使用這組數字,不可改用新聞裡看到的價格——"
+        "新聞常寫的是前一日收盤或當日盤中價,與本報告的美債收盤不同天,混用會前後矛盾。"
+        "若要引用『盤中觸及/突破某價位』,須明確寫出是盤中而非收盤。\n\n"
         "【極重要-利差方向】上方數據中的『2年/10年利差』與『20年/30年利差』已由系統計算完成,"
         "括號內若標示『正斜率』代表 30年殖利率高於 20年(曲線扭曲已修復);"
         "若標示『倒掛(20Y高於30Y)』代表 20年高於 30年(扭曲尚未修復)。"
