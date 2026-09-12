@@ -780,8 +780,21 @@ def api_bonds(token: str = ""):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
         return JSONResponse({"error": "no pricing file"}, status_code=404)
-    from bond_coupon_alert import read_bonds, first_num, pi_tag
+    from bond_coupon_alert import read_bonds, first_num, pi_tag, issuer_of
     today = datetime.now(TZ_TAIPEI).date()
+    # 產業分類(來自 /sector 建立的快取)與美債曲線,用於計算利差
+    smap, curve, interp = {}, None, None
+    try:
+        from bond_screener import load_sector_map, ensure_sector_table
+        ensure_sector_table(engine, sql_text)
+        smap = load_sector_map(engine, sql_text)
+    except Exception as e:
+        print(f"[API] sector map fail: {e}")
+    try:
+        from bond_sheet import get_ust_curve, _interp_ust
+        curve, interp = get_ust_curve(), _interp_ust
+    except Exception as e:
+        print(f"[API] ust curve fail: {e}")
     out = []
     for b in read_bonds(str(BOND_PRICE_FILE)):
         if not b.get("maturity") or b["maturity"] <= today:
@@ -790,7 +803,19 @@ def api_bonds(token: str = ""):
         cpn = first_num(b.get("coupon"))
         if off is None or not off:
             continue
+        _yrs = round((b["maturity"] - today).days / 365.25, 2)
+        _ytm = first_num(b.get("ytm"))
+        _spread = None
+        if curve and interp and _ytm and 0 < _ytm <= 25:
+            _base = interp(curve, _yrs)
+            if _base is not None:
+                _sp = (_ytm - _base) * 100
+                if abs(_sp) <= 400:
+                    _spread = round(_sp, 1)
         out.append({
+            "sector": smap.get(issuer_of(b.get("name") or ""), "未分類"),
+            "issuer": issuer_of(b.get("name") or ""),
+            "spread_bp": _spread,
             "code": b.get("code"), "name": b.get("name"), "isin": b.get("isin"),
             "ccy": b.get("ccy"), "coupon": cpn, "freq": b.get("freq"),
             "offer": off, "bid": first_num(b.get("bid")),
