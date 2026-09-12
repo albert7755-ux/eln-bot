@@ -769,6 +769,139 @@ _BOND_UPLOAD_HTML = """<!doctype html>
 </div></body></html>"""
 
 
+@app.get("/api/bonds")
+def api_bonds(token: str = ""):
+    """
+    供 Streamlit 等外部工具取用的報價 JSON。
+    以 BOND_UPLOAD_TOKEN 驗證,只回傳報價檔既有欄位,不含任何客戶資料。
+    """
+    from fastapi.responses import JSONResponse
+    if not BOND_UPLOAD_TOKEN or token != BOND_UPLOAD_TOKEN:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
+        return JSONResponse({"error": "no pricing file"}, status_code=404)
+    from bond_coupon_alert import read_bonds, first_num, pi_tag
+    today = datetime.now(TZ_TAIPEI).date()
+    out = []
+    for b in read_bonds(str(BOND_PRICE_FILE)):
+        if not b.get("maturity") or b["maturity"] <= today:
+            continue
+        off = first_num(b.get("offer"))
+        cpn = first_num(b.get("coupon"))
+        if off is None or not off:
+            continue
+        out.append({
+            "code": b.get("code"), "name": b.get("name"), "isin": b.get("isin"),
+            "ccy": b.get("ccy"), "coupon": cpn, "freq": b.get("freq"),
+            "offer": off, "bid": first_num(b.get("bid")),
+            "ytm": first_num(b.get("ytm")),
+            "cy": (cpn / off * 100) if (cpn and off) else None,
+            "maturity": b["maturity"].isoformat(),
+            "years": round((b["maturity"] - today).days / 365.25, 2),
+            "ratings": b.get("ratings"), "seniority": b.get("seniority"),
+            "min_amt": first_num(b.get("min_amt")), "avail": str(b.get("avail") or ""),
+            "tag": pi_tag(b), "remark": str(b.get("remark") or ""),
+        })
+    mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI)
+    return JSONResponse({"updated_at": mtime.strftime("%Y-%m-%d %H:%M"),
+                         "count": len(out), "bonds": out})
+
+
+@app.get("/bond", response_class=HTMLResponse)
+def bond_web_page(request: Request, token: str = "", ccy: str = "", ytm: str = "",
+                  cy: str = "", yr_min: str = "", yr_max: str = "", tag: str = "",
+                  w8: str = "", kw: str = ""):
+    """海外債查詢網頁(下拉選單版,免記指令)"""
+    from fastapi.responses import HTMLResponse as _HR
+    import bond_web
+    tk = token or request.cookies.get("bond_tk", "")
+    if not BOND_UPLOAD_TOKEN or tk != BOND_UPLOAD_TOKEN:
+        return _HR(bond_web.login_page("密碼錯誤" if (token or request.cookies.get("bond_tk")) else ""))
+    if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
+        resp = _HR(bond_web.screener_page([], 0, {}, "-", err="尚未上傳報價檔"))
+        resp.set_cookie("bond_tk", tk, max_age=86400 * 30, httponly=True, samesite="lax")
+        return resp
+
+    from bond_screener import enrich
+    from bond_coupon_alert import read_bonds, pi_tag, issuer_of
+    today = datetime.now(TZ_TAIPEI).date()
+
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    ytm_min, cy_min, ymin, ymax = _f(ytm), _f(cy), _f(yr_min), _f(yr_max)
+
+    out = []
+    for b in read_bonds(str(BOND_PRICE_FILE)):
+        if not b.get("maturity") or b["maturity"] <= today:
+            continue
+        e = enrich(b, today)
+        if e["_offer"] is None:
+            continue
+        if e["_ytm"] is not None and not (0 < e["_ytm"] <= 25):
+            continue
+        if ccy and str(e["ccy"]).upper() != ccy.upper():
+            continue
+        t = pi_tag(e)
+        if tag and tag not in t:
+            continue
+        if ytm_min is not None and (e["_ytm"] is None or e["_ytm"] < ytm_min):
+            continue
+        if cy_min is not None and (e["_cy"] is None or e["_cy"] < cy_min):
+            continue
+        if ymin is not None and (e["_years"] is None or e["_years"] < ymin):
+            continue
+        if ymax is not None and (e["_years"] is None or e["_years"] > ymax):
+            continue
+        rm = str(e.get("remark") or "").upper().replace("－", "-")
+        has_w8 = ("W-8" in rm) or ("W8" in rm)
+        if w8 == "no" and has_w8:
+            continue
+        if w8 == "yes" and not has_w8:
+            continue
+        if kw:
+            hay = (str(e["name"]) + " " + issuer_of(e["name"])).lower()
+            if kw.lower() not in hay:
+                continue
+        e["_tag"], e["_w8"] = t, has_w8
+        out.append(e)
+    out.sort(key=lambda x: -(x["_ytm"] or 0))
+    total = len(out)
+    mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI).strftime("%m/%d %H:%M")
+    params = {"ccy": ccy, "ytm": ytm, "cy": cy, "yr_min": yr_min, "yr_max": yr_max,
+              "tag": tag, "w8": w8, "kw": kw}
+    resp = _HR(bond_web.screener_page(out[:200], total, params, mtime))
+    resp.set_cookie("bond_tk", tk, max_age=86400 * 30, httponly=True, samesite="lax")
+    return resp
+
+
+@app.get("/bond/detail", response_class=HTMLResponse)
+def bond_web_detail(request: Request, code: str = ""):
+    from fastapi.responses import HTMLResponse as _HR
+    import bond_web
+    tk = request.cookies.get("bond_tk", "")
+    if not BOND_UPLOAD_TOKEN or tk != BOND_UPLOAD_TOKEN:
+        return _HR(bond_web.login_page())
+    from bond_coupon_alert import find_bonds
+    hits = find_bonds(str(BOND_PRICE_FILE), code, max_hits=1)
+    if not hits:
+        return _HR(bond_web.screener_page([], 0, {}, "-", err=f"找不到 {code}"))
+    b = hits[0]
+    hist = []
+    try:
+        with engine.begin() as conn:
+            hist = [(r[0], r[1], r[2]) for r in conn.execute(sql_text(
+                """SELECT snap_date, offer, ytm FROM bond_price_history
+                   WHERE isin=:i AND snap_date >= CURRENT_DATE - INTERVAL '60 day'
+                   AND offer > 1 ORDER BY snap_date"""), {"i": b["isin"]}).fetchall()]
+    except Exception as e:
+        print(f"[BondWeb] hist fail: {e}")
+    mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI).strftime("%m/%d %H:%M")
+    return _HR(bond_web.detail_page(b, hist, mtime))
+
+
 @app.get("/bond-upload", response_class=HTMLResponse)
 def bond_upload_page():
     return _BOND_UPLOAD_HTML.replace("__MSG__", "")
