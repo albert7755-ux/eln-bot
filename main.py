@@ -2494,9 +2494,12 @@ def handle_text_message(event):
                         ensure_table(engine, sql_text)
                         mk = _month_key()
                         if force_ or not has_month_calendar(engine, sql_text, mk):
-                            cal = fetch_month_calendar(claude_client, mk)
-                            if cal:
-                                save_month_calendar(engine, sql_text, mk, cal)
+                            cal_raw = fetch_month_calendar(claude_client, mk)
+                            if cal_raw:
+                                save_month_calendar(engine, sql_text, mk, cal_raw)
+                            # fetch 回傳 {key:(date,time)},攤平成 {key:date} 供顯示用
+                            cal = {k: (v[0] if isinstance(v, (tuple, list)) else v)
+                                   for k, v in (cal_raw or {}).items()}
                         else:
                             cal = get_month_calendar(engine, sql_text, mk)
                         label_map = {it["key"]: it["label"] for it in ECON_ITEMS}
