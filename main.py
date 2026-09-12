@@ -170,7 +170,8 @@ BOND_GROUP_HELP = (
     "/cleanup → 預覽Drive舊報告；/cleanup do → 清理\n"
     "/econ check → 立即檢查重要數據/央行會議是否剛公布\n"
     "/econ list → 看追蹤清單（自動偵測公布會直接推播）\n"
-    "/econ calendar → 看本月事件確切日期（refresh強制更新）\n"
+    "/econ calendar → 看本月事件確切日期與時間（refresh強制更新）\n"
+    "　（CPI/PCE/非農改抓官方數列，公布後數分鐘內推播；央行會議仍用新聞偵測）\n"
     "/sheetuser list → 產文件名單（add/del；對方先打 /myid 取得ID）\n"
     "\n📈 日報\n"
     "/bonddaily → 立即產生債券市場日報\n"
@@ -2503,8 +2504,12 @@ def handle_text_message(event):
                             bot_api_ref.push_message(chat_id, TextSendMessage(text=f"📅 {mk} 日曆查詢無結果，可能是本月無相關事件或查詢失敗。"))
                             return
                         lines_c = [f"📅 {mk} 追蹤事件日曆", ""]
+                        from econ_watch import get_month_calendar_full, DEFAULT_TIME
+                        cal_full = get_month_calendar_full(engine, sql_text, mk)
                         for k, d in sorted(cal.items(), key=lambda x: x[1]):
-                            lines_c.append(f"{d:%m/%d}({'一二三四五六日'[d.weekday()]}) {label_map.get(k, k)}")
+                            _t2 = (cal_full.get(k) or (None, None))[1] or DEFAULT_TIME.get(k, "")
+                            _ts = f" {_t2}" if _t2 else ""
+                            lines_c.append(f"{d:%m/%d}({'一二三四五六日'[d.weekday()]}){_ts} {label_map.get(k, k)}")
                         lines_c.append("\n偵測到公布會自動推播；/econ calendar refresh 可強制重新查詢")
                         bot_api_ref.push_message(chat_id, TextSendMessage(text="\n".join(lines_c)))
                     except Exception as e:
@@ -4678,6 +4683,33 @@ def job_drive_cleanup():
         write_job_log("Drive清理", "error", str(e))
         print(f"[DriveCleanup ERROR] {e}")
 
+def job_econ_watch_hot():
+    """每 2 分鐘:只檢查『公布後 1 小時內』的事件,讓數據一出來就能盡快推播"""
+    try:
+        from econ_watch import check_econ_events
+    except Exception:
+        return
+    _t = load_targets() or {}
+    user_id = os.getenv("LINE_USER_ID", "")
+    recipients = [t for t in dict.fromkeys([user_id, _t.get("bond", "")] + list(_t.get("bond_subscribers", []))) if t]
+    if not recipients:
+        return
+
+    def _push(msg):
+        for rid in recipients:
+            try:
+                push_long_message(line_bot_api, rid, msg)
+            except Exception as e:
+                print(f"[EconWatch-hot] push fail {rid[:8]}...: {e}")
+
+    try:
+        hit = check_econ_events(engine, sql_text, claude_client, _push, hot_only=True)
+        if hit:
+            write_job_log("經濟數據監控(加密)", "success", f"推播 {hit} 項")
+    except Exception as e:
+        print(f"[EconWatch-hot ERROR] {e}")
+
+
 def job_econ_watch():
     """每 10 分鐘檢查一次重要經濟數據/央行會議是否剛公布(僅在合理時段內實際查詢)"""
     try:
@@ -5070,6 +5102,7 @@ def start_scheduler():
     scheduler.add_job(job_bond_rating_news, CronTrigger(day_of_week="mon-fri", hour=6, minute=50, timezone=TZ_TAIPEI_PYTZ), id="bond_rating_news", name="信評新聞雷達")
     scheduler.add_job(job_drive_cleanup, CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=TZ_TAIPEI_PYTZ), id="drive_cleanup", name="Drive清理")
     scheduler.add_job(job_econ_watch, IntervalTrigger(minutes=10, timezone=TZ_TAIPEI_PYTZ), id="econ_watch", name="經濟數據監控")
+    scheduler.add_job(job_econ_watch_hot, IntervalTrigger(minutes=2, timezone=TZ_TAIPEI_PYTZ), id="econ_watch_hot", name="經濟數據監控(加密)")
     scheduler.add_job(job_weekly_review, CronTrigger(day_of_week="fri", hour=17, minute=30, timezone=TZ_TAIPEI_PYTZ), id="weekly_review", name="本週回顧")
     scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=40, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
     scheduler.add_job(job_bond_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=30, timezone=TZ_TAIPEI_PYTZ), id="bond_daily_report", name="債券日報")
