@@ -204,6 +204,8 @@ def fetch_month_calendar(anthropic_client, month_key):
         "(例如:美國數據若為美東時間早上公布,換算到台北通常是同一個晚上;"
         "但美東時間下午公布的(如FOMC決議約美東下午2點),換算到台北會是隔天凌晨,"
         "此時應填隔天的日期,而不是美國當地的日期)。\n\n"
+        "【輸出規則】搜尋完成後,直接輸出 JSON,回覆的第一個字元必須是 {。"
+        "不要寫任何前言、推導過程、時區換算說明或條列整理,那些內容會佔用額度導致 JSON 被截斷。\n"
         "回傳格式(只回傳這個 JSON,不要有其他文字、不要用 markdown code block):\n"
         '{"us_cpi": {"date": "2026-09-11", "time": "20:30"}, '
         '"fomc": {"date": "2026-09-17", "time": "02:00"}}\n'
@@ -213,7 +215,7 @@ def fetch_month_calendar(anthropic_client, month_key):
     try:
         message = anthropic_client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=800,
+            max_tokens=3000,
             temperature=0.1,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt}],
@@ -224,6 +226,24 @@ def fetch_month_calendar(anthropic_client, month_key):
         return {}
     full_text = "".join(getattr(b, "text", "") for b in message.content)
     got = _extract_json(full_text)
+    if not isinstance(got, dict):
+        stop = getattr(message, "stop_reason", "?")
+        print(f"[EconWatch] 月曆首次解析失敗(stop={stop}),改用精簡模式重試")
+        try:
+            retry = anthropic_client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=2000, temperature=0,
+                tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                messages=[
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": full_text[:1500]},
+                    {"role": "user", "content": "請直接輸出那個 JSON 就好,第一個字元是 {,"
+                                               "不要任何說明文字或推導過程。"},
+                ],
+            )
+            full_text = "".join(getattr(b, "text", "") for b in retry.content)
+            got = _extract_json(full_text)
+        except Exception as e:
+            print(f"[EconWatch] 月曆重試失敗: {e}")
     if not isinstance(got, dict):
         fetch_month_calendar.last_error = (
             f"無法解析JSON(stop={getattr(message, 'stop_reason', '?')},"
