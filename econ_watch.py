@@ -304,7 +304,8 @@ def ensure_month_calendar(engine, text, anthropic_client, month_key=None):
         print(f"[EconWatch] {month_key} 日曆已建立,共 {len(cal)} 項")
     else:
         print(f"[EconWatch] {month_key} 日曆查詢無結果,將於下次排程重試")
-    return cal
+    # 統一回傳 {key: date}(fetch 的值是 (date, time) tuple,這裡攤平)
+    return {k: (v[0] if isinstance(v, (tuple, list)) else v) for k, v in (cal or {}).items()}
 
 
 def _extract_json(raw):
