@@ -191,6 +191,7 @@ def get_month_calendar_full(engine, text, month_key):
 
 
 def fetch_month_calendar(anthropic_client, month_key):
+    fetch_month_calendar.last_error = ""
     """
     一次 API 呼叫,查詢當月所有追蹤項目的確切公布/會議日期(台北時區當地日期)。
     回傳 {event_key: date} 或 {}(失敗時)。
@@ -203,11 +204,11 @@ def fetch_month_calendar(anthropic_client, month_key):
         "(例如:美國數據若為美東時間早上公布,換算到台北通常是同一個晚上;"
         "但美東時間下午公布的(如FOMC決議約美東下午2點),換算到台北會是隔天凌晨,"
         "此時應填隔天的日期,而不是美國當地的日期)。\n\n"
-        "只回傳 JSON 物件,key 為上面的英文代碼,"
-        'value 為物件 {"date":"YYYY-MM-DD","time":"HH:MM"},date 與 time 皆為換算後的台北日期與時間'
-        "(24小時制,例如美國CPI美東8:30對應台北20:30;若確實查不到時間,time 填 null);"
-        "若本月沒有該事件(例如非FOMC會議月份),該 key 就不要出現在結果中。"
-        "不要有其他文字,不要用 markdown code block。"
+        "回傳格式(只回傳這個 JSON,不要有其他文字、不要用 markdown code block):\n"
+        '{"us_cpi": {"date": "2026-09-11", "time": "20:30"}, '
+        '"fomc": {"date": "2026-09-17", "time": "02:00"}}\n'
+        "說明:key 用上面的英文代碼;date 與 time 為換算成台北時區後的日期與時間(24小時制);"
+        "本月沒有的事件就不要出現;查不到時間時 time 填 null,但 date 一定要有。"
     )
     try:
         message = anthropic_client.messages.create(
@@ -218,12 +219,23 @@ def fetch_month_calendar(anthropic_client, month_key):
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:
+        fetch_month_calendar.last_error = f"{type(e).__name__}: {str(e)[:150]}"
         print(f"[EconWatch] 月曆查詢失敗: {e}")
         return {}
     full_text = "".join(getattr(b, "text", "") for b in message.content)
     got = _extract_json(full_text)
     if not isinstance(got, dict):
+        fetch_month_calendar.last_error = (
+            f"無法解析JSON(stop={getattr(message, 'stop_reason', '?')},"
+            f"長度{len(full_text)}):{full_text[:200]}")
+        print(f"[EconWatch] 月曆解析失敗:{full_text[:300]}")
         return {}
+    # 若模型把結果包在 {"events":{...}} 或 {"calendar":{...}} 之類,自動往下找
+    if not any(k in got for k in (it["key"] for it in ECON_ITEMS)):
+        for v in got.values():
+            if isinstance(v, dict) and any(k in v for k in (it["key"] for it in ECON_ITEMS)):
+                got = v
+                break
     out = {}
     valid_keys = {it["key"] for it in ECON_ITEMS}
     for k, v in got.items():
@@ -231,9 +243,13 @@ def fetch_month_calendar(anthropic_client, month_key):
             continue
         d_raw = v.get("date") if isinstance(v, dict) else v
         t_raw = v.get("time") if isinstance(v, dict) else None
-        try:
-            d = datetime.strptime(str(d_raw).strip(), "%Y-%m-%d").date()
-        except Exception:
+        d = None
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"):
+            try:
+                d = datetime.strptime(str(d_raw).strip(), fmt).date(); break
+            except Exception:
+                continue
+        if d is None:
             continue
         t_ = None
         if t_raw:
