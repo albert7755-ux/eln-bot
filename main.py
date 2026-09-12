@@ -2501,7 +2501,12 @@ def handle_text_message(event):
                             cal = get_month_calendar(engine, sql_text, mk)
                         label_map = {it["key"]: it["label"] for it in ECON_ITEMS}
                         if not cal:
-                            bot_api_ref.push_message(chat_id, TextSendMessage(text=f"📅 {mk} 日曆查詢無結果，可能是本月無相關事件或查詢失敗。"))
+                            from econ_watch import fetch_month_calendar as _fmc
+                            _err = getattr(_fmc, "last_error", "") or "AI 未回傳可解析的結果"
+                            bot_api_ref.push_message(chat_id, TextSendMessage(
+                                text=f"📅 {mk} 日曆查詢無結果\n（原因：{_err[:300]}）\n\n"
+                                     "可再打一次 /econ calendar refresh 重試；"
+                                     "CPI/PCE/非農已改用官方數列偵測，不受日曆影響。"))
                             return
                         lines_c = [f"📅 {mk} 追蹤事件日曆", ""]
                         from econ_watch import get_month_calendar_full, DEFAULT_TIME
