@@ -45,7 +45,8 @@ def parse_find(query: str):
     """
     q = query.strip()
     f = {"ccy": None, "ytm_min": None, "ytm_max": None, "cy_min": None, "cy_max": None,
-         "yr_min": None, "yr_max": None, "cpn_min": None, "tag": None, "kw": []}
+         "yr_min": None, "yr_max": None, "cpn_min": None, "tag": None, "kw": [],
+         "exclude_w8": False, "only_w8": False}
     # 正規化:全形符號 → 半形、去掉數字後的 %
     q = (q.replace("＞", ">").replace("＜", "<").replace("＝", "=")
           .replace("％", "%").replace("～", "~").replace("－", "-"))
@@ -58,6 +59,10 @@ def parse_find(query: str):
             f["ccy"] = CCY_ALIAS[tl]; continue
         if t in ("一般", "專投", "高資產"):
             f["tag"] = t; continue
+        if tl in ("免w8", "免8ben", "免w-8ben", "no8ben", "now8", "不用8ben", "免填w8", "非美"):
+            f["exclude_w8"] = True; continue
+        if tl in ("w8", "8ben", "w-8ben", "要8ben"):
+            f["only_w8"] = True; continue
         m = re.fullmatch(r"(ytm|殖利率)\s*(>=|>|<=|<|=)\s*(\d+(?:\.\d+)?)", tl)
         if m:
             v = float(m.group(3)); op = m.group(2)
@@ -125,6 +130,12 @@ def run_find(path, filters, today=None, limit=15):
             continue
         if filters["cpn_min"] is not None and (e["_coupon"] is None or e["_coupon"] < filters["cpn_min"]):
             continue
+        _rm = str(e.get("remark") or "").upper().replace("－", "-")
+        _has_w8 = ("W-8" in _rm) or ("W8" in _rm)
+        if filters.get("exclude_w8") and _has_w8:
+            continue
+        if filters.get("only_w8") and not _has_w8:
+            continue
         if filters["kw"]:
             hay = (str(e["name"]) + " " + issuer_of(e["name"])).lower()
             if not all(k.lower() in hay for k in filters["kw"]):
@@ -148,6 +159,8 @@ def describe_filters(f):
     if f["yr_min"] is not None and f["yr_max"] is not None: parts.append(f"{f['yr_min']:g}–{f['yr_max']:g}年")
     elif f["yr_max"] is not None: parts.append(f"{f['yr_max']:g}年內")
     elif f["yr_min"] is not None: parts.append(f"{f['yr_min']:g}年以上")
+    if f.get("exclude_w8"): parts.append("免W-8BEN")
+    if f.get("only_w8"): parts.append("需W-8BEN")
     if f["kw"]: parts.append("關鍵字:" + " ".join(f["kw"]))
     return "、".join(parts) or "全部"
 
@@ -162,8 +175,9 @@ def format_find(rows, total, filters, today, file_time=""):
                 "・票面>4\n"
                 "・10年內、20年以上、5-10年、年期<8\n"
                 "・usd / aud / nzd / gbp / eur\n"
-                "・一般 / 專投 / 高資產\n\n"
-                "例：/find usd ytm>5 15-35年")
+                "・一般 / 專投 / 高資產\n"
+                "・免8ben（排除需填 W-8BEN 者）\n\n"
+                "例：/find usd ytm>5 15-35年 免8ben")
     if not rows:
         return (f"🔎 條件：{describe_filters(filters)}\n目前沒有符合的債券。\n\n"
                 "用法範例：\n/find usd ytm>5 10年內\n/find aud cy>4.5 5-10年\n/find 一般 ytm>5.5 20年以上")
