@@ -66,6 +66,37 @@ def _today_key(now=None):
     return now.strftime("%Y-%m-%d")
 
 
+# 各項目若日曆查不到時間時的預設公布時間(台北)
+DEFAULT_TIME = {
+    "us_cpi": "20:30", "us_pce": "20:30", "us_nfp": "20:30",
+    "ism_mfg": "22:00", "ism_svc": "22:00", "fomc": "02:00",
+    "ecb": "20:15", "rba": "12:30", "boj": "11:00", "cbc": "16:00",
+}
+
+
+def in_hot_window(key, now, calendar_full=None, minutes=60):
+    """
+    是否處於「公布後 minutes 分鐘內」的加密檢查窗。
+    calendar_full: {key: (date, 'HH:MM'|None)};查不到時間用 DEFAULT_TIME。
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    ent = (calendar_full or {}).get(key)
+    if not ent:
+        return False
+    d, t_ = ent
+    if d != now.date():
+        return False
+    t_ = t_ or DEFAULT_TIME.get(key)
+    if not t_:
+        return False
+    try:
+        hh, mm = map(int, t_.split(":"))
+    except Exception:
+        return False
+    release = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    return release <= now <= release + _td(minutes=minutes)
+
+
 def _is_plausible_day(key, now, calendar=None):
     """
     判斷今天是否為該項目理論上可能公布的日子。
@@ -114,6 +145,8 @@ def ensure_table(engine, text):
             fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (month_key, event_key)
         );"""))
+        conn.execute(text("""
+        ALTER TABLE econ_calendar ADD COLUMN IF NOT EXISTS event_time TEXT;"""))
 
 
 def already_pushed(engine, text, key, day_key):
@@ -142,11 +175,19 @@ def has_month_calendar(engine, text, month_key):
 
 
 def get_month_calendar(engine, text, month_key):
-    """回傳 {event_key: date}"""
+    """回傳 {event_key: date}(相容舊呼叫)"""
     with engine.begin() as conn:
         rows = conn.execute(text("SELECT event_key, event_date FROM econ_calendar WHERE month_key=:m"),
                             {"m": month_key}).fetchall()
     return {r[0]: r[1] for r in rows}
+
+
+def get_month_calendar_full(engine, text, month_key):
+    """回傳 {event_key: (date, 'HH:MM' or None)},時間為台北時間"""
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT event_key, event_date, event_time FROM econ_calendar WHERE month_key=:m"),
+                            {"m": month_key}).fetchall()
+    return {r[0]: (r[1], r[2]) for r in rows}
 
 
 def fetch_month_calendar(anthropic_client, month_key):
@@ -162,7 +203,9 @@ def fetch_month_calendar(anthropic_client, month_key):
         "(例如:美國數據若為美東時間早上公布,換算到台北通常是同一個晚上;"
         "但美東時間下午公布的(如FOMC決議約美東下午2點),換算到台北會是隔天凌晨,"
         "此時應填隔天的日期,而不是美國當地的日期)。\n\n"
-        "只回傳 JSON 物件,key 為上面的英文代碼,value 為換算後的台北日期字串 YYYY-MM-DD;"
+        "只回傳 JSON 物件,key 為上面的英文代碼,"
+        'value 為物件 {"date":"YYYY-MM-DD","time":"HH:MM"},date 與 time 皆為換算後的台北日期與時間'
+        "(24小時制,例如美國CPI美東8:30對應台北20:30;若確實查不到時間,time 填 null);"
         "若本月沒有該事件(例如非FOMC會議月份),該 key 就不要出現在結果中。"
         "不要有其他文字,不要用 markdown code block。"
     )
@@ -186,20 +229,31 @@ def fetch_month_calendar(anthropic_client, month_key):
     for k, v in got.items():
         if k not in valid_keys:
             continue
+        d_raw = v.get("date") if isinstance(v, dict) else v
+        t_raw = v.get("time") if isinstance(v, dict) else None
         try:
-            out[k] = datetime.strptime(str(v).strip(), "%Y-%m-%d").date()
+            d = datetime.strptime(str(d_raw).strip(), "%Y-%m-%d").date()
         except Exception:
             continue
+        t_ = None
+        if t_raw:
+            m = re.match(r"^(\d{1,2}):(\d{2})$", str(t_raw).strip())
+            if m and 0 <= int(m.group(1)) <= 23:
+                t_ = f"{int(m.group(1)):02d}:{m.group(2)}"
+        out[k] = (d, t_)
     return out
 
 
 def save_month_calendar(engine, text, month_key, calendar):
+    """calendar: {key: date} 或 {key: (date, 'HH:MM')}"""
     with engine.begin() as conn:
-        for key, d in calendar.items():
-            conn.execute(text("""INSERT INTO econ_calendar(month_key, event_key, event_date)
-                                 VALUES (:m,:k,:d)
-                                 ON CONFLICT (month_key, event_key) DO UPDATE SET event_date=EXCLUDED.event_date"""),
-                        {"m": month_key, "k": key, "d": d})
+        for key, v in calendar.items():
+            d, t_ = (v if isinstance(v, (tuple, list)) else (v, None))
+            conn.execute(text("""INSERT INTO econ_calendar(month_key, event_key, event_date, event_time)
+                                 VALUES (:m,:k,:d,:t)
+                                 ON CONFLICT (month_key, event_key)
+                                 DO UPDATE SET event_date=EXCLUDED.event_date, event_time=EXCLUDED.event_time"""),
+                        {"m": month_key, "k": key, "d": d, "t": t_})
 
 
 def ensure_month_calendar(engine, text, anthropic_client, month_key=None):
@@ -280,7 +334,7 @@ def check_one_item(item, anthropic_client, today_str):
     return "\n".join(lines)
 
 
-def check_econ_events(engine, text, anthropic_client, push_fn):
+def check_econ_events(engine, text, anthropic_client, push_fn, hot_only=False):
     """
     主檢查函式:掃描 ECON_ITEMS,對每項判斷是否剛公布且今天尚未推播過,
     是的話呼叫 push_fn(message) 推播,並記錄已推播。
@@ -290,23 +344,46 @@ def check_econ_events(engine, text, anthropic_client, push_fn):
     now = datetime.now(TZ_TAIPEI)
     today_str = _today_key(now)
     hit = 0
+
+    # ── 官方數列優先:CPI/PCE/非農 直接讀官方統計,不等新聞索引 ──
+    try:
+        from econ_official import check_official, format_official
+        for okey, olabel, oref, olines in check_official(engine, text):
+            if already_pushed(engine, text, okey, today_str):
+                continue
+            try:
+                push_fn(format_official(olabel, oref, olines))
+                mark_pushed(engine, text, okey, today_str)
+                hit += 1
+                print(f"[EconWatch] 官方數列推播: {olabel}")
+            except Exception as e:
+                print(f"[EconWatch] 官方數列推播失敗 {okey}: {e}")
+    except Exception as e:
+        print(f"[EconWatch] 官方數列檢查失敗: {e}")
     # 先確保本月日曆已建立(已存在時不耗 API,直接讀取,幾乎零成本)
     calendar = ensure_month_calendar(engine, text, anthropic_client, _month_key(now))
+    cal_full = get_month_calendar_full(engine, text, _month_key(now))
     for item in ECON_ITEMS:
-        if already_pushed(engine, text, item["key"], today_str):
+        key = item["key"]
+        if already_pushed(engine, text, key, today_str):
             continue
-        if not _in_time_window(item["key"], now):     # 不在該項目的公布時段,跳過
-            continue
-        if not _is_plausible_day(item["key"], now, calendar):   # 也不是可能公布的日子,跳過
-            continue
+        hot = in_hot_window(key, now, cal_full, minutes=60)
+        if hot_only and not hot:
+            continue            # 加密模式:只查公布後1小時內的項目
+        if not hot:
+            # 一般模式:用時段窗 + 日期規律篩選
+            if not _in_time_window(key, now):
+                continue
+            if not _is_plausible_day(key, now, calendar):
+                continue
         msg = check_one_item(item, anthropic_client, today_str)
         if msg:
             try:
                 push_fn(msg)
                 hit += 1
-                print(f"[EconWatch] 推播: {item['label']}")
+                print(f"[EconWatch] 推播: {item['label']}{'(加密檢查)' if hot else ''}")
             except Exception as e:
-                print(f"[EconWatch] 推播失敗 {item['key']}: {e}")
+                print(f"[EconWatch] 推播失敗 {key}: {e}")
                 continue   # 推播失敗不標記已推,下次重試
-            mark_pushed(engine, text, item["key"], today_str)
+            mark_pushed(engine, text, key, today_str)
     return hit
