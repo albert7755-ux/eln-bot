@@ -227,37 +227,50 @@ def load_agent_line_ids(engine) -> dict:
         return {}
 
 
-def resolve_target(msg: dict, agent_ids: dict) -> str:
-    """優先用商品的 line_id，沒有就用理專名查對照表（支援多理專名）"""
+def resolve_targets(msg: dict, agent_ids: dict) -> list:
+    """回傳這筆商品所有理專的 LINE ID（多理專都要發）
+    先用理專名查對照表，查不到才用商品的 line_id 補"""
     import re as _re
-    target = (msg.get("target", "") or "").strip()
-    if target:
-        return target
+    targets = []
     name_raw = (msg.get("name", "") or "").strip()
-    for n in _re.split(r"[,，、/]", name_raw):
-        n = n.strip()
-        if n and n in agent_ids:
-            return agent_ids[n]
-    return ""
+    names = [n.strip() for n in _re.split(r"[,，、/]", name_raw) if n.strip()]
+    for n in names:
+        if n in agent_ids and agent_ids[n] not in targets:
+            targets.append(agent_ids[n])
+    # 對照表完全查不到時，才退回用商品自己的 line_id
+    if not targets:
+        t = (msg.get("target", "") or "").strip()
+        if t:
+            targets.append(t)
+    return targets
 
 
 def auto_push_important(line_bot_api, individual_messages: list, agent_ids: dict = None):
-    """自動推播重要事件給理專本人（有 LINE ID 才發）
+    """自動推播重要事件給所有相關理專（有 LINE ID 才發）
     回傳 (已自動發送清單, 剩餘待確認清單)"""
     agent_ids = agent_ids or {}
     auto_sent = []
     remaining = []
     for msg in individual_messages:
         status = msg.get("status", "")
-        target = resolve_target(msg, agent_ids)
-        if is_auto_push_event(status) and target:
+        if not is_auto_push_event(status):
+            remaining.append(msg)
+            continue
+        targets = resolve_targets(msg, agent_ids)
+        if not targets:
+            print(f"[AUTO PUSH SKIP] {msg.get('name','')} | {msg.get('id','')} | 查無 LINE ID")
+            remaining.append(msg)
+            continue
+        ok_any = False
+        for t in targets:
             try:
-                push_long_message(line_bot_api, target, msg.get("msg", ""))
-                auto_sent.append(msg)
-                print(f"[AUTO PUSH] {msg.get('name','')} | {msg.get('id','')} | {status}")
+                push_long_message(line_bot_api, t, msg.get("msg", ""))
+                ok_any = True
+                print(f"[AUTO PUSH] {msg.get('name','')} | {msg.get('id','')} | {status} -> {t[:12]}...")
             except Exception as e:
-                print(f"[AUTO PUSH FAIL] {msg.get('name','')} | {e}")
-                remaining.append(msg)
+                print(f"[AUTO PUSH FAIL] {msg.get('name','')} | {t[:12]}... | {e}")
+        if ok_any:
+            auto_sent.append(msg)
         else:
             remaining.append(msg)
     return auto_sent, remaining
