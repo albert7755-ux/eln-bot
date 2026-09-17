@@ -258,6 +258,47 @@ def get_jgb_10y():
     return None
 
 
+def get_jgb_10y_investing():
+    """
+    Investing.com 日本10年期公債殖利率(市場報價口徑)。
+    頁面含『現值、漲跌、Prev. Close』,以現值與前收計算變動。
+    """
+    url = "https://www.investing.com/rates-bonds/japan-10-year-bond-yield"
+    try:
+        resp = requests.get(url, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+            "Accept-Language": "en-US,en;q=0.9",
+        }, timeout=20)
+        if resp.status_code != 200:
+            print(f"[BondDaily] JGB Investing HTTP {resp.status_code}")
+            return None
+        html = resp.text
+        # 現值:出現在 instrument-price 區塊
+        m = re.search(r'data-test="instrument-price-last"[^>]*>([\d.]+)<', html)
+        # 前收
+        m_prev = re.search(r'Prev\.\s*Close[^0-9]{0,80}?([\d.]+)', html)
+        if not m:
+            m = re.search(r'"last"\s*:\s*"?([\d.]{4,6})"?', html)
+        if not m:
+            print("[BondDaily] JGB Investing 解析不到報價")
+            return None
+        last = float(m.group(1))
+        prev = float(m_prev.group(1)) if m_prev else None
+        chg = round(last - prev, 3) if prev else 0.0
+        from datetime import timedelta as _td
+        tw = pytz.timezone("Asia/Taipei")
+        d = datetime.now(tw).date() - _td(days=1)
+        while d.weekday() >= 5:
+            d -= _td(days=1)
+        print(f"[BondDaily] JGB Investing: {last} (前收 {prev}, 變動 {chg:+.3f})")
+        return {"price": round(last, 3), "change": chg, "pct": 0.0,
+                "date": d, "source": "Investing"}
+    except Exception as e:
+        print(f"[BondDaily] JGB Investing 失敗: {e}")
+    return None
+
+
 def get_jgb_10y_te():
     """備援/交叉比對:Trading Economics 頁面上的最新值與日變化"""
     try:
@@ -290,6 +331,41 @@ def get_jgb_10y_yf():
     return None
 
 
+def _jgb_override_path():
+    """與 targets.json 同一個持久磁碟目錄"""
+    import os as _os
+    from pathlib import Path as _P
+    for d in (_os.getenv("PERSIST_DIR", ""), "/var/data", "/data", "/tmp"):
+        if d and _P(d).is_dir():
+            return _P(d) / "jgb_override.json"
+    return _P("/tmp/jgb_override.json")
+
+
+def get_jgb_override(max_age_days=4):
+    """
+    讀取以 /jgb 指令手動輸入的日債殖利率(來源:富途牛牛等行情軟體)。
+    超過 max_age_days 未更新則不採用,避免用到過期數字。
+    """
+    import json as _json
+    from datetime import datetime as _dt, timedelta as _td
+    try:
+        fp = _jgb_override_path()
+        if not fp.exists():
+            return None
+        d = _json.loads(fp.read_text(encoding="utf-8"))
+        q_date = _dt.strptime(str(d["date"]), "%Y-%m-%d").date()
+        tw_today = datetime.now(pytz.timezone("Asia/Taipei")).date()
+        if (tw_today - q_date).days > max_age_days:
+            print(f"[BondDaily] JGB 手動值已過期({q_date}),改用自動來源")
+            return None
+        print(f"[BondDaily] JGB 採用手動輸入值:{q_date} {d['price']}")
+        return {"price": float(d["price"]), "change": float(d.get("change") or 0.0),
+                "pct": 0.0, "date": q_date, "source": d.get("source") or "行情軟體"}
+    except Exception as e:
+        print(f"[BondDaily] JGB 手動值讀取失敗: {e}")
+        return None
+
+
 def get_jgb_10y_checked():
     """
     優先序:市場收盤(yfinance) → TradingEconomics(市場口徑) → 財務省基準利回り。
@@ -303,6 +379,14 @@ def get_jgb_10y_checked():
     while exp.weekday() >= 5:
         exp -= _td(days=1)
 
+    # 0) 手動輸入值優先(與理專看的行情軟體一致)
+    _ov = get_jgb_override()
+    if _ov:
+        return _ov
+    # 1) Investing.com(市場報價口徑,最接近行情軟體)
+    inv = get_jgb_10y_investing()
+    if inv:
+        return inv
     yfd = get_jgb_10y_yf()
     if yfd and yfd.get("date") == exp:
         return yfd
@@ -487,7 +571,11 @@ def build_bond_snapshot(data):
     if _j and _j.get("date"):
         _jl += f"（{_j['date']:%m/%d}"
         _src = _j.get("source") or ""
-        if _src == "財務省基準":
+        if _src == "行情軟體":
+            pass                      # 手動輸入值:與行情軟體一致,不另標註
+        elif _src == "Investing":
+            _jl += "·Investing"
+        elif _src == "財務省基準":
             _jl += "·財務省基準"          # 與市場收盤約差2~4bp
         elif _src == "TradingEconomics":
             _jl += "·TE"
@@ -563,10 +651,14 @@ def generate_bond_commentary(snapshot_text: str) -> str:
            "也不要把數據的變動說成昨晚發生的事。前言與殖利率解讀請改寫成:"
            "說明昨日休市、上一交易日的收盤水位、以及今晚開盤市場將面對的事件(數據/會議)。\n\n"
            if "美債昨日" in snapshot_text and "休市" in snapshot_text else "") +
-        "【極重要-油價】上方數據區已提供 WTI 與 Brent 的『昨晚收盤價與漲跌幅』(與美債同一交易日)。"
-        "文中提到油價時,必須使用這組數字,不可改用新聞裡看到的價格——"
-        "新聞常寫的是前一日收盤或當日盤中價,與本報告的美債收盤不同天,混用會前後矛盾。"
-        "若要引用『盤中觸及/突破某價位』,須明確寫出是盤中而非收盤。\n\n"
+        "【極重要-油價】上方數據區已提供 WTI 與 Brent 的『昨晚收盤價與漲跌幅』(與美債同一交易日)。\n"
+        "  (1) 文中出現的油價漲跌幅,必須與數據區一致。嚴禁寫出與數據區不同的百分比——"
+        "例如數據區顯示 Brent -1.58%,就不可以寫『跌逾3%』。若兩者矛盾,一律以數據區為準。\n"
+        "  (2) 新聞常報導的是『前一個交易日』或『盤中最大跌幅』,那是不同時點的數字,"
+        "不可直接搬來當作昨晚的變動。若確實要提到前一日或盤中的波動,"
+        "必須明確標註日期或寫明『盤中』『前一交易日』,不可與昨晚收盤混為一談。\n"
+        "  (3) 寫完後自我檢查:文中每一個油價數字,是否都能在數據區找到對應?"
+        "找不到就刪掉或改寫。\n\n"
         "【極重要-利差方向】上方數據中的『2年/10年利差』與『20年/30年利差』已由系統計算完成,"
         "括號內若標示『正斜率』代表 30年殖利率高於 20年(曲線扭曲已修復);"
         "若標示『倒掛(20Y高於30Y)』代表 20年高於 30年(扭曲尚未修復)。"
@@ -648,7 +740,18 @@ def generate_bond_commentary(snapshot_text: str) -> str:
            "價格仍受信用利差、流動性、匯率與市場情緒影響。\n"
            "【切入角度可輪流使用】(a)利率方向不明時,讓票息自己去跟,不用賭方向;"
            "(b)價格相對平穩,股市回檔時較容易變現轉去承接,是配置上的機動部位;"
-           "(c)相對於固定利率債在升息預期下的價格壓力,浮動債的表現邏輯不同。"
+           "(c)相對於固定利率債在升息預期下的價格壓力,浮動債的表現邏輯不同。\n"
+           "【零息債的正確描述】若主打方向是零息債,可用的切入角度:"
+           "(a)適合想要『到期金額確定、有明確到期日』的客戶——折價買進、到期還本,"
+           "期間不配息,用現值對應未來一筆確定的支出(保費、教育金、退休金);"
+           "(b)作為質借擔保品時,因無配息、價格隨時間往面額靠近,擔保品價值相對不易大幅波動;"
+           "(c)當年度海外所得有虧損時,零息債的資本利得可用於稅務上的對應。\n"
+           "【零息債嚴禁的說法】(1)絕對不可寫成『補回虧損』『本金修復』『把賠掉的賺回來』"
+           "——零息債的報酬是它自身的投資報酬,與客戶既有虧損無關,既有虧損並未因此消失;"
+           "(2)不可把折價說成『打折』『折扣』——81買100是時間價值(貨幣的時間成本),不是優惠;"
+           "(3)不可只說『穩定』而不說明——要講清楚是『到期金額確定』,"
+           "不是期間價格平穩;零息債無配息、存續期間等於到期年限,"
+           "期間價格對利率變動的敏感度其實高於同年期的附息債券,提前賣出可能有價差損失。"
            "務必遵守:只講產品『類型與結構』的邏輯,絕對不要提到具體債券名稱、代碼、票息數字或價格;"
            "不要用『推薦』『建議買進』『最佳時機』等勸誘字眼,語氣是提供一個討論角度。\n"
            + ("【必講風險】提到上述產品方向時,必須在同一段內一併點出下列風險,不可省略、不可淡化,"
