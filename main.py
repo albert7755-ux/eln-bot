@@ -109,6 +109,8 @@ BOND_QUERY_HELP = (
     "/price 26070003 30 → 該檔近30天報價變化\n"
     "\n💰 查賣回價\n"
     "/bid 26070003 → 賣回價(Bid)與買賣價差\n"
+    "\n🇯🇵 日債\n"
+    "/jgb 2.955 → 更新日債殖利率（依富途牛牛數值，日報會採用）\n"
     "\n🔎 條件篩選\n"
     "/find usd ytm>5 10年內 → 依幣別/殖利率/當期收益率/年期篩選\n"
     "/find aud cy>4.5 5-10年（cy＝當期收益率）\n"
@@ -3358,6 +3360,70 @@ def handle_text_message(event):
             lines.append(f"\n📎 報價檔 {mtime}｜到價追蹤：/bondalert {kw} ytm>{ytm if isinstance(ytm,(int,float)) else 5}")
             _bot_api.reply_message(event.reply_token, TextSendMessage(text="\n".join(str(x) for x in lines)[:4900]))
             return
+        if cmd in ("jgb", "日債", "日本公債"):
+            # /jgb 2.955        → 更新日債殖利率(變動自動用前次值計算)
+            # /jgb 2.955 -0.004 → 同時指定變動
+            # /jgb              → 查看目前使用的值
+            import json as _json
+            _fp = _persistent_dir() / "jgb_override.json"
+            _parts = raw_cmd.split()
+            if len(_parts) < 2:
+                try:
+                    _cur = _json.loads(_fp.read_text(encoding="utf-8")) if _fp.exists() else None
+                except Exception:
+                    _cur = None
+                _msg = ("📊 日債殖利率（日報使用值）\n"
+                        + (f"{_cur['date']}　{_cur['price']}%　"
+                           f"（變動 {float(_cur.get('change') or 0):+.3f}）\n\n"
+                           if _cur else "目前未設定，日報會自動抓取。\n\n")
+                        + "更新方式（看富途牛牛 JP10Y 收盤值）：\n"
+                        + "/jgb 2.955　→ 只給數值，變動自動算\n"
+                        + "/jgb 2.955 -0.004　→ 同時指定變動\n"
+                        + "/jgb off　→ 取消手動值，改回自動抓取\n"
+                        + "※ 超過 4 天未更新會自動改用自動來源")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=_msg))
+                return
+            if _parts[1].lower() in ("off", "clear", "取消"):
+                try:
+                    if _fp.exists():
+                        _fp.unlink()
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text="✅ 已取消日債手動值，日報改回自動抓取。"))
+                except Exception as e:
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 取消失敗：{e}"))
+                return
+            try:
+                _val = float(_parts[1].rstrip("%"))
+                if not (0 < _val < 15):
+                    raise ValueError("數值超出合理範圍")
+                _chg = None
+                if len(_parts) >= 3:
+                    _chg = float(_parts[2])
+                else:
+                    try:
+                        _prev = _json.loads(_fp.read_text(encoding="utf-8")) if _fp.exists() else None
+                        if _prev:
+                            _chg = round(_val - float(_prev["price"]), 3)
+                    except Exception:
+                        pass
+                _today_s = datetime.now(TZ_TAIPEI).date()
+                # 抓昨日(日本前一營業日)作為報價日
+                from datetime import timedelta as _td2
+                _qd = _today_s - _td2(days=1)
+                while _qd.weekday() >= 5:
+                    _qd -= _td2(days=1)
+                _fp.write_text(_json.dumps(
+                    {"price": _val, "change": _chg if _chg is not None else 0.0,
+                     "date": _qd.isoformat(), "source": "行情軟體"},
+                    ensure_ascii=False), encoding="utf-8")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=f"✅ 日債已更新\n{_qd:%m/%d}　{_val}%"
+                         + (f"　（變動 {_chg:+.3f}）" if _chg is not None else "")
+                         + "\n明日債券日報將採用此值。"))
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=f"❌ 格式錯誤：{str(e)[:80]}\n用法：/jgb 2.955　或　/jgb 2.955 -0.004"))
+            return
         if cmd in ("find", "篩選", "找"):
             # /find usd ytm>5 10年內   /find aud cy>4.5 5-10年   /find 一般 ytm>5.5 20年以上
             kw = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
@@ -5130,9 +5196,42 @@ def build_weekly_review_text(today):
     try:
         mv, _, _ = price_movers(days_back=7, threshold_pct=2.0)
         if mv:
-            # 只取「跌幅/漲幅」清單本體,去掉標題與註腳
-            body = [l for l in mv.split("\n") if l.startswith(("▪", "  ", "📉", "📈"))]
-            movers_txt = "\n".join(body[:16])
+            # 按「檔數」截斷而非行數:每檔佔兩行(名稱+明細),
+            # 用行數會把最後一檔切成半截,且容易整段砍掉跌幅區塊。
+            _MAX_PER_SIDE = 6
+            sec, out_lines = None, []
+            kept = {"📈": 0, "📉": 0}
+            total = {"📈": 0, "📉": 0}
+            pending = []
+
+            def _flush():
+                """把暫存的一檔(名稱行+明細行)寫出或捨棄"""
+                if not pending or sec is None:
+                    pending.clear(); return
+                total[sec] += 1
+                if kept[sec] < _MAX_PER_SIDE:
+                    out_lines.extend(pending)
+                    kept[sec] += 1
+                pending.clear()
+
+            for l in mv.split("\n"):
+                if l.startswith(("📈", "📉")):
+                    _flush()
+                    sec = l[0]
+                    out_lines.append(l)
+                elif l.startswith("▪"):
+                    _flush()
+                    pending.append(l)
+                elif l.startswith("  ") and pending:
+                    pending.append(l)
+            _flush()
+            movers_txt = "\n".join(out_lines)
+            _extra = []
+            for _k, _label in (("📈", "漲幅"), ("📉", "跌幅")):
+                if total[_k] > kept[_k]:
+                    _extra.append(f"（{_label}另有 {total[_k]-kept[_k]} 檔，可打 /move 7 2 查看完整清單）")
+            if _extra:
+                movers_txt += "\n" + "\n".join(_extra)
     except Exception as e:
         print(f"[Weekly] movers fail: {e}")
     new_names, gone_names = [], []
