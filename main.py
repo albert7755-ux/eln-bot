@@ -150,7 +150,7 @@ BOND_GROUP_HELP = (
     "/sector → 各產業 YTM/當期/較美債利差/近30天變化\n"
     "/sector list → 各產業有哪些發行機構；/sector 核心消費 → 該產業機構\n"
     "/sector fix 沃爾瑪 核心消費 → 修正分類\n"
-    "/weekly → 本週回顧（每週五17:30自動推）\n"
+    "/weekly → 本週回顧（每週五17:30自動推）；/weekly all 列出全部異動\n"
     "/bondalert 蘋果 2043 ytm>5.2 → 單檔到價通知\n"
     "/bondalert list　/bondalert del 3\n"
     "\n🏦 發行機構\n"
@@ -3555,10 +3555,14 @@ def handle_text_message(event):
             if not _BOND_RADAR_OK or not BOND_PRICE_FILE.exists():
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="📭 還沒有海外債報價檔。"))
                 return
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="📆 整理本週回顧中..."))
-            def _run_weekly(chat_id, bot_api_ref):
+            _all = len(raw_cmd.split()) > 1 and raw_cmd.split()[1].lower() in ("all", "全部")
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="📆 整理本週回顧中..." + ("（列出全部異動）" if _all else "")))
+            def _run_weekly(chat_id, bot_api_ref, show_all=_all):
                 try:
-                    push_long_message(bot_api_ref, chat_id, build_weekly_review_text(datetime.now(TZ_TAIPEI).date()))
+                    push_long_message(bot_api_ref, chat_id, build_weekly_review_text(
+                        datetime.now(TZ_TAIPEI).date(),
+                        max_per_side=None if show_all else 15))
                 except Exception as e:
                     print(f"[Weekly ERROR] {e}")
                     bot_api_ref.push_message(chat_id, TextSendMessage(text=f"❌ 週回顧失敗：{str(e)[:200]}"))
@@ -5190,7 +5194,8 @@ def build_sector_rows(today, do_classify=True):
     return sector_summary(str(BOND_PRICE_FILE), today, smap, curve, interp, _offer_change_fn(30))
 
 
-def build_weekly_review_text(today):
+def build_weekly_review_text(today, max_per_side=15):
+    """max_per_side=None 表示不限筆數(全部列出)"""
     from bond_screener import weekly_review
     movers_txt = ""
     try:
@@ -5198,7 +5203,7 @@ def build_weekly_review_text(today):
         if mv:
             # 按「檔數」截斷而非行數:每檔佔兩行(名稱+明細),
             # 用行數會把最後一檔切成半截,且容易整段砍掉跌幅區塊。
-            _MAX_PER_SIDE = 6
+            _MAX_PER_SIDE = max_per_side if max_per_side else 10 ** 6
             sec, out_lines = None, []
             kept = {"📈": 0, "📉": 0}
             total = {"📈": 0, "📉": 0}
@@ -5229,9 +5234,14 @@ def build_weekly_review_text(today):
             _extra = []
             for _k, _label in (("📈", "漲幅"), ("📉", "跌幅")):
                 if total[_k] > kept[_k]:
-                    _extra.append(f"（{_label}另有 {total[_k]-kept[_k]} 檔，可打 /move 7 2 查看完整清單）")
+                    _extra.append(f"（{_label}另有 {total[_k]-kept[_k]} 檔，"
+                                  "打 /weekly all 看全部）")
             if _extra:
                 movers_txt += "\n" + "\n".join(_extra)
+            if total["📉"] == 0:
+                movers_txt += "\n（本週無跌幅達 2% 的債券）"
+            if total["📈"] == 0:
+                movers_txt += "\n（本週無漲幅達 2% 的債券）"
     except Exception as e:
         print(f"[Weekly] movers fail: {e}")
     new_names, gone_names = [], []
