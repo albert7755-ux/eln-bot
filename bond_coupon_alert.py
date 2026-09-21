@@ -15,13 +15,21 @@ bond_coupon_alert.py — 海外債配息「最晚買入日」提醒
   3. ISIN 開頭 US / CA → T+1；其他 (XS/AU/NZ/GB/…) → T+2
      最晚下單日 = 最晚交割日 再往前 N 個營業日
   4. 只列出「配息日落在 今天 ~ 今天+14天」的債券
-     ※ 營業日只排除週六日，未排除台美假日
+     ※ 營業日＝非週末、台灣沒休市、且計價幣別國家沒休市
+       （依投資服務部 2026/9 來函：「調整後交割日若逢幣別國家休市，將再順延交割日」）
+       假日表見 market_calendar.py
 """
 import re
 import sys
 from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from openpyxl import load_workbook
+
+# 台灣＋各幣別國家休市日。若模組不在（舊版部署），退回只排除週末，不讓整支掛掉。
+try:
+    import market_calendar as mcal
+except Exception:      # pragma: no cover
+    mcal = None
 
 FREQ_MONTHS = {"每月": 1, "每季": 3, "每半年": 6, "每年": 12}
 LOOKAHEAD_DAYS = 14
@@ -62,7 +70,8 @@ def _ytm_disp(v):
 
 DISCLAIMER = (
     "\n⚠️ 未於截止日前申購者仍可於配息後申購，前手息較低，非錯失機會。"
-    "配息日由到期日＋頻率推算、營業日未含台美假日，請以實際為準。"
+    "配息日由到期日＋頻率推算；營業日已排除台灣假日與計價幣別國家假日"
+    "（交割日逢休市順延），請以實際交割通知為準。"
     "🔒專投＝限專業投資人｜💎高資產＝高資產客戶專屬。本表為時點資訊，非投資建議。"
 )
 
@@ -98,8 +107,13 @@ def settle_lag(isin):
     """US / CA 開頭 T+1，其他 T+2"""
     return 1 if str(isin).upper().startswith(("US", "CA")) else 2
 
-def biz_days_before(d, n):
-    """從 d 往前推 n 個營業日（只跳過週六日）"""
+def biz_days_before(d, n, ccy=None):
+    """
+    從 d 往前推 n 個營業日。
+    有 market_calendar 時會一併排除台灣假日與該幣別國家假日；沒有就只跳週末。
+    """
+    if mcal is not None:
+        return mcal.biz_days_before(d, n, ccy)
     cur = d
     while n > 0:
         cur -= timedelta(days=1)
@@ -242,13 +256,26 @@ def issuer_of(name):
                 break
     return n
 
-def biz_days_after(d, n):
+def biz_days_after(d, n, ccy=None):
+    """從 d 往後推 n 個營業日（同上，有假日表就一併排除）"""
+    if mcal is not None:
+        return mcal.biz_days_after(d, n, ccy)
     cur = d
     while n > 0:
         cur += timedelta(days=1)
         if cur.weekday() < 5:
             n -= 1
     return cur
+
+def _naive_biz_before(d, n):
+    """只排除週末的舊算法，僅用來比對「因連假提前了幾天」"""
+    cur = d
+    while n > 0:
+        cur -= timedelta(days=1)
+        if cur.weekday() < 5:
+            n -= 1
+    return cur
+
 
 # ---------- 核心 ----------
 def build_alerts(path, today=None, lookahead=LOOKAHEAD_DAYS):
@@ -258,14 +285,20 @@ def build_alerts(path, today=None, lookahead=LOOKAHEAD_DAYS):
     for b in read_bonds(path):
         fm = FREQ_MONTHS.get(b["freq"])
         for cd in next_coupon_dates(b["maturity"], fm, today, end):
-            last_settle = biz_days_before(cd, 1)
+            ccy = b.get("ccy")
             lag = settle_lag(b["isin"])
-            last_trade = biz_days_before(last_settle, lag)
+            # 最晚交割日 = 配息日前 1 個營業日（已排除台灣與該幣別國家假日）
+            last_settle = biz_days_before(cd, 1, ccy)
+            # 最晚下單日 = 交割日再往前推 T+N 個營業日
+            last_trade = biz_days_before(last_settle, lag, ccy)
+            # 同一段期間若只排除週末會算到哪天 → 用來標記「因連假提前」
+            naive_trade = _naive_biz_before(_naive_biz_before(cd, 1), lag)
             status = "✅ 配息前可申購" if last_trade >= today else "⛔ 本期已截止"
             alerts.append(dict(
                 b, coupon_date=cd, last_settle=last_settle,
                 last_trade=last_trade, lag=lag, status=status,
                 days_left=(last_trade - today).days,
+                holiday_shift=(naive_trade - last_trade).days,
             ))
     alerts.sort(key=lambda a: (a["coupon_date"], -a["lag"], a["name"]))
     return alerts
@@ -297,6 +330,19 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=0
     ok.sort(key=lambda a: (a["last_trade"], -a["lag"], a["name"]))
 
     lines = [f"📅 {today:%m/%d}({wd[today.weekday()]}) 海外債配息雷達"]
+
+    # ---- 連假提醒（台灣休市會讓交割順延、申購截止日跟著提前）----
+    if mcal is not None:
+        try:
+            note = mcal.holiday_notice(today, days=lookahead, ccys=("USD",))
+            if note:
+                lines.append(note)
+            ok_cov, missing = mcal.coverage_ok(today + timedelta(days=lookahead), "USD")
+            if not ok_cov:
+                lines.append(f"\n⚠️ {'、'.join(missing)} 假日表尚未建置，本期截止日僅排除週六日，請人工複核。")
+        except Exception:
+            pass
+
     if paid_txt:
         lines.append(paid_txt)
     else:
@@ -317,6 +363,8 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=0
                 cur = a["last_trade"]
                 tag = ("申購截止 今日" if cur == today
                        else f"申購截止 {cur:%m/%d}({wd[cur.weekday()]})")
+                if a.get("holiday_shift"):
+                    tag += f"（逢連假，較平常提前 {a['holiday_shift']} 天）"
                 lines.append(f"── {tag} ──")
             avail = "" if str(a["avail"]) == "有" else f"｜額度:{a['avail']}"
             _y = _ytm_disp(a.get("ytm"))
@@ -619,7 +667,7 @@ def build_coupon_sheet(path, out_path, today=None, lookahead=LOOKAHEAD_DAYS, int
             "到期日", "剩餘年期", "存續期間", "風險屬性", "最低申購面額", "本日額度", "備註", "發行機構簡介(AI)", "來源Sheet"]
     ws["A1"] = f"海外債配息雷達 — 配息日前可申購（{today:%Y/%m/%d} 起未來{lookahead}天，共 {len(alerts)} 檔）"
     ws["A1"].font = Font(name="Arial", bold=True, size=13, color="0B2A4A")
-    ws["A2"] = ("最晚交割日=配息日前1營業日；US/CA T+1、其他 T+2；營業日僅排除週六日；配息日由到期日+頻率倒推，請以實際為準。"
+    ws["A2"] = ("最晚交割日=配息日前1營業日；US/CA T+1、其他 T+2；營業日已排除週六日、台灣假日及計價幣別國家假日（逢休市順延）；配息日由到期日+頻率倒推，請以實際為準。"
                 "配息前申購需支付較高前手息且利息計入海外所得，配息後申購前手息較低，兩者經濟價值相當；本表僅列時點資訊，非投資建議。"
                 "發行機構簡介為 AI 產生，僅供內部參考，對客說明請以公開資訊為準。")
     ws["A2"].font = Font(name="Arial", size=9, italic=True, color="666666")
