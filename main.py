@@ -123,6 +123,10 @@ BOND_QUERY_HELP = (
     "/coupon 7 → 改看7個營業日內\n"
     "/coupon all → 未來14天全部\n"
     "（另附「剛配息完、前手息最低」名單）\n"
+    "\n🏖 休市與交割日\n"
+    "/holiday → 今年台灣休市日\n"
+    "/holiday usd → 美元市場休市日\n"
+    "/holiday 2026/9/24 t+2 usd → 交割日試算\n"
     "━━━━━━━━━━━━━\n"
     "🔒專投＝限專業投資人｜💎高資產＝高資產客戶專屬\n"
     "報價以總行系統為準，商品條件依產品說明書"
@@ -3423,6 +3427,100 @@ def handle_text_message(event):
             except Exception as e:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
                     text=f"❌ 格式錯誤：{str(e)[:80]}\n用法：/jgb 2.955　或　/jgb 2.955 -0.004"))
+            return
+        if cmd in ("holiday", "休市", "假日", "交割日"):
+            # /holiday                       → 今年台灣休市日
+            # /holiday usd / /holiday 2027   → 指定市場或年度
+            # /holiday 2026/9/24 t+2 usd     → 試算交割日（對帳投服部來函用）
+            # /holiday add 2027-01-01 元旦   → 線上補一個台灣休市日
+            # /holiday add usd 2027-07-05 Independence Day
+            # /holiday del 2027-01-01 [usd]
+            import re as _re
+            from datetime import datetime as _dt
+            try:
+                import market_calendar as _mc
+            except Exception as _e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=f"❌ 行事曆模組未載入：{str(_e)[:80]}"))
+                return
+            _arg = raw_cmd.split(" ", 1)[1].strip() if " " in raw_cmd else ""
+            _tok = _arg.split()
+
+            def _pdate(s):
+                for f in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d", "%m-%d"):
+                    try:
+                        d = _dt.strptime(s, f).date()
+                        return d.replace(year=date.today().year) if f in ("%m/%d", "%m-%d") else d
+                    except ValueError:
+                        pass
+                return None
+
+            try:
+                # --- 新增 / 刪除 ---
+                if _tok and _tok[0].lower() in ("add", "新增", "del", "delete", "刪除"):
+                    _act = _tok[0].lower()
+                    _rest = _tok[1:]
+                    _mk = "TW"
+                    if _rest and _rest[0].upper() in ("TW", "USD", "EUR", "GBP", "JPY", "AUD", "CAD",
+                                                      "NZD", "ZAR", "CNY", "CNH", "HKD", "SGD"):
+                        _mk = _rest.pop(0).upper()
+                    _d = _pdate(_rest[0]) if _rest else None
+                    if not _d:
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(
+                            text="用法：/holiday add 2027-01-01 元旦\n　　　/holiday add usd 2027-07-05 Independence Day\n　　　/holiday del 2027-01-01"))
+                        return
+                    if _act in ("add", "新增"):
+                        _nm = " ".join(_rest[1:]) or "自訂休市日"
+                        _mc.add_holiday(_mk, _d, _nm)
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(
+                            text=f"✅ 已新增休市日\n{_mk}　{_d:%Y/%m/%d}　{_nm}\n"
+                                 "配息雷達的申購截止日會即時套用。"))
+                    else:
+                        _ok = _mc.remove_holiday(_mk, _d)
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(
+                            text=(f"✅ 已移除 {_mk} {_d:%Y/%m/%d}" if _ok
+                                  else f"⚠️ {_mk} {_d:%Y/%m/%d} 不在線上新增清單中（內建假日表無法從這裡刪除）")))
+                    return
+
+                # --- 交割日試算：/holiday 2026/9/24 t+2 usd ---
+                _d0 = _pdate(_tok[0]) if _tok else None
+                if _d0:
+                    _lag = 2
+                    _ccy = "USD"
+                    for t in _tok[1:]:
+                        m = _re.fullmatch(r"[tT]?\+?([123])", t)
+                        if m:
+                            _lag = int(m.group(1))
+                        elif t.upper() in ("TW", "USD", "EUR", "GBP", "JPY", "AUD", "CAD",
+                                           "NZD", "ZAR", "CNY", "CNH", "HKD", "SGD"):
+                            _ccy = t.upper()
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(
+                        text="🧮 交割日試算\n" + _mc.explain(_d0, _lag, _ccy)
+                             + "\n\n※ 依投服部規則：交割日逢台灣或計價幣別國家休市即順延。"))
+                    return
+
+                # --- 列表 ---
+                _yr = date.today().year
+                _mk = "TW"
+                for t in _tok:
+                    if _re.fullmatch(r"20\d{2}", t):
+                        _yr = int(t)
+                    elif t.upper() in ("TW", "USD", "EUR", "GBP", "JPY", "AUD", "CAD",
+                                       "NZD", "ZAR", "CNY", "CNH", "HKD", "SGD", "台灣"):
+                        _mk = "TW" if t in ("台灣",) else t.upper()
+                _msg = _mc.format_holiday_list(_yr, _mk)
+                if _mk == "TW" and _yr == date.today().year:
+                    _n = _mc.holiday_notice(date.today(), days=30)
+                    if _n:
+                        _msg += "\n" + _n.strip()
+                _msg += ("\n\n其他用法：\n"
+                         "/holiday usd　→ 美元市場休市日\n"
+                         "/holiday 2026/9/24 t+2 usd　→ 交割日試算\n"
+                         "/holiday add 2027-01-01 元旦　→ 補登休市日")
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=_msg[:4900]))
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=f"❌ {str(e)[:120]}\n用法：/holiday　/holiday usd　/holiday 2026/9/24 t+2 usd"))
             return
         if cmd in ("find", "篩選", "找"):
             # /find usd ytm>5 10年內   /find aud cy>4.5 5-10年   /find 一般 ytm>5.5 20年以上
