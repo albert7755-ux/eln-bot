@@ -839,9 +839,10 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 copy_text_body += f"{i+1}. {asset['code']}: {round(asset['price'],2)} ({round(asset['perf']*100,2)}%) ➤ KO: {round(this_asset_ko, 2)}\n"
             copy_text_body += f"🚀 目前狀態: {product_status if product_status != 'Running' else ('KI觀察中' if any_eki_risk_today else '正常比價')}"
 
-            if need_notify and line_status_short and line_ids:
-                for uid in line_ids:
-                    if uid.startswith("U") or uid.startswith("C"):
+            if need_notify and line_status_short:
+                valid_uids = [u for u in line_ids if u.startswith("U") or u.startswith("C")]
+                if valid_uids:
+                    for uid in valid_uids:
                         individual_messages_data.append({
                             "send": False,
                             "name": row["Name"],
@@ -850,6 +851,17 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                             "target": uid,
                             "msg": common_msg_body
                         })
+                else:
+                    # 商品沒填 LINE ID（網頁新增的商品）也要產生通知，
+                    # 後續由 auto_tracking_cron 用理專名去 agent_line_ids 對照表查
+                    individual_messages_data.append({
+                        "send": False,
+                        "name": row["Name"],
+                        "id": row["ID"],
+                        "status": line_status_short,
+                        "target": "",
+                        "msg": common_msg_body
+                    })
 
             row_res = {
                 "債券代號": row["ID"],
