@@ -251,6 +251,7 @@ def auto_push_important(line_bot_api, individual_messages: list, agent_ids: dict
     agent_ids = agent_ids or {}
     auto_sent = []
     remaining = []
+    sent_pairs = set()  # (商品代號, LINE ID)：同一檔商品同一人只發一次
     for msg in individual_messages:
         status = msg.get("status", "")
         if not is_auto_push_event(status):
@@ -261,11 +262,19 @@ def auto_push_important(line_bot_api, individual_messages: list, agent_ids: dict
             print(f"[AUTO PUSH SKIP] {msg.get('name','')} | {msg.get('id','')} | 查無 LINE ID")
             remaining.append(msg)
             continue
+        bond_key = (msg.get("id", "") or "").strip()
+        new_targets = [t for t in targets if (bond_key, t) not in sent_pairs]
+        if not new_targets:
+            # 這檔商品已發過給這些人（多理專造成的重複筆），不再重發
+            print(f"[AUTO PUSH DEDUP] {msg.get('name','')} | {bond_key} | 已發過，跳過重複")
+            auto_sent.append(msg)
+            continue
         ok_any = False
-        for t in targets:
+        for t in new_targets:
             try:
                 push_long_message(line_bot_api, t, msg.get("msg", ""))
                 ok_any = True
+                sent_pairs.add((bond_key, t))
                 print(f"[AUTO PUSH] {msg.get('name','')} | {msg.get('id','')} | {status} -> {t[:12]}...")
             except Exception as e:
                 print(f"[AUTO PUSH FAIL] {msg.get('name','')} | {t[:12]}... | {e}")
