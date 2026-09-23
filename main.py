@@ -690,6 +690,28 @@ def _persistent_dir():
 
 TARGET_FILE = _persistent_dir() / "targets.json"
 
+
+def _ambiguous_msg(kw, hits, cmd="/sheet", max_show=3):
+    """
+    機構名對到多家時的回覆。
+    舊版只說「請用更精確的名稱再打一次」,但遇到前綴關係(Meta / Meta平台)
+    使用者不管打多精確都會同時命中,變成死循環。
+    改成直接給可以複製貼上的指令,並附一個產品代碼當保底。
+    """
+    lines = [f"🔎「{kw}」對到 {len(hits)} 家，請直接複製下面其中一行："]
+    fallback = None
+    for iss, bl in hits[:max_show]:
+        code = next((str(b.get("code")) for b in bl if b.get("code")), None)
+        fallback = fallback or code
+        lines.append(f"　{cmd} {iss}")
+        tail = f"　　（共 {len(bl)} 檔"
+        if code:
+            tail += f"｜代碼 {code}"
+        lines.append(tail + "）")
+    if fallback:
+        lines.append(f"\n也可以直接用產品代碼指定，例如：{cmd} {fallback}")
+    return "\n".join(lines)
+
 # 一次性搬遷：舊版存在 /tmp，若持久位置還沒有檔案就把舊的搬過來
 _old_target = Path("/tmp") / "targets.json"
 try:
@@ -2906,7 +2928,7 @@ def handle_text_message(event):
                 return
             if len(hits) > 1:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text=f"「{kw}」對到 {len(hits)} 家:{'、'.join(h[0] for h in hits)}\n請用更精確的名稱再打一次"))
+                    text=_ambiguous_msg(kw, hits, "/focus")))
                 return
             f_iss, f_bl = hits[0]
             f_today = datetime.now(TZ_TAIPEI).date()
@@ -3083,7 +3105,7 @@ def handle_text_message(event):
                 return
             if len(hits) > 1:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(
-                    text=f"「{kw}」對到 {len(hits)} 家:{'、'.join(h[0] for h in hits)}\n請用更精確的名稱再打一次 /sheet"))
+                    text=_ambiguous_msg(kw, hits, "/sheet")))
                 return
             iss, bl = hits[0]
             picked = []
