@@ -558,6 +558,16 @@ EN_ALIAS = {
     "broadcom": "博通", "qualcomm": "高通", "tesla": "特斯拉", "netflix": "Netflix", "starbucks": "星巴克", "nike": "耐吉",
 }
 
+def _norm_name(s):
+    """
+    名稱正規化:全形轉半形、轉小寫、拿掉空白與常見標點。
+    讓「Meta 平台」「Ｍeta平台」「meta-平台」都能對到「Meta平台」。
+    """
+    import unicodedata
+    t = unicodedata.normalize("NFKC", str(s or "")).lower()
+    return re.sub(r"[\s　·・.,，、\-_/()（）「」\"']", "", t)
+
+
 def search_issuers(path, keyword, max_issuers=3):
     """
     在整份報價檔（不限配息中）模糊搜尋發行機構。
@@ -566,34 +576,66 @@ def search_issuers(path, keyword, max_issuers=3):
     回傳 [(issuer, [bond,...]), ...]，最多 max_issuers 家。
     """
     import difflib
-    kw = str(keyword).strip().lower()
-    if not kw:
+    kw_raw = str(keyword).strip().lower()
+    if not kw_raw:
         return []
-    # 中文俗名 → 報價檔英文名（台積電 → TSMC）
-    _mapped = False
-    for zh, en in ZH_ALIAS.items():
-        if kw == zh.lower():
-            kw = en.lower()
-            _mapped = True
-            break
-    # 常見英文名 → 中文（讓 /issuer apple 也找得到）；已由中文轉英文者不再反轉
-    if not _mapped:
-        for en, zh in EN_ALIAS.items():
-            if kw == en or (len(kw) >= 4 and (kw in en or en in kw)):
+
+    def _alias_of(kw):
+        """把俗名換成報價檔用的名稱;換不動就回 None。"""
+        for zh, en in ZH_ALIAS.items():          # 中文俗名 → 英文（台積電 → TSMC）
+            if kw == zh.lower():
+                return en.lower()
+        for en, zh in EN_ALIAS.items():          # 英文 → 中文（apple → 蘋果）
+            # ★ 只接受「整個關鍵字等於別名」。
+            #   舊版還允許 en in kw（子字串），結果打「Meta平台」會被別名表
+            #   改寫成「Meta」，使用者打得再精確都沒用。
+            if kw == en:
                 if zh.lower() in ZH_ALIAS and ZH_ALIAS[zh.lower()].lower() == kw:
-                    break   # 避免 tsmc→台積電→TSMC 來回打轉
-                kw = zh.lower()
-                break
+                    return None                  # 避免 tsmc→台積電→TSMC 來回打轉
+                return zh.lower()
+        return None
+
     groups = {}
     for b in read_bonds(path):
         iss = issuer_of(b["name"])
         b["issuer"] = iss
         groups.setdefault(iss, []).append(b)
-    hits = []
-    for iss, bl in groups.items():
-        hay = " ".join([iss] + [b["name"] for b in bl] + [b["isin"] for b in bl] + [str(b["code"] or "") for b in bl]).lower()
-        if kw in hay:
-            hits.append(iss)
+
+    # 分層比對。純粹用「包含」會掉進前綴陷阱:
+    # 報價檔同時有「Meta」與「Meta平台」兩家時,打 meta 兩家都中,
+    # 打 Meta平台 也兩家都中(因為 Meta 是它的前綴),使用者永遠問不出唯一解。
+    # 改成:名稱完全相同 > 名稱開頭相同 > 名稱包含 > 只有債券名/ISIN/代碼包含,
+    # 取最高那一層;該層只有一家就是唯一解。
+    def _match(kw):
+        nkw = _norm_name(kw)
+        if not nkw:
+            return []
+        tiers = {1: [], 2: [], 3: [], 4: []}
+        for iss, bl in groups.items():
+            niss = _norm_name(iss)
+            hay = _norm_name(" ".join([iss] + [b["name"] for b in bl]
+                                      + [b["isin"] for b in bl]
+                                      + [str(b["code"] or "") for b in bl]))
+            if niss == nkw:
+                tiers[1].append(iss)
+            elif niss.startswith(nkw):
+                tiers[2].append(iss)
+            elif nkw in niss:
+                tiers[3].append(iss)
+            elif nkw in hay:
+                tiers[4].append(iss)
+        for t in (1, 2, 3, 4):
+            if tiers[t]:
+                return tiers[t]
+        return []
+
+    # 先用使用者原本打的字比對;真的找不到才動用別名表,
+    # 這樣精確的輸入永遠不會被別名覆蓋掉。
+    hits = _match(kw_raw)
+    if not hits:
+        _al = _alias_of(kw_raw)
+        if _al:
+            hits = _match(_al)
     if not hits:
         hits = difflib.get_close_matches(keyword, list(groups.keys()), n=max_issuers, cutoff=0.6)
     out = []
