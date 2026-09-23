@@ -23,20 +23,55 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 # 一、數據抓取
 # ==============================
 
-def _safe_close_pair(symbol: str):
-    """抓最近兩個收盤價,回傳最新值、變化、變化%(跟 daily_report.py 同款)"""
-    ticker = yf.Ticker(symbol)
-    hist = ticker.history(period="5d", auto_adjust=False)
-
+def _hist_closes(symbol: str, days: int = 12):
+    """回傳 [(日期, 收盤), ...],由舊到新。"""
+    hist = yf.Ticker(symbol).history(period=f"{days}d", auto_adjust=False)
     if hist is None or hist.empty:
+        return []
+    out = []
+    for ts, row in hist.iterrows():
+        c = row.get("Close")
+        try:
+            if c is None or c != c:      # NaN
+                continue
+            d = ts.date() if hasattr(ts, "date") else None
+            out.append((d, float(c)))
+        except Exception:
+            continue
+    return out
+
+
+def _safe_close_pair(symbol: str, target_date=None):
+    """
+    抓收盤價與前一交易日收盤,回傳最新值、變化、變化%。
+
+    ★ 為什麼要有 target_date ★
+    原本這裡直接取最後兩根 K 棒,對 ETF 沒問題(16:00 ET 收盤後就不再有新棒),
+    但對原油期貨是錯的:CL=F 每天 14:30 ET 結算,18:00 ET 就開下一盤,
+    Yahoo 會馬上建一根「明天日期」的未完成 K 棒。
+    龍蝦 06:30(台北)跑 = 夏令 18:30 ET,剛好撈到那根未完成的棒,
+    於是變成「明天的盤中價 減 昨天的結算價」——2026/9/23 那份 WTI -6.41% 就是這樣來的。
+    (冬令 17:30 ET 落在 17:00~18:00 的休息時段,反而會對;
+     也就是說這是個「夏天才發作」的 bug,最難查。)
+
+    解法不是去追時鐘(夏令冬令會漂),而是鎖定日期:
+    給定 target_date(用美國財政部殖利率曲線那天,報告本來就以它為準),
+    只採用「日期 <= target_date」的最後一根棒,永遠不會撈到未來的未完成棒。
+    """
+    rows = _hist_closes(symbol)
+    if len(rows) < 2:
         return None
 
-    close = hist["Close"].dropna()
-    if len(close) < 2:
+    if target_date:
+        usable = [i for i, (d, _) in enumerate(rows) if d and d <= target_date]
+        idx = usable[-1] if usable else len(rows) - 1
+    else:
+        idx = len(rows) - 1
+    if idx < 1:
         return None
 
-    prev_close = float(close.iloc[-2])
-    last_close = float(close.iloc[-1])
+    d_last, last_close = rows[idx]
+    d_prev, prev_close = rows[idx - 1]
     change = last_close - prev_close
     pct = (change / prev_close) * 100 if prev_close else 0.0
 
@@ -44,6 +79,10 @@ def _safe_close_pair(symbol: str):
         "price": round(last_close, 3),
         "change": round(change, 3),
         "pct": round(pct, 2),
+        "date": d_last,
+        "prev_date": d_prev,
+        # 有指定基準日卻對不上 → 顯示時要標註,不要假裝同一天
+        "aligned": (target_date is None) or (d_last == target_date),
     }
 
 
@@ -307,7 +346,14 @@ def get_jgb_10y_te():
         if resp.status_code != 200:
             return None
         html = resp.text
-        m = re.search(r"(?:eased|fell|rose|climbed|increased|decreased|edged (?:up|down)) to ([\d.]+)% on ([A-Z][a-z]+ \d{1,2}, \d{4})", html)
+        # 動詞要涵蓋「沒有變動」的講法,否則殖利率持平那天會整個抓不到
+        # (實例:2026/9/22「held steady at 2.99% on September 22, 2026」)
+        _verbs = (r"eased|fell|dropped|declined|slid|rose|climbed|gained|increased|decreased|"
+                  r"edged (?:up|down)|held steady at|was unchanged at|remained (?:at|unchanged at)|"
+                  r"steadied at|stood at|was little changed at|hovered (?:at|around)")
+        m = re.search(r"(?:" + _verbs + r")\s*(?:to\s*)?([\d.]+)%\s*on\s*([A-Z][a-z]+ \d{1,2}, \d{4})", html)
+        if not m:   # 最後手段:直接找「X% on <日期>」
+            m = re.search(r"([\d.]+)%\s*on\s*([A-Z][a-z]+ \d{1,2}, \d{4})", html)
         m2 = re.search(r"marking a ([\d.]+) percentage points (increase|decrease)", html)
         if not m:
             return None
@@ -366,6 +412,53 @@ def get_jgb_override(max_age_days=4):
         return None
 
 
+try:
+    import market_calendar as _mcal
+except Exception:      # pragma: no cover
+    _mcal = None
+
+
+def _jp_closed(d):
+    """d 是不是日本休市日(週末或國定假日)"""
+    if d.weekday() >= 5:
+        return True
+    if _mcal is not None:
+        return bool(_mcal.holiday_name(d, "JPY"))
+    return False
+
+
+def _last_jp_trading_day(ref):
+    """ref 之前最近一個日本交易日(不含 ref 當天)"""
+    from datetime import timedelta as _td
+    d = ref - _td(days=1)
+    for _ in range(20):
+        if not _jp_closed(d):
+            return d
+        d -= _td(days=1)
+    return d
+
+
+def jp_holiday_note(today_tw, back=7):
+    """
+    近幾天日本有沒有休市,有的話回一段人看得懂的說明,
+    讓「日期沒動」不會被誤會成程式壞掉。
+    """
+    from datetime import timedelta as _td
+    if _mcal is None:
+        return ""
+    hits = []
+    for i in range(back):
+        d = today_tw - _td(days=i)
+        if d.weekday() < 5:
+            nm = _mcal.holiday_name(d, "JPY")
+            if nm:
+                hits.append((d, nm))
+    if not hits:
+        return ""
+    hits.sort()
+    return "、".join(f"{d:%m/%d}{nm}" for d, nm in hits)
+
+
 def get_jgb_10y_checked():
     """
     優先序:市場收盤(yfinance) → TradingEconomics(市場口徑) → 財務省基準利回り。
@@ -375,9 +468,9 @@ def get_jgb_10y_checked():
     from datetime import timedelta as _td
     tw = pytz.timezone("Asia/Taipei")
     today_tw = datetime.now(tw).date()
-    exp = today_tw - _td(days=1)
-    while exp.weekday() >= 5:
-        exp -= _td(days=1)
+    # 預期交易日 = 前一個「日本」營業日。日本連假很多(如 2026/9/21~23 敬老の日連假),
+    # 只跳週末會誤判成「資料未更新」。
+    exp = _last_jp_trading_day(today_tw)
 
     # 0) 手動輸入值優先(與理專看的行情軟體一致)
     _ov = get_jgb_override()
@@ -400,7 +493,11 @@ def get_jgb_10y_checked():
         return dict(mof, source="財務省基準")
     for cand in (yfd, te, mof):
         if cand:
-            return dict(cand, stale=True, source=cand.get("source") or "財務省基準")
+            # 分辨「日本休市所以沒新數字」與「我們真的沒抓到」——理專看到的說法不一樣
+            note = jp_holiday_note(today_tw)
+            return dict(cand, stale=True, stale_reason=("jp_holiday" if note else "no_data"),
+                        jp_holiday=note, expected_date=exp,
+                        source=cand.get("source") or "財務省基準")
     return None
 
 
@@ -418,16 +515,32 @@ def get_bond_market_data():
         "BRENT": "BZ=F",      # Brent 原油期貨
     }
 
-    results = {}
+    # ── 先拿財政部曲線,它的日期就是「這份報告在講哪一個交易日」的基準 ──
+    curve = get_treasury_curve()
+    anchor = None
+    if curve and curve.get("date"):
+        try:
+            anchor = datetime.strptime(curve["date"].strip(), "%m/%d/%Y").date()
+        except Exception:
+            try:
+                anchor = datetime.strptime(curve["date"].strip(), "%Y-%m-%d").date()
+            except Exception:
+                anchor = None
+    if anchor is None:
+        anchor = _last_us_trading_day(datetime.now(pytz.timezone("Asia/Taipei")).date())
+    print(f"[BondDaily] 行情基準日 = {anchor}")
+
+    results = {"ANCHOR_DATE": anchor}
     for name, symbol in tickers.items():
         try:
-            results[name] = _safe_close_pair(symbol)
+            results[name] = _safe_close_pair(symbol, target_date=anchor)
+            _r = results[name]
+            if _r and not _r.get("aligned"):
+                print(f"[BondDaily] ⚠ {name}({symbol}) 最後可用 K 棒 {_r['date']} ≠ 基準日 {anchor}")
         except Exception as e:
             results[name] = None
             print(f"[BondDaily] Error fetching {name} ({symbol}): {e}")
 
-    # ── 殖利率曲線:優先用美國財政部官方每日曲線(所有天期同一交易日)──
-    curve = get_treasury_curve()
     results["CURVE_SOURCE"] = None
     if curve:
         for key in TREASURY_COLS:
@@ -580,9 +693,13 @@ def build_bond_snapshot(data):
         elif _src == "TradingEconomics":
             _jl += "·TE"
         if _j.get("stale"):
-            _jl += "·資料未更新"
+            _jl += "·最新可得" if _j.get("stale_reason") == "jp_holiday" else "·資料未更新"
         _jl += "）"
     lines.append(_jl)
+    # 日本休市就講清楚,不要讓「日期沒動」看起來像程式壞掉
+    if _j and _j.get("jp_holiday"):
+        lines.append(f"　（日本 {_j['jp_holiday']} 休市，JGB 無新報價；"
+                     f"財務省基準利回り為次一營業日才公布，故最新為 {_j['date']:%m/%d}）")
     _jm = jgb_month_line(data.get("JGB10Y_MONTH") or [])
     if _jm:
         lines.append(_jm)
@@ -607,6 +724,18 @@ def build_bond_snapshot(data):
             lines.append(_etf_line("WTI 原油", _w))
         if _b:
             lines.append(_etf_line("Brent 原油", _b))
+        # 日期對不上基準日就直說,不要讓 AI 拿去寫成「昨天油價大跌」
+        _anchor = data.get("ANCHOR_DATE")
+        _off = [f"{lbl} {d['date']:%m/%d}" for lbl, d in (("WTI", _w), ("Brent", _b))
+                if d and not d.get("aligned")]
+        if _off:
+            lines.append(f"　（⚠️ {'、'.join(_off)} 與基準日 {_anchor:%m/%d} 不同，"
+                         "為該商品最後可得結算價，請勿與美債當日變動連動解讀）")
+        # 價差防呆:WTI 與 Brent 正常價差約 3~6 美元,拉開太多幾乎必是資料錯位
+        if _w and _b:
+            _sp = _b["price"] - _w["price"]
+            if not (-2 <= _sp <= 12):
+                lines.append(f"　（⚠️ Brent−WTI 價差 {_sp:+.2f} 美元偏離常態，數據可能有誤，請人工複核）")
 
     return "\n".join(lines)
 
@@ -629,6 +758,19 @@ def get_weekday_topic() -> str:
         6: "本週債市回顧:這一週殖利率與債市發生了什麼,一段話總結",
     }
     return topics[weekday]
+
+
+def _looks_truncated(text: str) -> bool:
+    """
+    收尾沒有句點/驚嘆號/問號,又不是短句,就當作寫到一半被砍。
+    (2026/9/23 那份結尾是「Warsh在9月16日記者會上提」,正是這種情況)
+    """
+    t = (text or "").rstrip()
+    if not t:
+        return True
+    if t[-1] in "。！？!?」）)…":
+        return False          # 有正常收尾就算短也不算截斷
+    return True
 
 
 def generate_bond_commentary(snapshot_text: str) -> str:
@@ -658,7 +800,11 @@ def generate_bond_commentary(snapshot_text: str) -> str:
         "不可直接搬來當作昨晚的變動。若確實要提到前一日或盤中的波動,"
         "必須明確標註日期或寫明『盤中』『前一交易日』,不可與昨晚收盤混為一談。\n"
         "  (3) 寫完後自我檢查:文中每一個油價數字,是否都能在數據區找到對應?"
-        "找不到就刪掉或改寫。\n\n"
+        "找不到就刪掉或改寫。\n"
+        "  (4) 若數據區的原油欄位帶有 ⚠️ 標記(日期與基準日不同、或價差偏離常態),"
+        "代表該筆油價與美債不是同一個交易日、或資料可能有誤:"
+        "此時不可把油價寫成昨晚殖利率變動的原因,也不要引用其漲跌幅,"
+        "僅能中性敘述『原油資料待確認』或整段略過油價。\n\n"
         "【極重要-利差方向】上方數據中的『2年/10年利差』與『20年/30年利差』已由系統計算完成,"
         "括號內若標示『正斜率』代表 30年殖利率高於 20年(曲線扭曲已修復);"
         "若標示『倒掛(20Y高於30Y)』代表 20年高於 30年(扭曲尚未修復)。"
@@ -780,27 +926,44 @@ def generate_bond_commentary(snapshot_text: str) -> str:
         "不要粗體、不要 markdown、不要分隔線、不要把兩個標籤寫在同一行、不要改標籤名稱。\n"
     )
 
+    # max_tokens 原本 1600,但「四段內文 + web_search 的查詢往返」會一起吃這個額度,
+    # 專題寫長一點就會在【今日操作思維】中途被截斷(2026/9/23 實際發生)。
+    MAX_TOKENS = 4000
+
+    def _call(msgs, use_search=True):
+        kw = dict(model="claude-sonnet-4-6", max_tokens=MAX_TOKENS,
+                  temperature=0.3, messages=msgs)
+        if use_search:
+            kw["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
+        return client.messages.create(**kw)
+
+    def _text_of(msg):
+        return "".join(b.text for b in msg.content if hasattr(b, "text"))
+
     try:
-        message = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1600,
-            temperature=0.3,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": prompt}]
-        )
+        message = _call([{"role": "user", "content": prompt}])
     except Exception:
         # 萬一 web search 出問題,退回純文字模式,至少報告不會開天窗
-        message = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1600,
-            temperature=0.3,
-            messages=[{"role": "user", "content": prompt}]
-        )
+        message = _call([{"role": "user", "content": prompt}], use_search=False)
 
-    full_text = ""
-    for block in message.content:
-        if hasattr(block, "text"):
-            full_text += block.text
+    full_text = _text_of(message)
+
+    # 真的被截斷就續寫,而不是把半句話送出去
+    if getattr(message, "stop_reason", None) == "max_tokens" or _looks_truncated(full_text):
+        print(f"[BondDaily] 內文疑似被截斷(stop_reason={getattr(message,'stop_reason',None)}),嘗試續寫")
+        try:
+            cont = _call([
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": full_text},
+                {"role": "user", "content": "接續上面未寫完的地方繼續寫完,不要重複已經寫過的內容、"
+                                            "不要重寫標籤,直接從斷掉的那句話接下去,並把剩下的段落補齊。"},
+            ], use_search=False)
+            tail = _text_of(cont)
+            if tail:
+                full_text = full_text.rstrip() + tail.lstrip()
+        except Exception as e:
+            print(f"[BondDaily] 續寫失敗: {e}")
+
     return full_text.strip()
 
 
@@ -891,9 +1054,23 @@ def build_final_bond_report(data: dict) -> str:
 
     if action:
         final_text += "\n\n🧭 今日操作思維\n"
-        final_text += action
+        final_text += _trim_dangling(action)
 
     return final_text.strip()
+
+
+def _trim_dangling(text: str) -> str:
+    """
+    續寫都救不回來時的最後防線:砍掉結尾那句寫到一半的話,
+    寧可少一句,也不要送出「…記者會上提」這種斷頭句給理專。
+    """
+    t = (text or "").rstrip()
+    if not t or t[-1] in "。！？!?」）)…":
+        return t
+    cut = max(t.rfind(ch) for ch in "。！？!?")
+    if cut >= 30:                     # 砍掉後還留得下一段像樣的內容才砍
+        return t[:cut + 1]
+    return t
 
 
 # ==============================
