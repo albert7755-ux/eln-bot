@@ -9,12 +9,14 @@ auto_tracking_cron.py
 """
 
 import os
+import time
 import traceback
 from datetime import datetime, timezone, timedelta
 
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError, DBAPIError, TimeoutError as SATimeoutError
 
 from autotracking_core import calculate_from_file, calculate_from_db
 try:
@@ -23,6 +25,25 @@ except Exception:
     download_latest_eln = None
 
 TZ_TAIPEI = timezone(timedelta(hours=8))
+
+
+# ── 重試機制：資料庫連線逾時/瞬斷時，等幾秒再試，最多重試 2 次 ──
+def with_db_retry(fn, *args, retries: int = 2, base_delay: float = 3.0, label: str = "", **kwargs):
+    """執行 fn(*args, **kwargs)，遇到資料庫連線類錯誤時自動重試。
+    label 只用於印在 log 裡方便看是哪一步在重試。"""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except (OperationalError, DBAPIError, SATimeoutError, TimeoutError) as e:
+            last_err = e
+            if attempt < retries:
+                delay = base_delay * (attempt + 1)
+                print(f"[DB RETRY] {label} 第{attempt + 1}次失敗（{type(e).__name__}），{delay:.0f}秒後重試...")
+                time.sleep(delay)
+            else:
+                print(f"[DB RETRY] {label} 重試{retries}次後仍失敗，放棄")
+    raise last_err
 
 
 def get_env(key: str, default: str = "") -> str:
@@ -53,8 +74,22 @@ def normalize_db_url(db_url: str) -> str:
     return db_url
 
 
-def save_result_to_db(engine, chat_key: str, summary: str, top5_lines: list, detail_map: dict, agent_name_map: dict):
+def save_result_to_db_multi(engine, entries: list):
+    """entries = [(chat_key, summary, top5_lines, detail_map, agent_name_map), ...]
+    把個人 + 群組（原本各自開一次交易）合併成同一次資料庫交易，
+    減少 COMMIT 次數（減少 Disk IO 次數）"""
     with engine.begin() as conn:
+        for chat_key, summary, top5_lines, detail_map, agent_name_map in entries:
+            _save_result_in_conn(conn, chat_key, summary, top5_lines, detail_map, agent_name_map)
+
+
+def save_result_to_db(engine, chat_key: str, summary: str, top5_lines: list, detail_map: dict, agent_name_map: dict):
+    """單一 chat_key 版本（保留給其他地方相容呼叫用）"""
+    with engine.begin() as conn:
+        _save_result_in_conn(conn, chat_key, summary, top5_lines, detail_map, agent_name_map)
+
+
+def _save_result_in_conn(conn, chat_key: str, summary: str, top5_lines: list, detail_map: dict, agent_name_map: dict):
         conn.execute(text("""
         INSERT INTO eln_last_report(chat_key, summary, updated_at)
         VALUES (:k, :s, NOW())
@@ -63,19 +98,26 @@ def save_result_to_db(engine, chat_key: str, summary: str, top5_lines: list, det
         """), {"k": chat_key, "s": summary})
 
         conn.execute(text("DELETE FROM eln_top5 WHERE chat_key=:k"), {"k": chat_key})
-        for i, line in enumerate(top5_lines, start=1):
+        if top5_lines:
+            top5_params = [
+                {"k": chat_key, "n": i, "t": line}
+                for i, line in enumerate(top5_lines, start=1)
+            ]
             conn.execute(text("""
             INSERT INTO eln_top5(chat_key, line_no, text_line, updated_at)
             VALUES (:k, :n, :t, NOW())
-            """), {"k": chat_key, "n": i, "t": line})
+            """), top5_params)
 
         conn.execute(text("DELETE FROM eln_detail WHERE chat_key=:k"), {"k": chat_key})
-        for bond_id, detail in detail_map.items():
-            agent = agent_name_map.get(bond_id, "-")
+        if detail_map:
+            detail_params = [
+                {"k": chat_key, "b": bond_id, "d": detail, "a": agent_name_map.get(bond_id, "-")}
+                for bond_id, detail in detail_map.items()
+            ]
             conn.execute(text("""
             INSERT INTO eln_detail(chat_key, bond_id, detail, agent_name, updated_at)
             VALUES (:k, :b, :d, :a, NOW())
-            """), {"k": chat_key, "b": bond_id, "d": detail, "a": agent})
+            """), detail_params)
 
 
 def save_job_log(engine, job_name: str, status: str, detail: str = ""):
@@ -177,19 +219,23 @@ def save_pending_notifications(engine, chat_key: str, individual_messages: list)
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM eln_pending_notifications WHERE chat_key=:k"), {"k": chat_key})
 
-        for msg in individual_messages:
+        if individual_messages:
+            params = [
+                {
+                    "k": chat_key,
+                    "t": msg.get("target", ""),
+                    "n": msg.get("name", ""),
+                    "b": msg.get("id", ""),
+                    "s": msg.get("status", ""),
+                    "m": msg.get("msg", "")
+                }
+                for msg in individual_messages
+            ]
             conn.execute(text("""
                 INSERT INTO eln_pending_notifications
                     (chat_key, target_id, agent_name, bond_id, status, msg)
                 VALUES (:k, :t, :n, :b, :s, :m)
-            """), {
-                "k": chat_key,
-                "t": msg.get("target", ""),
-                "n": msg.get("name", ""),
-                "b": msg.get("id", ""),
-                "s": msg.get("status", ""),
-                "m": msg.get("msg", "")
-            })
+            """), params)
 
 
 def build_pending_text(individual_messages: list) -> str:
@@ -320,10 +366,14 @@ def main():
 
     try:
         # 優先從 eln_products 資料庫讀取，沒有資料才 fallback 到 Excel
+        # （資料庫讀取遇到連線逾時/瞬斷會自動重試 2 次）
         out = None
         try:
             print("從 eln_products 資料庫讀取...")
-            out = calculate_from_db(engine, lookback_days=3, notify_ki_daily=True)
+            out = with_db_retry(
+                calculate_from_db, engine, lookback_days=3, notify_ki_daily=True,
+                label="讀取 eln_products"
+            )
             print("✅ 從資料庫計算完成")
         except Exception as db_err:
             print(f"[WARNING] DB 讀取失敗({db_err})，改用 Excel...")
@@ -337,12 +387,13 @@ def main():
         print("Running build_result...")
         summary, top5_lines, detail_map, agent_name_map = build_result(out)
 
-        print("Saving result to database (personal)...")
-        save_result_to_db(engine, personal_chat_key, summary, top5_lines, detail_map, agent_name_map)
-
+        # ── 個人 + 群組合併成同一次資料庫交易寫入，減少 COMMIT 次數 ──
+        save_entries = [(personal_chat_key, summary, top5_lines, detail_map, agent_name_map)]
         if group_chat_key:
-            print("Saving result to database (group)...")
-            save_result_to_db(engine, group_chat_key, summary, top5_lines, detail_map, agent_name_map)
+            save_entries.append((group_chat_key, summary, top5_lines, detail_map, agent_name_map))
+
+        print(f"Saving result to database ({'personal + group' if group_chat_key else 'personal'})...")
+        with_db_retry(save_result_to_db_multi, engine, save_entries, label="寫入 eln_last_report/top5/detail")
 
         print(f"Saved {len(detail_map)} bonds to DB")
 
@@ -362,7 +413,7 @@ def main():
         individual_messages = out.get("individual_messages", []) or []
 
         # ── 自動推播重要事件（提前出場/到期）給理專，其餘保留手動 /send ──
-        agent_ids = load_agent_line_ids(engine)
+        agent_ids = with_db_retry(load_agent_line_ids, engine, label="讀取 agent_line_ids")
         print(f"[INFO] 理專對照表 {len(agent_ids)} 位")
         auto_sent, remaining_messages = auto_push_important(agent_bot_api, individual_messages, agent_ids)
 
@@ -371,16 +422,17 @@ def main():
             push_long_message(line_bot_api, user_id, auto_sent_text)
 
         print("Saving pending notifications...")
-        save_pending_notifications(engine, personal_chat_key, remaining_messages)
+        with_db_retry(save_pending_notifications, engine, personal_chat_key, remaining_messages, label="寫入待確認通知")
 
         pending_text = build_pending_text(remaining_messages)
         push_long_message(line_bot_api, user_id, pending_text)
 
-        save_job_log(
-            engine,
+        with_db_retry(
+            save_job_log, engine,
             job_name="auto_tracking_cron",
             status="success",
-            detail=f"Saved {len(detail_map)} bonds, auto_sent={len(auto_sent)}, pending={len(remaining_messages)}"
+            detail=f"Saved {len(detail_map)} bonds, auto_sent={len(auto_sent)}, pending={len(remaining_messages)}",
+            label="寫入 job log"
         )
 
         print("Done!")
