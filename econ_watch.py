@@ -73,6 +73,67 @@ DEFAULT_TIME = {
     "ecb": "20:15", "rba": "12:30", "boj": "11:00", "cbc": "16:00",
 }
 
+# ──────────────────────────────────────────────────────────────
+# 公布時刻(當地時間) —— 用來擋「還沒公布就先推」
+#
+# 2026/10/05 事故:ISM 非製造業 PMI 台北時間 22:00 才公布,
+# 但 ITEM_WINDOWS 的 ism_svc 是 (19, 24),20:16 就開始問 AI
+# 「公布了嗎」,AI 把前值 55.4 查對了、實際值 55.1 卻是編的,直接推進群組。
+# 提示詞裡雖然寫了「不確定就回 false」,但那是請求,不是保證;
+# 時間閘門是確定性的,先擋住再說。
+#
+# 美國數據綁美東時間,夏令冬令差一小時,所以存美東時間當場換算,
+# 不要寫死台北時間(寫死的話冬令會晚一小時才開窗)。
+# ──────────────────────────────────────────────────────────────
+RELEASE_ET = {
+    "us_cpi": "08:30", "us_pce": "08:30", "us_nfp": "08:30",
+    "ism_mfg": "10:00", "ism_svc": "10:00", "fomc": "14:00",
+}
+RELEASE_LOCAL = {
+    "ecb": ("Europe/Berlin",      "14:15"),
+    "rba": ("Australia/Sydney",   "14:30"),
+    "boj": ("Asia/Tokyo",         "12:00"),
+    "cbc": ("Asia/Taipei",        "16:00"),
+}
+
+
+def expected_release_taipei(key, day):
+    """
+    該項目在 day 當天、換算成台北時間的預定公布時刻(自動處理日光節約)。
+    查不到就回 None(代表不擋)。
+    """
+    try:
+        from zoneinfo import ZoneInfo
+    except Exception:
+        return None
+    if key in RELEASE_ET:
+        tzname, hhmm = "America/New_York", RELEASE_ET[key]
+    elif key in RELEASE_LOCAL:
+        tzname, hhmm = RELEASE_LOCAL[key]
+    else:
+        return None
+    try:
+        hh, mm = map(int, hhmm.split(":"))
+        local = datetime(day.year, day.month, day.day, hh, mm, tzinfo=ZoneInfo(tzname))
+        return local.astimezone(TZ_TAIPEI)
+    except Exception:
+        return None
+
+
+def released_yet(key, now, grace_min=0):
+    """
+    現在是否已經過了預定公布時刻。還沒到就不該去問 AI、更不該推播。
+    grace_min 可讓它提早幾分鐘開始查(預設 0,寧可晚一分鐘也不要早一小時)。
+    """
+    rel = expected_release_taipei(key, now.date())
+    if rel is None:
+        return True
+    # FOMC 等跨夜項目:若現在是凌晨,公布時刻其實屬於前一天的場次
+    if rel > now and (rel - now).total_seconds() > 12 * 3600:
+        from datetime import timedelta as _td
+        rel = expected_release_taipei(key, now.date() - _td(days=1)) or rel
+    return now >= rel - timedelta(minutes=grace_min)
+
 
 def in_hot_window(key, now, calendar_full=None, minutes=60):
     """
@@ -320,10 +381,28 @@ def _extract_json(raw):
         return None
 
 
-def check_one_item(item, anthropic_client, today_str):
+def _ask(anthropic_client, prompt, max_tokens=700):
+    msg = anthropic_client.messages.create(
+        model="claude-sonnet-4-6", max_tokens=max_tokens, temperature=0.0,
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return _extract_json("".join(getattr(b, "text", "") for b in msg.content))
+
+
+def _num_in(s):
+    """抓出字串裡第一個數字,用來比對兩次查詢講的是不是同一個值"""
+    m = re.search(r"-?\d+(?:\.\d+)?", str(s or "").replace(",", ""))
+    return float(m.group(0)) if m else None
+
+
+def check_one_item(item, anthropic_client, today_str, now=None):
     """
     用 Claude + web_search 工具檢查單一項目是否『近24小時內剛正式公布』。
     是的話回傳整理好的推播文字;否則回傳 None。
+
+    這則訊息會直接進幾百人的群組,所以寧可漏推也不能推錯:
+    說有公布,必須附得出原文連結,而且要通過第二次獨立查證。
     """
     prompt = (
         f"今天是台北時間 {today_str}。請搜尋「{item['label']}」({item['query']}) 的最新消息,"
@@ -331,31 +410,57 @@ def check_one_item(item, anthropic_client, today_str):
         "嚴格規則:\n"
         "- 只有搜尋結果明確顯示『已公布的實際數字或決議結果』才算已公布;"
         "如果只是『即將公布』『市場預期』『分析師預測』這類前瞻內容,視為未公布。\n"
-        "- 不確定就回 published:false,絕對不要臆測數字或結果。\n"
+        "- 【最重要】如果你找不到載明實際值的新聞原文,就是還沒公布,published 一律回 false。"
+        "不可以用市場預期值、前值、或你印象中的數字去推測實際值。"
+        "推一則錯的數據進群組,比晚一小時推嚴重得多。\n"
+        "- actual 欄位只填『實際公布值』本身(例如 55.1 或 0.3%),"
+        "source_url 必須是你真的在搜尋結果中看到、載有這個實際值的那篇原文網址;"
+        "填不出 source_url 就代表沒有來源,published 要回 false。\n"
         "- summary 只寫確定的事實數字(實際值、市場預期值、前值,或利率決議結果與是否符合預期),"
         "不要加入你自己的推測。\n"
         "- comment 是 1~2 句對市場/利率/債市影響的中性觀察,不做投資建議,不用果決斷言。\n\n"
         "分析完成後,只用下面這個 JSON 格式回覆(不要有其他文字、不要用 markdown code block):\n"
         '{"published": true 或 false, '
+        '"actual": "實際公布值", '
+        '"source_url": "載有實際值的原文網址", '
         '"headline": "15字內標題", '
         '"summary": "2~4行,含具體數字", '
         '"comment": "1~2句市場影響觀察"}'
     )
     try:
-        message = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=700,
-            temperature=0.2,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": prompt}],
-        )
+        got = _ask(anthropic_client, prompt)
     except Exception as e:
         print(f"[EconWatch] {item['key']} API 呼叫失敗: {e}")
         return None
 
-    full_text = "".join(getattr(b, "text", "") for b in message.content)
-    got = _extract_json(full_text)
     if not got or not got.get("published"):
+        return None
+
+    # ── 關卡1:沒有來源連結就不算數 ──
+    src = str(got.get("source_url") or "").strip()
+    if not src.startswith("http"):
+        print(f"[EconWatch] {item['key']} 宣稱已公布但給不出來源,不推播")
+        return None
+
+    # ── 關卡2:二次獨立查證,兩次講的實際值要一致 ──
+    actual1 = _num_in(got.get("actual"))
+    try:
+        chk = _ask(anthropic_client,
+                   f"今天是台北時間 {today_str}。請搜尋並只回答一件事:"
+                   f"「{item['label']}」({item['query']}) 最新一期『已經正式公布』的實際值是多少?\n"
+                   "如果搜尋結果裡找不到載明實際值的原文,或只查到預期值/預測,"
+                   'published 一律回 false。只回 JSON:'
+                   '{"published": true 或 false, "actual": "實際值"}',
+                   max_tokens=300)
+    except Exception as e:
+        print(f"[EconWatch] {item['key']} 複查失敗,保守不推: {e}")
+        return None
+    if not chk or not chk.get("published"):
+        print(f"[EconWatch] {item['key']} 複查說尚未公布,不推播(避免誤報)")
+        return None
+    actual2 = _num_in(chk.get("actual"))
+    if actual1 is not None and actual2 is not None and abs(actual1 - actual2) > 1e-9:
+        print(f"[EconWatch] {item['key']} 兩次查到的實際值不一致({actual1} vs {actual2}),不推播")
         return None
 
     headline = str(got.get("headline") or item["label"]).strip()
@@ -367,7 +472,7 @@ def check_one_item(item, anthropic_client, today_str):
     lines = [f"📊 {headline}", "", summary]
     if comment:
         lines += ["", comment]
-    lines += ["", "（資料來源：公開新聞彙整，僅供參考，非投資建議）"]
+    lines += ["", f"來源：{src}", "（公開新聞彙整，僅供參考，非投資建議）"]
     return "\n".join(lines)
 
 
@@ -404,6 +509,10 @@ def check_econ_events(engine, text, anthropic_client, push_fn, hot_only=False):
         key = item["key"]
         if already_pushed(engine, text, key, today_str):
             continue
+        # ★ 時間閘門:還沒到公布時刻就連問都不問。
+        #   這是唯一確定性的防線——提示詞擋不住模型編數字,時鐘可以。
+        if not released_yet(key, now):
+            continue
         hot = in_hot_window(key, now, cal_full, minutes=60)
         if hot_only and not hot:
             continue            # 加密模式:只查公布後1小時內的項目
@@ -413,7 +522,7 @@ def check_econ_events(engine, text, anthropic_client, push_fn, hot_only=False):
                 continue
             if not _is_plausible_day(key, now, calendar):
                 continue
-        msg = check_one_item(item, anthropic_client, today_str)
+        msg = check_one_item(item, anthropic_client, today_str, now=now)
         if msg:
             try:
                 push_fn(msg)
