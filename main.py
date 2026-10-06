@@ -411,6 +411,10 @@ engine = create_engine(
     pool_pre_ping=True,
     pool_recycle=300,        # Supabase pooler 會回收閒置連線,我們先一步換掉
     pool_timeout=10,         # 取不到連線就快點放棄,不要卡住 LINE 的 webhook
+    # Supabase Free(nano)的 pooler 連線額度很小,SQLAlchemy 預設 5+10=15 條太兇。
+    # 這支服務的查詢都很短,3+2 綽綽有餘,留額度給 SQL Editor 和其他連線。
+    pool_size=3,
+    max_overflow=2,
     connect_args={"connect_timeout": 8},   # DB 掛掉時 8 秒內失敗,不要吊著
 )
 
