@@ -542,7 +542,44 @@ def init_db():
             except Exception:
                 pass
 
-init_db()
+# ──────────────────────────────────────────────────────────────
+# 啟動時建表 —— 但建不起來不可以讓整個服務起不來
+#
+# 2026/10/06 事故:Supabase 連不上時,init_db() 在模組載入階段就拋例外,
+# uvicorn 的 import_from_string 直接失敗 → 程式根本沒啟動 → Render 不斷重啟。
+# 結果不是「部分功能失效」,而是「整台服務不存在」,連 /price 這種
+# 只讀報價 Excel 的指令都沒有機會被處理。
+#
+# 原則:資料庫是依賴,不是啟動條件。連不上就先起來,之後再補建表。
+# ──────────────────────────────────────────────────────────────
+DB_READY = False
+
+
+def try_init_db(quiet=False):
+    """嘗試建表;成功回 True。失敗只記錄,不往外拋。"""
+    global DB_READY
+    if DB_READY:
+        return True
+    try:
+        init_db()
+        DB_READY = True
+        print("[DB] 建表完成,資料庫功能已就緒")
+        return True
+    except Exception as e:
+        if not quiet:
+            print(f"[DB] 建表失敗(服務仍會啟動,資料庫功能暫停):{str(e)[:200]}")
+        return False
+
+
+def ensure_db():
+    """
+    需要資料庫的地方先呼叫這個。
+    DB 之前連不上、現在恢復了的話,會在這裡自動補建表,不必重新部署。
+    """
+    return try_init_db(quiet=True)
+
+
+try_init_db()
 
 def db_set_await(chat_key: str, await_file: bool):
     with engine.begin() as conn:
@@ -5547,8 +5584,30 @@ def job_bond_coupon_radar():
         except Exception:
             pass
 
+def _job_db_recover():
+    """
+    資料庫斷線後的自動復原。
+    DB 恢復時補建表、把 DB_READY 打開,整個過程不需要重新部署。
+    已經就緒就幾乎零成本直接返回。
+    """
+    if DB_READY:
+        return
+    if ensure_db():
+        print("[DB] 資料庫已恢復連線,相關功能重新啟用")
+        try:
+            tgt = load_targets().get("default")
+            if tgt:
+                line_bot_api.push_message(tgt, TextSendMessage(
+                    text="🔌 資料庫已恢復連線，文章庫／警示／追蹤記錄等功能重新啟用。"))
+        except Exception:
+            pass
+
+
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
+    # DB 自動復原:啟動時連不上的話,每分鐘重試建表,恢復後不必重新部署
+    scheduler.add_job(_job_db_recover, IntervalTrigger(minutes=1, timezone=TZ_TAIPEI_PYTZ),
+                      id="db_recover", name="資料庫復原檢查")
     scheduler.add_job(job_bond_coupon_radar, CronTrigger(day_of_week="mon-fri", hour=6, minute=25, timezone=TZ_TAIPEI_PYTZ), id="bond_coupon_radar", name="海外債配息雷達")
     scheduler.add_job(job_bond_rating_news, CronTrigger(day_of_week="mon-fri", hour=6, minute=50, timezone=TZ_TAIPEI_PYTZ), id="bond_rating_news", name="信評新聞雷達")
     scheduler.add_job(job_drive_cleanup, CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=TZ_TAIPEI_PYTZ), id="drive_cleanup", name="Drive清理")
