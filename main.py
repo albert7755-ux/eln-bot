@@ -406,7 +406,51 @@ TZ_TAIPEI = timezone(timedelta(hours=8))
 # ==============================
 # DB
 # ==============================
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,        # Supabase pooler 會回收閒置連線,我們先一步換掉
+    pool_timeout=10,         # 取不到連線就快點放棄,不要卡住 LINE 的 webhook
+    connect_args={"connect_timeout": 8},   # DB 掛掉時 8 秒內失敗,不要吊著
+)
+
+
+def db_soft(default=None, label=""):
+    """
+    把「非必要的 DB 存取」包成失敗不致命。
+
+    2026/10/06 事故:Supabase 連不上(pooler 回 {:error, :timeout}),
+    結果整隻 bot 全掛——連 /price 這種只讀報價 Excel、根本用不到 DB 的指令
+    也回「我收到訊息但處理時出錯了」。
+    原因是 handle_text_message 一開頭就無條件呼叫 db_get_transcript_cache(),
+    一個「要不要幫你做成PDF」的便利性快取,變成了每一則訊息的硬相依。
+
+    原則:查得到更好,查不到就當作沒有,不要讓它拖垮整個流程。
+    """
+    import functools
+    from sqlalchemy.exc import SQLAlchemyError
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrap(*a, **kw):
+            try:
+                return fn(*a, **kw)
+            except SQLAlchemyError as e:
+                print(f"[DB soft-fail] {label or fn.__name__}: {str(e)[:150]}")
+                return default
+        return wrap
+    return deco
+
+
+def db_alive(timeout_note=""):
+    """DB 現在通不通(給需要明確告知使用者的指令用)"""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        print(f"[DB] 健康檢查失敗{timeout_note}: {str(e)[:120]}")
+        return False
 
 def init_db():
     with engine.begin() as conn:
@@ -528,6 +572,7 @@ def db_invest_get(chat_key: str):
         return row[0] or "", bytes(row[1]) if row[1] else None
     return "", None
 
+@db_soft(default=None, label="寫入逐字稿快取")
 def db_set_transcript_cache(chat_key: str, transcript: str, summary: str):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -536,6 +581,7 @@ def db_set_transcript_cache(chat_key: str, transcript: str, summary: str):
         ON CONFLICT (chat_key) DO UPDATE SET transcript=:t, summary=:s, updated_at=NOW()
         """), {"k": chat_key, "t": transcript[:200000], "s": summary[:50000]})
 
+@db_soft(default=None, label="讀取逐字稿快取")
 def db_get_transcript_cache(chat_key: str):
     with engine.begin() as conn:
         row = conn.execute(text("SELECT transcript, summary FROM transcript_cache WHERE chat_key=:k"), {"k": chat_key}).fetchone()
@@ -543,6 +589,7 @@ def db_get_transcript_cache(chat_key: str):
         return {"transcript": row[0] or "", "summary": row[1] or ""}
     return None
 
+@db_soft(default=None, label="清除逐字稿快取")
 def db_clear_transcript_cache(chat_key: str):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM transcript_cache WHERE chat_key=:k"), {"k": chat_key})
@@ -4151,8 +4198,17 @@ def handle_text_message(event):
     except Exception as e:
         print("[ERROR] handle_text_message:", e)
         print(_traceback.format_exc())
+        # 把「資料庫連不上」跟一般程式錯誤分開講,不然每次都要去翻 log 才知道是哪種
+        from sqlalchemy.exc import SQLAlchemyError
+        if isinstance(e, SQLAlchemyError):
+            _m = ("🔌 資料庫目前連不上，依賴資料庫的功能（文章庫、警示、追蹤記錄、"
+                  "逐字稿）暫時無法使用。\n"
+                  "不經過資料庫的指令仍可正常使用：/price、/find、/coupon、/issuer、/sheet。\n"
+                  "通常幾分鐘內會自動恢復，若持續請看 Render log。")
+        else:
+            _m = "我收到訊息但處理時出錯了。你可以先輸入 /help。"
         try:
-            _bot_api.reply_message(event.reply_token, TextSendMessage(text="我收到訊息但處理時出錯了。你可以先輸入 /help。"))
+            _bot_api.reply_message(event.reply_token, TextSendMessage(text=_m))
         except Exception:
             pass
 
