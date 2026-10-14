@@ -1152,6 +1152,60 @@ async def callback2(request: Request):
             rtoken = ev.get("replyToken", "")
             uid = ev.get("source", {}).get("userId", "")
             print(f"[ELN-G USER] uid={uid} msg={repr(txt[:50])}")
+
+            # ==========================================
+            # /綁定 名字：理專自助登記 LINE 代碼到 agent_line_ids
+            # 新名字直接存；名字已綁給別人就擋下並通知 Albert
+            # ==========================================
+            if txt.startswith("/綁定"):
+                from linebot.models import TextSendMessage as TSM
+                bind_name = txt.replace("/綁定", "", 1).strip()
+                if not bind_name:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="請在指令後面加上你的名字，要跟 ELN 商品登錄網頁「理專」欄位填的一模一樣喔！\n例：/綁定 王小明"))
+                    continue
+                if not uid.startswith("U"):
+                    eln_group_bot_api.reply_message(rtoken, TSM(text="❌ 讀不到你的 LINE 代碼，請直接私訊機器人（不要在群組裡）再試一次。"))
+                    continue
+                albert_uid = os.getenv("LINE_USER_ID", "")
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(sql_text("""
+                        CREATE TABLE IF NOT EXISTS agent_line_ids (
+                            agent_name TEXT PRIMARY KEY,
+                            line_id TEXT NOT NULL,
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )"""))
+                        row = conn.execute(sql_text("SELECT line_id FROM agent_line_ids WHERE agent_name=:n"), {"n": bind_name}).fetchone()
+                        if row and row[0] == uid:
+                            bind_result = "same"
+                        elif row:
+                            bind_result = "conflict"
+                        else:
+                            conn.execute(sql_text("INSERT INTO agent_line_ids (agent_name, line_id) VALUES (:n, :l)"), {"n": bind_name, "l": uid})
+                            bind_result = "ok"
+                except Exception as e:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text=f"❌ 綁定失敗，請稍後再試：{e}"[:4900]))
+                    continue
+
+                if bind_result == "same":
+                    eln_group_bot_api.reply_message(rtoken, TSM(text=f"✅ 「{bind_name}」之前就綁定好了，不用再綁一次 👍"))
+                elif bind_result == "conflict":
+                    eln_group_bot_api.reply_message(rtoken, TSM(text=f"⚠️ 「{bind_name}」這個名字已經綁定給別人了，已通知管理員處理。\n如果是打錯字，請重新輸入正確的名字。"))
+                    if albert_uid:
+                        try:
+                            line_bot_api.push_message(albert_uid, TextSendMessage(
+                                text=f"⚠️ 綁定衝突\n有人想綁定「{bind_name}」，但這個名字已經綁給別人。\n新的代碼：{uid}\n（若確定是本人換帳號，請到 Render Shell 手動更新）"))
+                        except Exception as e:
+                            print(f"[BIND NOTIFY FAIL] {e}")
+                else:
+                    eln_group_bot_api.reply_message(rtoken, TSM(text=f"✅ 綁定成功！\n之後「{bind_name}」的 ELN 商品如果提前出場或到期，系統會自動通知你 📬"))
+                    if albert_uid:
+                        try:
+                            line_bot_api.push_message(albert_uid, TextSendMessage(text=f"📇 新理專綁定：{bind_name}\n代碼：{uid}"))
+                        except Exception as e:
+                            print(f"[BIND NOTIFY FAIL] {e}")
+                continue
+
             _eln_bond_prefixes = tuple("/" + c for c in
                                        (ELN_BOT_BOND_CMDS | ELN_BOT_BOND_HEAVY | {"help", "myid"}))
             if tl.startswith(_eln_bond_prefixes):
