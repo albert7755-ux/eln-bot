@@ -49,6 +49,27 @@ def _num(v, nd=2):
     return "-"
 
 
+def _yrs_disp(b, today=None):
+    """
+    剩餘年期顯示（例:7.6年）。
+    優先用報價檔的「剩餘年期」欄;該欄缺漏或不是數字時,改用到期日現算,
+    兩者都沒有就回 None（不顯示,不要印出 '-年' 這種東西）。
+    """
+    v = b.get("years")
+    try:
+        f = float(str(v).strip())
+        if 0 < f < 100:
+            return f"{round(f, 1):g}年"
+    except (TypeError, ValueError):
+        pass
+    m = b.get("maturity")
+    if m:
+        d = ((m - (today or date.today())).days) / 365.25
+        if d > 0:
+            return f"{round(d, 1):g}年"
+    return None
+
+
 def _ytm_disp(v):
     """
     YTM 顯示:四捨五入、過濾異常值。
@@ -368,10 +389,12 @@ def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=0
                 lines.append(f"── {tag} ──")
             avail = "" if str(a["avail"]) == "有" else f"｜額度:{a['avail']}"
             _y = _ytm_disp(a.get("ytm"))
+            _yr = _yrs_disp(a, today)
             lines.append(
                 f"{a['code'] or '-'}｜{a['name']} {a['ccy']} {_num(a['coupon'])}% {a['freq']}｜{pi_tag(a)}\n"
                 f"  配息{a['coupon_date']:%m/%d}｜Offer {_num(a.get('offer'))}"
-                + (f"｜YTM {_y}" if _y else "") + avail
+                + (f"｜YTM {_y}" if _y else "")
+                + (f"｜{_yr}" if _yr else "") + avail
             )
             if i + 1 >= max_lines and i + 1 < len(ok):
                 lines.append(f"…另有 {len(ok)-i-1} 檔，見 /coupon table")
@@ -452,8 +475,10 @@ def format_just_paid(bonds, today=None, days_back=3, max_lines=5):
         d = b["coupon_date"]
         _y = _ytm_disp(b.get("ytm"))
         lines.append(f"{b.get('code') or '-'}｜{b['name']} {b['ccy']} {_num(b['coupon'])}% {b['freq']}｜{pi_tag(b)}")
+        _yr = _yrs_disp(b, today)
         lines.append(f"  已配息{d:%m/%d}({wd[d.weekday()]})｜Offer {_num(b.get('offer'))}"
-                     + (f"｜YTM {_y}" if _y else ""))
+                     + (f"｜YTM {_y}" if _y else "")
+                     + (f"｜{_yr}" if _yr else ""))
     if len(bonds) > max_lines:
         lines.append(f"…另有 {len(bonds)-max_lines} 檔")
     return "\n".join(lines)
