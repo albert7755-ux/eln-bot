@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy import create_engine, text
 import os
+import re
 from pathlib import Path
 
 router = APIRouter()
@@ -16,9 +17,31 @@ if DATABASE_URL.startswith("postgres://"):
 elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+# 限制連線數，避免吃光資料庫記憶體（跟 main.py 同樣的做法）
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=2, max_overflow=2, pool_recycle=300)
 
 ADMIN_PASSWORD = "0000"
+
+# 理專名字的分隔符號（跟每日排程拆名字的規則一致）
+NAME_SPLIT_RE = r"[,，、/]"
+
+
+def split_names(raw: str) -> list:
+    return [n.strip() for n in re.split(NAME_SPLIT_RE, raw or "") if n.strip()]
+
+
+def notify_albert(msg: str):
+    """用 Albert Claw Bot 傳 LINE 給 Albert；失敗不影響主流程"""
+    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    uid = os.getenv("LINE_USER_ID", "").strip()
+    if not token or not uid:
+        return
+    try:
+        from linebot import LineBotApi
+        from linebot.models import TextSendMessage
+        LineBotApi(token).push_message(uid, TextSendMessage(text=msg[:4900]))
+    except Exception as e:
+        print(f"[ELN Form] 通知 Albert 失敗: {e}")
 
 def init_eln_products_table():
     with engine.begin() as conn:
@@ -109,10 +132,85 @@ async def get_products(agent: str = ""):
     return {"products": result}
 
 
+@router.get("/eln-form/check")
+async def check_bond(bond_id: str = ""):
+    """輸入代號時先檢查是否已有人登錄（不分大小寫）"""
+    bid = (bond_id or "").strip()
+    if not bid:
+        return {"exists": False}
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT bond_id, product_type, currency, trade_date, valuation_date, maturity_date,
+                   t1_code, t1_initial, t2_code, t2_initial, t3_code, t3_initial,
+                   t4_code, t4_initial, t5_code, t5_initial,
+                   coupon_pct, strike_pct, ko_pct, ko_type, ki_pct, ki_type, agent_name
+            FROM eln_products
+            WHERE UPPER(TRIM(bond_id)) = UPPER(:b)
+            LIMIT 1
+        """), {"b": bid}).fetchone()
+    if not row:
+        return {"exists": False}
+    cols = ["bond_id", "product_type", "currency", "trade_date", "valuation_date", "maturity_date",
+            "t1_code", "t1_initial", "t2_code", "t2_initial", "t3_code", "t3_initial",
+            "t4_code", "t4_initial", "t5_code", "t5_initial",
+            "coupon_pct", "strike_pct", "ko_pct", "ko_type", "ki_pct", "ki_type", "agent_name"]
+    p = dict(zip(cols, row))
+    for k in ["trade_date", "valuation_date", "maturity_date"]:
+        if p[k]:
+            p[k] = str(p[k])
+    return {"exists": True, "product": p}
+
+
+@router.post("/eln-form/join")
+async def join_product(request: Request):
+    """已登錄的商品：後來的理專只能把自己的名字加進去（用「、」接在後面），不能改條件"""
+    data = await request.json()
+    bid = (data.get("bond_id") or "").strip()
+    name = (data.get("agent_name") or "").strip()
+    if not bid:
+        raise HTTPException(status_code=400, detail="缺少債券代號")
+    if not name:
+        raise HTTPException(status_code=400, detail="請填寫你的名字")
+    if len(split_names(name)) != 1:
+        raise HTTPException(status_code=400, detail="一次只能加入一個名字，請只填你自己的名字（不要加頓號或逗號）")
+
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT id, bond_id, agent_name FROM eln_products
+            WHERE UPPER(TRIM(bond_id)) = UPPER(:b)
+            LIMIT 1
+            FOR UPDATE
+        """), {"b": bid}).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"找不到代號 {bid}，請改用一般新增")
+        pid, real_bid, old_agents = row[0], row[1], (row[2] or "").strip()
+        names = split_names(old_agents)
+        if name in names:
+            raise HTTPException(status_code=400, detail=f"「{name}」已經在 {real_bid} 的理專名單裡了，不用重複加入")
+        names.append(name)
+        new_agents = "、".join(names)
+        conn.execute(text("UPDATE eln_products SET agent_name=:a, updated_at=NOW() WHERE id=:id"),
+                     {"a": new_agents, "id": pid})
+
+    notify_albert(f"👥 ELN 理專加入\n{name} 加入了 {real_bid}\n目前理專：{new_agents}")
+    return {"success": True, "message": f"✅ 已把「{name}」加入 {real_bid}", "agent_name": new_agents}
+
+
 @router.post("/eln-form/add")
 async def add_product(request: Request):
     """新增商品"""
     data = await request.json()
+    bid_check = (data.get("bond_id") or "").strip()
+    if bid_check:
+        # 送出前再擋一次（不分大小寫），避免 wmgs... / WMGS... 被當成兩檔
+        with engine.begin() as conn:
+            dup = conn.execute(text("SELECT agent_name FROM eln_products WHERE UPPER(TRIM(bond_id)) = UPPER(:b) LIMIT 1"),
+                               {"b": bid_check}).fetchone()
+        if dup:
+            raise HTTPException(
+                status_code=400,
+                detail=f"代號 {bid_check} 已由「{dup[0] or '-'}」登錄，請在代號欄改用「加入我的名字」"
+            )
     try:
         with engine.begin() as conn:
             conn.execute(text("""
@@ -130,7 +228,7 @@ async def add_product(request: Request):
                 :issue_date, :valuation_date, :maturity_date, :agent_name, :line_id
             )
             """), {
-                "bond_id": data.get("bond_id", "").strip(),
+                "bond_id": data.get("bond_id", "").strip().upper(),
                 "trade_date": data.get("trade_date") or None,
                 "product_type": data.get("product_type", "FCN"),
                 "tenure_months": data.get("tenure_months") or None,
@@ -154,10 +252,11 @@ async def add_product(request: Request):
                 "issue_date": data.get("issue_date") or None,
                 "valuation_date": data.get("valuation_date") or None,
                 "maturity_date": data.get("maturity_date") or None,
-                "agent_name": data.get("agent_name", "").strip(),
+                # 多位理專統一用「、」分隔
+                "agent_name": "、".join(split_names(data.get("agent_name", ""))),
                 "line_id": data.get("line_id", "").strip(),
             })
-        return {"success": True, "message": f"✅ {data.get('bond_id')} 新增成功"}
+        return {"success": True, "message": f"✅ {data.get('bond_id', '').strip().upper()} 新增成功"}
     except Exception as e:
         err = str(e)
         if "duplicate key" in err or "UniqueViolation" in err:
