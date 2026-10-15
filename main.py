@@ -260,15 +260,21 @@ def price_movers(days_back=1, threshold_pct=2.0, top_n=15):
               AND n.offer IS NOT NULL AND o.offer IS NOT NULL
               AND n.offer > 1 AND o.offer > 1
         """), {"b": base, "l": latest}).fetchall()
-    movers = []
+    # 逾 30% 的變動多半是報價檔缺漏,但也可能是真的信用事件。
+    # 舊版直接丟掉不顯示,結果真出事時 LINE 上反而看不到;
+    # 改成照樣列出但標註「數據待確認」,由人判斷。
+    movers, suspects = [], []
     for isin, name, ccy, o_off, n_off, o_ytm, n_ytm in rows:
         chg = (n_off - o_off) / o_off * 100
-        if abs(chg) > 30:      # 單日/單週逾30%多為報價缺漏或資料異常,不列入
-            print(f"[BondMovers] 略過異常變動 {name} {o_off}→{n_off} ({chg:+.0f}%)")
+        if abs(chg) < threshold_pct:
             continue
-        if abs(chg) >= threshold_pct:
-            movers.append((chg, isin, name, ccy, o_off, n_off, o_ytm, n_ytm))
-    if not movers:
+        rec = (chg, isin, name, ccy, o_off, n_off, o_ytm, n_ytm)
+        if abs(chg) > 30:
+            print(f"[BondMovers] 異常變動(仍列出) {name} {o_off}→{n_off} ({chg:+.0f}%)")
+            suspects.append(rec)
+        else:
+            movers.append(rec)
+    if not movers and not suspects:
         return "", base, latest
     # 用最新報價檔補專投標籤
     tags = {}
@@ -279,8 +285,11 @@ def price_movers(days_back=1, threshold_pct=2.0, top_n=15):
         pass
     downs = sorted([m for m in movers if m[0] < 0], key=lambda x: x[0])[:top_n]
     ups = sorted([m for m in movers if m[0] > 0], key=lambda x: -x[0])[:top_n]
-    span = "上一份報價" if days_back <= 1 else f"{days_back} 天前"
-    lines = [f"📊 報價異動 ≥ {threshold_pct:g}%（{base:%m/%d} → {latest:%m/%d}，vs {span}）",
+    # 標示實際相隔天數,不要寫「vs 7 天前」——若 7 天前是週末或連假,
+    # 實際抓到的基準日會更早,那句話就會說謊。
+    gap = (latest - base).days
+    span = "vs 上一份報價" if days_back <= 1 else f"相隔 {gap} 天"
+    lines = [f"📊 報價異動 ≥ {threshold_pct:g}%（{base:%m/%d} → {latest:%m/%d}，{span}）",
              f"跌 {len([m for m in movers if m[0] < 0])} 檔｜漲 {len([m for m in movers if m[0] > 0])} 檔"]
     def _fmt(m):
         chg, isin, name, ccy, o_off, n_off, o_ytm, n_ytm = m
@@ -294,6 +303,14 @@ def price_movers(days_back=1, threshold_pct=2.0, top_n=15):
     if ups:
         lines.append("\n📈 漲幅")
         lines += [_fmt(m) for m in ups]
+    if suspects:
+        # 整份報價檔出問題時可能一次幾十檔,全列出會洗版,所以多了就只給總數
+        lines.append(f"\n⚠️ 變動逾 30% {len(suspects)} 檔（數據待確認）")
+        if len(suspects) <= 8:
+            for m in sorted(suspects, key=lambda x: x[0]):
+                lines.append(_fmt(m) + "\n  ⚠️ 幅度異常，可能是報價檔缺漏，也可能是信用事件，請人工複核")
+        else:
+            lines.append("　檔數偏多，較可能是報價檔格式或欄位異常，建議先檢查來源檔案。")
     lines.append("\n※ 依總行報價檔 Offer 計算，跌多可能是買點也可能是信用事件，請搭配 /rating 與 /issuer 查看")
     return "\n".join(lines), base, latest
 
