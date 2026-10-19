@@ -254,7 +254,8 @@ def build_pending_text(individual_messages: list) -> str:
 
 
 # ── 自動推播的重要事件關鍵字（其他保留手動 /send）──
-AUTO_PUSH_KEYWORDS = ["提前出場", "到期獲利", "到期接股", "到期保本"]
+# 「首次跌破」涵蓋：📉 首次跌破 EKI 觀察價、🚨 首次跌破 AKI（都只在第一次跌破那天出現）
+AUTO_PUSH_KEYWORDS = ["提前出場", "到期獲利", "到期接股", "到期保本", "首次跌破"]
 
 
 def is_auto_push_event(status: str) -> bool:
