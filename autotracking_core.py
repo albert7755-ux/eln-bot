@@ -530,6 +530,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
 
             product_status = "Running"
             early_redemption_date = None
+            last_data_date = None  # 回測資料的最後一個交易日（判斷「今天才第一次跌破 AKI」用）
 
             if row["IssueDate"] <= safe_cutoff:
                 max_backtest_date = safe_cutoff
@@ -540,6 +541,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     (history_data.index <= max_backtest_date)
                 ]
                 if not backtest_data.empty:
+                    last_data_date = backtest_data.index.max()
                     for date, prices in backtest_data.iterrows():
                         if product_status == "Early Redemption":
                             break
@@ -570,6 +572,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                             if is_aki and perf < ki_thresh and not asset["hit_ki"]:
                                 asset["hit_ki"] = True
                                 asset["ki_record"] = f"@{price:.2f} ({date_str})"
+                                asset["ki_hit_date"] = date  # 記下第一次跌破 AKI 的日期
                             if not asset["locked_ko"]:
                                 if is_post_nc:
                                     if is_period_end and not is_obs_date:
@@ -702,6 +705,11 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                 detail_cols[f"T{i+1}_Detail"] = cell_text
 
             hit_any_ki = any(a["hit_ki"] for a in assets)
+            # AKI「首次跌破」：整檔商品第一次有標的跌破 KI 的那天，剛好是最新一個交易日
+            # （之後的日子雖然仍是跌破狀態，但不算首次，不會再自動通知）
+            _ki_dates = [a.get("ki_hit_date") for a in assets if a.get("ki_hit_date") is not None]
+            aki_fresh = bool(is_aki and _ki_dates and last_data_date is not None
+                             and min(_ki_dates) == last_data_date)
             all_above_strike_now = all((a["perf"] >= strike_thresh if a["price"] > 0 else False) for a in assets)
             valid_assets = [a for a in assets if a["perf"] > 0]
             worst_perf = min(valid_assets, key=lambda x: x["perf"])["perf"] if valid_assets else 0
@@ -765,7 +773,12 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                     status_msgs.append(f"📉 目前KO: {current_ko_pct}%")
                 if hit_any_ki:
                     status_msgs.insert(0, f"☠️ 已跌破KI ({','.join(hit_ki_list)})")
-                    if notify_ki_daily:
+                    if aki_fresh:
+                        # 第一次跌破 AKI 的當天 → 這個狀態會被自動推播給理專
+                        line_status_short = f"🚨 首次跌破 AKI ({','.join(hit_ki_list)})"
+                        group_status_short = f"🚨 首次跌破 KI ({','.join(hit_ki_list)})"
+                        need_notify = True
+                    elif notify_ki_daily:
                         line_status_short = f"⚠️ 警告：已跌破 KI ({','.join(hit_ki_list)})"
                         group_status_short = f"⚠️ 跌破 KI ({','.join(hit_ki_list)})"
                         need_notify = True
