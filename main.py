@@ -693,7 +693,7 @@ def db_get_report(chat_key: str) -> str | None:
         row = conn.execute(text("SELECT summary FROM eln_last_report WHERE chat_key=:k"), {"k": chat_key}).fetchone()
     return row[0] if row else None
 
-def db_list_bonds(chat_key: str, limit: int = 100) -> list[tuple[str, str, str]]:
+def db_list_bonds(chat_key: str, limit: int = 5000) -> list[tuple[str, str, str]]:
     with engine.begin() as conn:
         rows = conn.execute(text("""
         SELECT bond_id, COALESCE(agent_name, '-'), COALESCE(detail, '')
@@ -1302,7 +1302,7 @@ async def callback2(request: Request):
                     nf = lp[2].strip() if len(lp) > 2 else ""
                 else:
                     nf = lp[1].strip() if len(lp) > 1 else ""
-                bonds = db_list_bonds(ck, limit=200)
+                bonds = db_list_bonds(ck, limit=5000)  # 原本 200，商品超過 200 檔後排在後面的理專會被截掉
                 if not bonds:
                     eln_group_bot_api.reply_message(rtoken, TSM(text="目前尚無資料。"))
                     continue
@@ -2305,7 +2305,7 @@ def handle_text_message(event):
                 name_filter = list_parts[2].strip() if len(list_parts) > 2 else ""
             else:
                 name_filter = list_parts[1].strip() if len(list_parts) > 1 else ""
-            bonds = db_list_bonds(ck, limit=200)
+            bonds = db_list_bonds(ck, limit=5000)  # 原本 200，商品超過 200 檔後排在後面的理專會被截掉
             if not bonds:
                 _bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無已保存結果。請先 /calc 上傳 Excel。"))
                 return
@@ -4756,7 +4756,7 @@ def handle_eln_group_message(event):
                 name_filter = list_parts[2].strip() if len(list_parts) > 2 else ""
             else:
                 name_filter = list_parts[1].strip() if len(list_parts) > 1 else ""
-            bonds = db_list_bonds(ck, limit=200)
+            bonds = db_list_bonds(ck, limit=5000)  # 原本 200，商品超過 200 檔後排在後面的理專會被截掉
             if not bonds:
                 eln_group_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無資料。"))
                 return
