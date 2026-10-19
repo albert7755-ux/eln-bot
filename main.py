@@ -699,7 +699,13 @@ def db_list_bonds(chat_key: str, limit: int = 5000) -> list[tuple[str, str, str]
         SELECT bond_id, COALESCE(agent_name, '-'), COALESCE(detail, '')
         FROM eln_detail WHERE chat_key=:k ORDER BY agent_name ASC, bond_id ASC LIMIT :lim
         """), {"k": chat_key, "lim": int(limit)}).fetchall()
-    return [(r[0], r[1], r[2]) for r in rows] if rows else []
+    items = [(r[0], r[1], r[2]) for r in rows] if rows else []
+    # /list 顯示順序：比價中置頂，再照代號新到舊
+    # （代號 WMGS2609xxxx 前四碼是年月、後面是流水號，代號大 = 比較新；不分大小寫）
+    # 只比數字部分（前綴打錯字如 WNGS 也能排在對的位置），數字相同再比整串
+    items.sort(key=lambda x: (re.sub(r"\D", "", x[0] or ""), (x[0] or "").strip().upper()), reverse=True)
+    items.sort(key=lambda x: bond_status_tag(x[2]) != "")  # 穩定排序：比價中(False)在前
+    return items
 
 def bond_status_tag(detail: str) -> str:
     import re as _re
@@ -2103,16 +2109,52 @@ def handle_text_message(event):
                     _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"編號不正確，請輸入 1～{len(rows)} 或 all"))
                     return
             if cmd == "send":
-                sent, failed = 0, 0
-                for row in targets:
-                    try:
-                        eln_group_bot_api.push_message(row.target_id, TextSendMessage(text=row.msg[:4900]))
-                        sent += 1
-                    except Exception as e:
-                        failed += 1
+                # 收件人跟每日自動推播用同一套規則：
+                # 先用理專名字查 agent_line_ids 對照表（多位理專每位都發），查不到才用通知本身的 LINE ID
+                try:
                     with engine.begin() as conn:
-                        conn.execute(text("DELETE FROM eln_pending_notifications WHERE id=:i"), {"i": row.id})
-                result_text = f"✅ 已發送 {sent} 筆" + (f"，失敗 {failed} 筆" if failed else "")
+                        _id_rows = conn.execute(text("SELECT agent_name, line_id FROM agent_line_ids")).fetchall()
+                    _agent_ids = {r[0]: r[1] for r in _id_rows}
+                except Exception as e:
+                    print(f"[SEND] 讀取 agent_line_ids 失敗: {e}")
+                    _agent_ids = {}
+                sent, failed = 0, 0
+                fail_notes = []
+                sent_pairs = set()  # (商品代號, LINE ID)：同一檔同一人只發一次
+                for row in targets:
+                    names = [n.strip() for n in re.split(r"[,，、/]", row.agent_name or "") if n.strip()]
+                    recips = []
+                    for n in names:
+                        if n in _agent_ids and _agent_ids[n] not in recips:
+                            recips.append(_agent_ids[n])
+                    if not recips and (row.target_id or "").startswith(("U", "C")):
+                        recips.append(row.target_id)
+                    if not recips:
+                        failed += 1
+                        fail_notes.append(f"{row.agent_name or '-'}｜{row.bond_id}：查無 LINE 代碼（請理專先 /綁定）")
+                        continue  # 保留這筆，補好代碼後可以再 /send
+                    ok_any, row_err = False, ""
+                    for t in recips:
+                        if (row.bond_id, t) in sent_pairs:
+                            ok_any = True
+                            continue
+                        try:
+                            eln_group_bot_api.push_message(t, TextSendMessage(text=row.msg[:4900]))
+                            sent_pairs.add((row.bond_id, t))
+                            ok_any = True
+                        except Exception as e:
+                            row_err = str(e)[:80]
+                            print(f"[SEND FAIL] {row.agent_name}｜{row.bond_id}｜{t[:12]}... {e}")
+                    if ok_any:
+                        sent += 1
+                        with engine.begin() as conn:
+                            conn.execute(text("DELETE FROM eln_pending_notifications WHERE id=:i"), {"i": row.id})
+                    else:
+                        failed += 1
+                        fail_notes.append(f"{row.agent_name or '-'}｜{row.bond_id}：LINE 發送失敗 {row_err}")
+                result_text = f"✅ 已發送 {sent} 筆" + (f"，失敗 {failed} 筆（已保留，可再 /send）" if failed else "")
+                if fail_notes:
+                    result_text += "\n\n" + "\n".join("❌ " + x for x in fail_notes[:10])
             else:
                 for row in targets:
                     with engine.begin() as conn:
