@@ -1131,8 +1131,16 @@ async def bond_upload_post(token: str = Form(""), file: UploadFile = File(...)):
 
         import threading
         threading.Thread(target=_post_process, daemon=True).start()
+        try:
+            from island_sync import sync_quotes_to_island
+            island_msg = sync_quotes_to_island(str(BOND_PRICE_FILE),
+                                               snap_date=(snap if snap and snap <= today_ else today_))
+        except Exception as _e:
+            print(f"[IslandSync] {_e}")
+            island_msg = "⚠️ 群島同步失敗，群島會先沿用前一次的價格"
         return _page(f"✅ 報價檔已更新（{fname}）<br>"
-                     "配息雷達、信評比對與報價異動正在背景處理，結果將推播到 LINE。")
+                     "配息雷達、信評比對與報價異動正在背景處理，結果將推播到 LINE。<br>"
+                     + island_msg)
     except Exception as e:
         print(f"[BondUpload] {e}")
         print(_traceback.format_exc()[:500])
