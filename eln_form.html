@@ -256,6 +256,7 @@
     </div>
 
     <div class="section-title">日期設定</div>
+    <div class="hint" style="margin:-4px 0 10px">日期請用<b>西元年</b>（例：2026-10-28），不要填民國年 115。</div>
     <div class="form-grid">
       <div class="form-group">
         <label>發行日</label>
@@ -588,6 +589,20 @@ async function joinProduct(bondId) {
   }
 }
 
+// ── 日期防呆：年份必須在 2000～2100（擋民國年 115、年份打太長 202610）──
+function checkDates(fields) {
+  const errs = [];
+  for (const [id, label] of fields) {
+    const v = (document.getElementById(id)?.value || '').trim();
+    if (!v) continue;
+    const y = parseInt(v.split('-')[0], 10);
+    if (!(y >= 2000 && y <= 2100)) {
+      errs.push(`${label}年份 ${y} 不合理${y < 200 ? '（看起來是民國年）' : ''}`);
+    }
+  }
+  return errs.length ? '❌ ' + errs.join('；') + '，請用西元年，例如 2026-10-28' : '';
+}
+
 // 新增商品
 async function submitAdd() {
   const bondId = document.getElementById('f_bond_id').value.trim().toUpperCase();
@@ -600,6 +615,9 @@ async function submitAdd() {
   if (!bondId) { showMsg('addMsg', '❌ 請填寫債券代號', 'error'); return; }
   if (!tradeDate) { showMsg('addMsg', '❌ 請填寫交易日', 'error'); return; }
   if (!agentName) { showMsg('addMsg', '❌ 請填寫理專名稱', 'error'); return; }
+  const dateErr = checkDates([['f_trade_date','交易日'],['f_issue_date','發行日'],
+                              ['f_valuation_date','最終評價日'],['f_maturity_date','到期日']]);
+  if (dateErr) { showMsg('addMsg', dateErr, 'error'); return; }
 
   const payload = {
     bond_id: bondId,
@@ -840,6 +858,9 @@ function buildEditForm(p) {
 
 async function submitEdit() {
   const g = id => document.getElementById(id)?.value;
+  const dateErr = checkDates([['e_trade_date','交易日'],['e_issue_date','發行日'],
+                              ['e_valuation_date','最終評價日'],['e_maturity_date','到期日']]);
+  if (dateErr) { showMsg('editMsg', dateErr, 'error'); return; }
   const payload = {
     id: editingId,
     password: '0000',
