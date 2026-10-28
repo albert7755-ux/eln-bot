@@ -18,7 +18,9 @@ from linebot.models import TextSendMessage
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError, DBAPIError, TimeoutError as SATimeoutError
 
-from autotracking_core import calculate_from_file, calculate_from_db
+import json
+
+from autotracking_core import calculate_from_file, load_products_from_db, calculate_from_records
 try:
     from eln_storage import download_latest_eln
 except Exception:
@@ -135,6 +137,56 @@ def save_job_log(engine, job_name: str, status: str, detail: str = ""):
         INSERT INTO eln_job_log(job_name, status, detail)
         VALUES (:j, :s, :d)
         """), {"j": job_name, "s": status, "d": detail[:4000]})
+
+
+# ==============================
+# 登錄表每日備份（存在資料庫的 eln_products_backup 表，保留最近 7 天）
+# ==============================
+BACKUP_KEEP_DAYS = 7
+
+
+def save_products_backup(engine, records: list):
+    """每天讀取登錄表成功後存一份備份，並刪掉超過 7 天的舊備份"""
+    data = json.dumps(records, ensure_ascii=False, default=str)
+    with engine.begin() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS eln_products_backup (
+            id BIGSERIAL PRIMARY KEY,
+            row_count INT NOT NULL DEFAULT 0,
+            data TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """))
+        conn.execute(text("INSERT INTO eln_products_backup(row_count, data) VALUES (:n, :d)"),
+                     {"n": len(records), "d": data})
+        conn.execute(text(f"DELETE FROM eln_products_backup WHERE created_at < NOW() - INTERVAL '{BACKUP_KEEP_DAYS} days'"))
+    print(f"[BACKUP] 已備份 {len(records)} 檔商品（保留最近 {BACKUP_KEEP_DAYS} 天）")
+
+
+def load_latest_backup(engine):
+    """讀最近一次的備份，回傳 (records, 備份時間文字)"""
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT data, created_at FROM eln_products_backup
+            ORDER BY created_at DESC LIMIT 1
+        """)).fetchone()
+    if not row:
+        raise ValueError("還沒有任何備份")
+    records = json.loads(row[0])
+    when = row[1].astimezone(TZ_TAIPEI).strftime("%m/%d %H:%M") if row[1] else "?"
+    return records, when
+
+
+def build_skipped_text(skipped: list) -> str:
+    """把沒算到的商品整理成通知（只列前 20 筆）"""
+    if not skipped:
+        return ""
+    lines = [f"⚠️ 以下 {len(skipped)} 檔商品今天沒有計算（/list 查不到），請修正登錄資料後 /runnow："]
+    for s in skipped[:20]:
+        lines.append(f"• {s.get('id', '?')}（{s.get('name', '') or '-'}）：{s.get('reason', '')}")
+    if len(skipped) > 20:
+        lines.append(f"…另外還有 {len(skipped) - 20} 檔")
+    return "\n".join(lines)
 
 
 def ensure_pending_table(engine):
@@ -366,24 +418,68 @@ def main():
     group_chat_key = f"group:{group_id}" if group_id else ""
 
     try:
-        # 優先從 eln_products 資料庫讀取，沒有資料才 fallback 到 Excel
-        # （資料庫讀取遇到連線逾時/瞬斷會自動重試 2 次）
+        # ── 讀取商品資料：資料庫 → 最近一次備份 → 舊 Excel，走到備援一定通知 Albert ──
+        # （只有「讀取」失敗才走備援；讀取成功但計算失敗，就直接報錯，不會改讀舊資料）
         out = None
+        source = "db"
+        source_warning = ""
+        records, skipped_db = None, []
         try:
             print("從 eln_products 資料庫讀取...")
-            out = with_db_retry(
-                calculate_from_db, engine, lookback_days=3, notify_ki_daily=True,
-                label="讀取 eln_products"
-            )
-            print("✅ 從資料庫計算完成")
+            records, skipped_db = with_db_retry(load_products_from_db, engine, label="讀取 eln_products")
+            print(f"✅ 從資料庫讀取 {len(records)} 檔")
+            try:
+                with_db_retry(save_products_backup, engine, records, label="備份登錄表")
+            except Exception as bk_err:
+                print(f"[WARN] 備份失敗（不影響今天的計算）: {bk_err}")
         except Exception as db_err:
-            print(f"[WARNING] DB 讀取失敗({db_err})，改用 Excel...")
-            if download_latest_eln:
+            _first_line = str(db_err).strip().split("\n")[0]
+            _first_line = _first_line.split(") ", 1)[-1] if _first_line.startswith("(") else _first_line
+            db_reason = f"{type(db_err).__name__}: {_first_line[:120]}"
+            print(f"[WARNING] DB 讀取失敗({db_reason})，改用最近一次備份...")
+            try:
+                records, backup_when = with_db_retry(load_latest_backup, engine, label="讀取備份")
+                source = "backup"
+                source_warning = (
+                    f"⚠️ 【ELN 備援通知】今天資料庫讀取失敗，改用 {backup_when} 的備份（{len(records)} 檔）。\n"
+                    f"備份之後才新登錄或修改的商品，今天的結果不會反映。\n"
+                    f"失敗原因：{db_reason}\n"
+                    f"資料庫恢復後請打 /runnow 重新計算。"
+                )
+            except Exception as bk_err:
+                print(f"[WARNING] 備份也讀不到({bk_err})，改用舊 Excel...")
+                if not download_latest_eln:
+                    raise db_err
                 excel_path = download_latest_eln("/tmp/latest_eln.xlsx")
                 print(f"Downloaded latest Excel: {excel_path}")
+                source = "excel"
+                source_warning = (
+                    f"🚨 【ELN 備援通知】資料庫和備份都讀不到，今天改用「舊 Excel」計算！\n"
+                    f"這份 Excel 是 8 月的舊資料，之後用網頁登錄的商品全部缺漏，今天的 /list 結果不完整。\n"
+                    f"資料庫失敗原因：{db_reason}\n"
+                    f"請盡快確認 Supabase 狀態，恢復後打 /runnow。"
+                )
                 out = calculate_from_file(excel_path, lookback_days=3, notify_ki_daily=True)
-            else:
-                raise db_err
+
+        if out is None:
+            out = calculate_from_records(records, lookback_days=3, notify_ki_daily=True)
+        print(f"✅ 計算完成（資料來源：{source}）")
+
+        # 走到備援 → 先通知 Albert（在每日摘要之前）
+        if source_warning:
+            try:
+                push_long_message(line_bot_api, user_id, source_warning)
+            except Exception as e:
+                print(f"[WARN] 備援通知發送失敗: {e}")
+
+        # 有商品因資料問題沒算到 → 通知 Albert 是哪幾檔、什麼原因
+        skipped_all = list(skipped_db) + list(out.get("skipped_rows", []) or [])
+        skipped_text = build_skipped_text(skipped_all)
+        if skipped_text:
+            try:
+                push_long_message(line_bot_api, user_id, skipped_text)
+            except Exception as e:
+                print(f"[WARN] 跳過清單通知發送失敗: {e}")
 
         print("Running build_result...")
         summary, top5_lines, detail_map, agent_name_map = build_result(out)
@@ -432,7 +528,7 @@ def main():
             save_job_log, engine,
             job_name="auto_tracking_cron",
             status="success",
-            detail=f"Saved {len(detail_map)} bonds, auto_sent={len(auto_sent)}, pending={len(remaining_messages)}",
+            detail=f"source={source}, saved {len(detail_map)} bonds, skipped={len(skipped_all)}, auto_sent={len(auto_sent)}, pending={len(remaining_messages)}",
             label="寫入 job log"
         )
 
