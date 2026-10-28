@@ -261,6 +261,16 @@ def first_num(v):
     m = _re.search(r"-?\d+(?:\.\d+)?", str(v).replace(",", ""))
     return float(m.group()) if m else None
 
+# ── PDF 文字區塊字數上限 ──
+# 這份是固定版型,上面長一行下面就會擠掉,所以各區塊有字數上限。
+# 2026/10/27 之前 intro 只有 62 字,一句完整的業務描述根本放不下,
+# 四點裡有三點被切斷。放寬到 100 字,並搭配提示詞要求 AI 寫短且完整,
+# 兩層都在但平常不會觸發;真的超過才由 _fit() 切在標點。
+INTRO_BULLET_MAX = 100
+FIN_COMMENT_MAX = 180
+PEERS_MAX = 170
+CHARTS_COMMENT_MAX = 190
+
 WATERMARK = "本內容僅供參考且不構成要約或要約引誘"
 
 LEGAL_NOTE = ("【本內容僅供參考且不構成要約或要約引誘，特定標的之商品風險、申購之條件、"
@@ -273,6 +283,30 @@ RISK_ITEMS = [
     ("提前買回風險", "具提前買回條款之債券，發行機構可能於市場利率下降時提前買回，投資人將面臨再投資利率較低之風險，實際報酬可能低於預期。"),
     ("流動性風險", "海外債券次級市場流動性可能不足，於到期前出售未必能以合理價格成交，買賣價差亦可能擴大。"),
 ]
+
+
+def _fit(text, limit, tail="…"):
+    """
+    長文字裁切。舊版是硬切在第 N 個字再接「…」,結果常切在詞中間,
+    變成「業務遍…」「信用…」這種斷頭(2026/10/27 高盛那份就是)。
+
+    這版改成往回找最近的標點:
+      切在句號/問號/驚嘆號 → 是完整句子,不加「…」
+      切在逗號/頓號/分號   → 還沒講完,加「…」
+      找不到合適標點       → 才退回硬切
+    """
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t                      # 本來就夠短,原樣回傳
+    cut = t[:limit]
+    keep = limit * 0.6                # 砍到剩不到六成就不值得,寧可硬切
+    pos = max((cut.rfind(m) for m in "。！？"), default=-1)
+    if pos >= keep:
+        return cut[:pos + 1]          # 完整句子收尾,不需要省略號
+    pos = max((cut.rfind(m) for m in "；，、,;"), default=-1)
+    if pos >= keep:
+        return cut[:pos].rstrip("，、；,;") + tail
+    return cut.rstrip("，。；、") + tail
 
 
 def _clean(v, dash="-", nd=2):
@@ -476,7 +510,7 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
     el.append(sec_header("發行機構簡介"))
     if intro_bullets:
         for b_ in intro_bullets[:4]:
-            _b = b_ if len(b_) <= 62 else b_[:60].rstrip("，。；、") + "…"
+            _b = _fit(b_, INTRO_BULLET_MAX)
             el.append(Paragraph("● " + _b, st_intro))
     elif intro:
         el.append(Paragraph(intro, st_intro))
@@ -518,10 +552,10 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
     if fin_comment or peers:
         el.append(Spacer(1, 2.5*mm))
         if fin_comment:
-            _fc = fin_comment if len(fin_comment) <= 140 else fin_comment[:138].rstrip("，。；、") + "…"
+            _fc = _fit(fin_comment, FIN_COMMENT_MAX)
             el.append(Paragraph("<b>財務比率解讀</b>：" + _fc, st_note_box))
         if peers:
-            _pe = peers if len(peers) <= 130 else peers[:128].rstrip("，。；、") + "…"
+            _pe = _fit(peers, PEERS_MAX)
             el.append(Paragraph("<b>同業比較</b>：" + _pe, st_note_box))
     if peer_png:
         try:
@@ -546,8 +580,7 @@ def build_sheet_pdf(out_path, issuer, intro, bonds, fin=None, parent_note="", hi
             disp_w = 138 * mm
             el.append(sec_header("近五季財報趨勢"))
             el.append(RLImage(charts_png, width=disp_w, height=disp_w * ih / iw))
-            if charts_comment and len(charts_comment) > 150:
-                charts_comment = charts_comment[:148].rstrip("，。；、") + "…"
+            charts_comment = _fit(charts_comment, CHARTS_COMMENT_MAX)
             if charts_comment:
                 el.append(Paragraph("<b>圖表解讀</b>：" + charts_comment +
                                     "（資料來源：公開財報，單位為該公司報表幣別之億元）", st_note_box))
