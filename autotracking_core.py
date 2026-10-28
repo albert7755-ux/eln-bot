@@ -193,18 +193,41 @@ def is_us_market_open() -> bool:
 # Core entry
 # =========================
 
-def calculate_from_db(db_engine, lookback_days: int = 3, notify_ki_daily: bool = True):
-    """從 eln_products 資料庫表讀取資料，組成 DataFrame 後呼叫 calculate_from_file 的核心邏輯"""
+DATE_YEAR_MIN, DATE_YEAR_MAX = 2000, 2100  # 合理的日期年份範圍（擋民國年、年份打太長）
+_DATE_FIELDS = [("交易日", "交易日"), ("發行日", "發行日"), ("最終評價日", "最終評價日"), ("到期日", "到期日")]
+
+
+def _check_date_text(val):
+    """日期以文字讀進來後檢查：回傳 (正規化後的 'YYYY-MM-DD' 或 None, 錯誤說明或 '')"""
+    if val is None:
+        return None, ""
+    s = str(val).strip()
+    if s == "":
+        return None, ""
+    m = re.match(r"^(\d{1,7})-(\d{1,2})-(\d{1,2})", s)
+    if not m:
+        return None, f"{s} 不是有效日期"
+    y = int(m.group(1))
+    if not (DATE_YEAR_MIN <= y <= DATE_YEAR_MAX):
+        hint = "（可能是民國年）" if y < 200 else ""
+        return None, f"{s} 年份不合理{hint}"
+    return f"{y:04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}", ""
+
+
+def load_products_from_db(db_engine):
+    """從 eln_products 讀取全部商品。
+    日期一律先用文字讀出來再檢查，所以就算某一筆日期壞掉（例如年份打成 202610），
+    也不會讓整張表讀取失敗；壞掉的那筆會被跳過，並記在 skipped 裡。
+    回傳 (records, skipped)；records 可直接存成備份或交給 calculate_from_records"""
     from sqlalchemy import text as sa_text
-    import io
 
     with db_engine.begin() as conn:
         rows = conn.execute(sa_text("""
-            SELECT bond_id, trade_date, product_type, tenure_months, currency,
+            SELECT bond_id, trade_date::text, product_type, tenure_months, currency,
                    t1_code, t1_initial, t2_code, t2_initial, t3_code, t3_initial,
                    t4_code, t4_initial, t5_code, t5_initial,
                    coupon_pct, strike_pct, ko_pct, ko_type, ki_pct, ki_type,
-                   issue_date, valuation_date, maturity_date, agent_name, line_id
+                   issue_date::text, valuation_date::text, maturity_date::text, agent_name, line_id
             FROM eln_products
             ORDER BY trade_date ASC
         """)).fetchall()
@@ -212,15 +235,9 @@ def calculate_from_db(db_engine, lookback_days: int = 3, notify_ki_daily: bool =
     if not rows:
         raise ValueError("eln_products 表沒有資料")
 
-    cols = ["債券代號","交易日","商品類型","天期 (月)","幣別",
-            "標的1","標的1.1","標的2","標的2.1","標的3","標的3.1",
-            "標的4","標的4.1","標的5","標的5.1",
-            "收益率(年化%)/","執行價格(%)","KO 價格(%)","KO 類型","KI 價格(%)","KI 類型",
-            "發行日","最終評價日","到期日","理專","LINE_ID"]
-
-    records = []
+    records, skipped = [], []
     for r in rows:
-        records.append({
+        rec = {
             "債券代號": r[0],
             "交易日": r[1],
             "商品類型": r[2] or "FCN",
@@ -242,15 +259,43 @@ def calculate_from_db(db_engine, lookback_days: int = 3, notify_ki_daily: bool =
             "到期日": r[23],
             "理專": r[24] or "",
             "LINE_ID": r[25] or "",
-        })
+        }
+        problems = []
+        for key, label in _DATE_FIELDS:
+            norm, err = _check_date_text(rec[key])
+            if err:
+                problems.append(f"{label} {err}")
+            rec[key] = norm
+        if problems:
+            skipped.append({"id": rec["債券代號"], "name": rec["理專"], "reason": "；".join(problems)})
+            print(f"[SKIP] {rec['債券代號']} ({rec['理專']})：{'；'.join(problems)}")
+            continue
+        records.append(rec)
 
+    print(f"[DEBUG] 從 eln_products 讀取 {len(rows)} 筆，可用 {len(records)} 筆，跳過 {len(skipped)} 筆")
+    return records, skipped
+
+
+def calculate_from_records(records: list, lookback_days: int = 3, notify_ki_daily: bool = True,
+                           tmp_path: str = "/tmp/eln_from_db.xlsx"):
+    """把商品清單（資料庫或備份讀出來的）交給 calculate_from_file 計算"""
+    if not records:
+        raise ValueError("沒有可計算的商品資料")
     df = pd.DataFrame(records)
-    print(f"[DEBUG] 從 eln_products 讀取 {len(df)} 筆")
-
-    # 存成臨時 Excel 讓 calculate_from_file 處理
-    tmp_path = "/tmp/eln_from_db.xlsx"
+    # 日期欄是 'YYYY-MM-DD' 文字，轉成日期再存 Excel
+    for key, _ in _DATE_FIELDS:
+        if key in df.columns:
+            df[key] = pd.to_datetime(df[key], errors="coerce")
     df.to_excel(tmp_path, index=False, engine="openpyxl")
     return calculate_from_file(tmp_path, lookback_days=lookback_days, notify_ki_daily=notify_ki_daily)
+
+
+def calculate_from_db(db_engine, lookback_days: int = 3, notify_ki_daily: bool = True):
+    """從 eln_products 資料庫表讀取資料後計算（保留給其他地方相容呼叫用）"""
+    records, skipped = load_products_from_db(db_engine)
+    out = calculate_from_records(records, lookback_days=lookback_days, notify_ki_daily=notify_ki_daily)
+    out["skipped_rows"] = skipped + out.get("skipped_rows", [])
+    return out
 
 
 def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily: bool = True) -> Dict[str, Any]:
@@ -442,11 +487,13 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
     individual_messages_data = []
     group_summary_lines = []
     admin_summary_list = []
+    skipped_rows = []  # 沒算到的商品＋原因（排程會整理後通知 Albert）
 
     for index, row in clean_df.iterrows():
         try:
             if pd.isna(row["IssueDate"]):
                 print(f"[DEBUG] 跳過 row {index}：IssueDate 為空")
+                skipped_rows.append({"id": row.get("ID", "?"), "name": row.get("Name", ""), "reason": "發行日空白"})
                 continue
 
             ki_thresh_val = row["KI_Pct"] if pd.notna(row["KI_Pct"]) else 60.0
@@ -513,6 +560,9 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
 
             if not assets:
                 print(f"[DEBUG] 跳過 row {index} ({row.get('ID','?')})：找不到有效標的")
+                _codes = [row.get(f"T{i}_Code", "") for i in range(1, 6) if row.get(f"T{i}_Code", "")]
+                skipped_rows.append({"id": row.get("ID", "?"), "name": row.get("Name", ""),
+                                     "reason": f"找不到有效標的或進場價（標的：{'、'.join(_codes) or '空白'}）"})
                 continue
 
             months_passed = 0
@@ -900,6 +950,10 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
         except Exception as e:
             print(f"[ERROR] Skipping row {index}: {e}")
             print(traceback.format_exc())
+            try:
+                skipped_rows.append({"id": row.get("ID", "?"), "name": row.get("Name", ""), "reason": f"計算錯誤：{str(e)[:80]}"})
+            except Exception:
+                pass
             continue
 
     results_df = pd.DataFrame(results)
@@ -924,5 +978,6 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
         "report_text": report_text,
         "admin_text": admin_text,
         "results_df": results_df,
-        "individual_messages": individual_messages_data
+        "individual_messages": individual_messages_data,
+        "skipped_rows": skipped_rows,
     }
