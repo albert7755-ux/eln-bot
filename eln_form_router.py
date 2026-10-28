@@ -43,6 +43,29 @@ def notify_albert(msg: str):
     except Exception as e:
         print(f"[ELN Form] 通知 Albert 失敗: {e}")
 
+DATE_FIELDS_ZH = [("trade_date", "交易日"), ("issue_date", "發行日"),
+                  ("valuation_date", "最終評價日"), ("maturity_date", "到期日")]
+
+
+def validate_dates(data: dict):
+    """擋下不合理的日期（民國年、年份打太長等），避免存進去後讓每日排程讀不了"""
+    errs = []
+    for key, label in DATE_FIELDS_ZH:
+        v = (data.get(key) or "").strip() if isinstance(data.get(key), str) else data.get(key)
+        if not v:
+            continue
+        m = re.match(r"^(\d+)-(\d{1,2})-(\d{1,2})$", str(v))
+        if not m:
+            errs.append(f"{label}格式不對（{v}）")
+            continue
+        y = int(m.group(1))
+        if not (2000 <= y <= 2100):
+            hint = "，看起來是民國年" if y < 200 else ""
+            errs.append(f"{label}年份 {y} 不合理{hint}")
+    if errs:
+        raise HTTPException(status_code=400, detail="；".join(errs) + "。請用西元年，例如 2026-10-28")
+
+
 def init_eln_products_table():
     with engine.begin() as conn:
         conn.execute(text("""
@@ -93,11 +116,11 @@ async def get_products(agent: str = ""):
     with engine.begin() as conn:
         if agent:
             rows = conn.execute(text("""
-                SELECT id, bond_id, trade_date, product_type, tenure_months, currency,
+                SELECT id, bond_id, trade_date::text, product_type, tenure_months, currency,
                        t1_code, t1_initial, t2_code, t2_initial, t3_code, t3_initial,
                        t4_code, t4_initial, t5_code, t5_initial,
                        coupon_pct, strike_pct, ko_pct, ko_type, ki_pct, ki_type,
-                       issue_date, valuation_date, maturity_date, agent_name, line_id,
+                       issue_date::text, valuation_date::text, maturity_date::text, agent_name, line_id,
                        created_at
                 FROM eln_products
                 WHERE agent_name ILIKE :a
@@ -105,11 +128,11 @@ async def get_products(agent: str = ""):
             """), {"a": f"%{agent}%"}).fetchall()
         else:
             rows = conn.execute(text("""
-                SELECT id, bond_id, trade_date, product_type, tenure_months, currency,
+                SELECT id, bond_id, trade_date::text, product_type, tenure_months, currency,
                        t1_code, t1_initial, t2_code, t2_initial, t3_code, t3_initial,
                        t4_code, t4_initial, t5_code, t5_initial,
                        coupon_pct, strike_pct, ko_pct, ko_type, ki_pct, ki_type,
-                       issue_date, valuation_date, maturity_date, agent_name, line_id,
+                       issue_date::text, valuation_date::text, maturity_date::text, agent_name, line_id,
                        created_at
                 FROM eln_products
                 ORDER BY trade_date DESC
@@ -140,7 +163,7 @@ async def check_bond(bond_id: str = ""):
         return {"exists": False}
     with engine.begin() as conn:
         row = conn.execute(text("""
-            SELECT bond_id, product_type, currency, trade_date, valuation_date, maturity_date,
+            SELECT bond_id, product_type, currency, trade_date::text, valuation_date::text, maturity_date::text,
                    t1_code, t1_initial, t2_code, t2_initial, t3_code, t3_initial,
                    t4_code, t4_initial, t5_code, t5_initial,
                    coupon_pct, strike_pct, ko_pct, ko_type, ki_pct, ki_type, agent_name
@@ -200,6 +223,7 @@ async def join_product(request: Request):
 async def add_product(request: Request):
     """新增商品"""
     data = await request.json()
+    validate_dates(data)
     bid_check = (data.get("bond_id") or "").strip()
     if bid_check:
         # 送出前再擋一次（不分大小寫），避免 wmgs... / WMGS... 被當成兩檔
@@ -341,6 +365,7 @@ async def update_product(request: Request):
     product_id = data.get("id")
     if not product_id:
         raise HTTPException(status_code=400, detail="缺少商品 ID")
+    validate_dates(data)
     try:
         with engine.begin() as conn:
             conn.execute(text("""
