@@ -122,6 +122,7 @@ BOND_QUERY_HELP = (
     "/coupon → 3個營業日內截止的配息債\n"
     "/coupon 7 → 改看7個營業日內\n"
     "/coupon all → 未來14天全部\n"
+    "/coupon week → 下週配息且仍可申購（依配息日分組）\n"
     "（另附「剛配息完、前手息最低」名單）\n"
     "\n🏖 休市與交割日\n"
     "/holiday → 今年台灣休市日\n"
@@ -142,6 +143,7 @@ BOND_GROUP_HELP = (
     "/coupon → 3個營業日內截止的配息債＋30天內到期\n"
     "/coupon 7 → 改看7個營業日內\n"
     "/coupon all → 未來14天全部\n"
+    "/coupon week → 下週配息且仍可申購（依配息日分組）\n"
     "/coupon table → Excel條件表＋機構簡介（Drive連結）\n"
     "\n💵 報價查詢\n"
     "/price 26070003 → 產品代碼查（WMBB免打）\n"
@@ -4149,6 +4151,30 @@ def handle_text_message(event):
                         bot_api_ref.push_message(chat_key.split(":", 1)[1], TextSendMessage(text=f"❌ 條件表產生失敗：{str(e)[:200]}"))
                 import threading
                 threading.Thread(target=_run_coupon_table, args=(ck, _bot_api, _today), daemon=True).start()
+                return
+            # /coupon week（下週）、/coupon thisweek（本週剩下的）
+            # 依「配息日」分組，只列還來得及申購的；前線要一整週名單時用。
+            # 與每日 06:25 自動推播走不同函式，互不影響。
+            if arg in ("week", "下週", "下周", "nextweek"):
+                _wk_offset = 1
+            elif arg in ("thisweek", "本週", "本周"):
+                _wk_offset = 0
+            else:
+                _wk_offset = None
+            if _wk_offset is not None:
+                try:
+                    from bond_coupon_alert import build_week_preview
+                    msg = build_week_preview(str(BOND_PRICE_FILE), today=_today, offset=_wk_offset)
+                    mtime = datetime.fromtimestamp(BOND_PRICE_FILE.stat().st_mtime, TZ_TAIPEI).strftime("%m/%d %H:%M")
+                    msg += f"\n📎 報價檔更新於 {mtime}｜/coupon 看今日截止｜/coupon table 出Excel"
+                    chunks_w = [msg[i:i+4900] for i in range(0, len(msg), 4900)]
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=chunks_w[0]))
+                    for c in chunks_w[1:]:
+                        _bot_api.push_message(ck.split(":", 1)[1], TextSendMessage(text=c))
+                except Exception as e:
+                    print(f"[CouponWeek ERROR] {e}")
+                    print(_traceback.format_exc())
+                    _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 下週配息清單產生失敗：{str(e)[:200]}"))
                 return
             if arg in ("all", "全部"):
                 days_ahead = None
