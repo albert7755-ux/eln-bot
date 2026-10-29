@@ -324,6 +324,80 @@ def build_alerts(path, today=None, lookahead=LOOKAHEAD_DAYS):
     alerts.sort(key=lambda a: (a["coupon_date"], -a["lag"], a["name"]))
     return alerts
 
+def week_range(today=None, offset=1):
+    """
+    第 offset 週的週一～週五。offset=1 是下週、0 是本週。
+    週日(weekday=6)當天算「本週」還沒結束,所以 offset=1 仍指隔天那一週。
+    """
+    today = today or date.today()
+    mon = today + timedelta(days=(7 * offset - today.weekday()))
+    return mon, mon + timedelta(days=4)
+
+
+def build_week_preview(path, today=None, offset=1, max_per_day=12):
+    """
+    「下週配息、而且現在還來得及申購」的清單,依配息日分組。
+
+    跟 build_alert_message 的差別:
+      - 那支是以「申購截止日」為軸,回答「今天要不要動作」
+      - 這支是以「配息日」為軸,回答「下週哪幾天有配息、哪些還能進」
+    只列 ✅ 還能申購的;已截止的只計入總數,不佔版面。
+    """
+    today = today or date.today()
+    start, end = week_range(today, offset)
+    wd = "一二三四五六日"
+    label = "下週" if offset == 1 else ("本週" if offset == 0 else f"{offset}週後")
+
+    # lookahead 要蓋到該週週五,否則 build_alerts 不會把那幾天算進來
+    look = max(LOOKAHEAD_DAYS, (end - today).days + 1)
+    alerts = [a for a in build_alerts(path, today, look)
+              if start <= a["coupon_date"] <= end]
+    ok = [a for a in alerts
+          if a["status"].startswith("✅")
+          and a["offer"] not in (None, "", 0, "#VALUE!", "#N/A")]
+    gone = len(alerts) - len(ok)
+
+    head = (f"📅 {label}配息且仍可申購（{start:%m/%d}～{end:%m/%d}）：{len(ok)} 檔")
+    if not ok:
+        msg = [head.replace(f"：{len(ok)} 檔", "：無")]
+        if gone:
+            msg.append(f"（{label}共 {len(alerts)} 檔配息，均已過申購截止日）")
+        return "\n".join(msg) + DISCLAIMER
+
+    lines = [head,
+             "📌 配息前申購前手息較高、配息後較低，經濟價值相當，差別在期初支付金額。"]
+
+    by_day = {}
+    for a in ok:
+        by_day.setdefault(a["coupon_date"], []).append(a)
+
+    for d in sorted(by_day):
+        items = sorted(by_day[d], key=lambda a: (a["last_trade"], a["name"]))
+        lines.append(f"\n── {d:%m/%d}({wd[d.weekday()]}) 配息 {len(items)} 檔 ──")
+        for i, a in enumerate(items):
+            if i >= max_per_day:
+                lines.append(f"　…另有 {len(items)-max_per_day} 檔")
+                break
+            _y = _ytm_disp(a.get("ytm"))
+            _yr = _yrs_disp(a, today)
+            cut = ("今日截止" if a["last_trade"] == today
+                   else f"截止{a['last_trade']:%m/%d}({wd[a['last_trade'].weekday()]})")
+            if a.get("holiday_shift"):
+                cut += "※逢連假提前"
+            avail = "" if str(a["avail"]) == "有" else f"｜額度:{a['avail']}"
+            lines.append(
+                f"{a['code'] or '-'}｜{a['name']} {a['ccy']} {_num(a['coupon'])}% {a['freq']}｜{pi_tag(a)}\n"
+                f"  Offer {_num(a.get('offer'))}"
+                + (f"｜YTM {_y}" if _y else "")
+                + (f"｜{_yr}" if _yr else "")
+                + f"｜{cut}" + avail
+            )
+
+    if gone:
+        lines.append(f"\n（另有 {gone} 檔{label}配息，但申購截止日已過）")
+    return "\n".join(lines) + DISCLAIMER
+
+
 def build_alert_message(path, today=None, lookahead=LOOKAHEAD_DAYS, days_ahead=0, max_lines=12, maturity_days=30):
     """
     回傳給 LINE 用的純文字訊息。順序:
