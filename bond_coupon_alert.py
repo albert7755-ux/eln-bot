@@ -204,7 +204,7 @@ def read_bonds(path):
             elif h.startswith("產品代碼"): col.setdefault("code", i)
             elif h == "債券名稱": col.setdefault("name", i)
             elif h == "幣別": col.setdefault("ccy", i)
-            elif h == "債券評等": col.setdefault("sp", i)
+            elif h.startswith("債券評等") or h.startswith("信用評等") or h == "評等": col.setdefault("sp", i)
             elif h == "債券順位": col.setdefault("seniority", i)
             elif h == "BidPrice": col.setdefault("bid", i)
             elif h == "剩餘年期": col.setdefault("years", i)
@@ -219,6 +219,12 @@ def read_bonds(path):
             elif h.startswith("最低申購"): col.setdefault("min_amt", i)
             elif h.startswith("本日有"): col.setdefault("avail", i)
             elif h == "交割日": col.setdefault("settle", i)
+        # 評等欄找不到時，改用下一列（評等副標題列）的「S&P」位置
+        if "sp" not in col and hdr_idx + 1 < len(rows) and rows[hdr_idx + 1]:
+            for i, c in enumerate(rows[hdr_idx + 1]):
+                if isinstance(c, str) and ("S&P" in c.upper() or "標準普爾" in c):
+                    col["sp"] = i
+                    break
         for r in rows[hdr_idx + 2:]:          # 跳過評等副標題列
             if not r or not r[col["isin"]]:
                 continue
