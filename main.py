@@ -1190,6 +1190,12 @@ async def callback2(request: Request):
             # /綁定 名字：理專自助登記 LINE 代碼到 agent_line_ids
             # 新名字直接存；名字已綁給別人就擋下並通知 Albert
             # ==========================================
+            if txt.startswith("/綁定核准"):
+                # 核准指令只在 Albert Claw Bot 有效，ELN Autotracking 這邊不處理
+                from linebot.models import TextSendMessage as TSM
+                eln_group_bot_api.reply_message(rtoken, TSM(text="此指令請到 Albert Claw Bot 使用。"))
+                continue
+
             if txt.startswith("/綁定"):
                 from linebot.models import TextSendMessage as TSM
                 bind_name = txt.replace("/綁定", "", 1).strip()
@@ -1213,6 +1219,19 @@ async def callback2(request: Request):
                             bind_result = "same"
                         elif row:
                             bind_result = "conflict"
+                            # 記下待核准的新代碼（同名字再申請一次就覆蓋成最新的）
+                            conn.execute(sql_text("""
+                            CREATE TABLE IF NOT EXISTS agent_bind_pending (
+                                agent_name TEXT PRIMARY KEY,
+                                new_line_id TEXT NOT NULL,
+                                requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                            )"""))
+                            conn.execute(sql_text("""
+                            INSERT INTO agent_bind_pending (agent_name, new_line_id, requested_at)
+                            VALUES (:n, :l, NOW())
+                            ON CONFLICT (agent_name) DO UPDATE
+                            SET new_line_id = EXCLUDED.new_line_id, requested_at = NOW()
+                            """), {"n": bind_name, "l": uid})
                         else:
                             conn.execute(sql_text("INSERT INTO agent_line_ids (agent_name, line_id) VALUES (:n, :l)"), {"n": bind_name, "l": uid})
                             bind_result = "ok"
@@ -1227,7 +1246,7 @@ async def callback2(request: Request):
                     if albert_uid:
                         try:
                             line_bot_api.push_message(albert_uid, TextSendMessage(
-                                text=f"⚠️ 綁定衝突\n有人想綁定「{bind_name}」，但這個名字已經綁給別人。\n新的代碼：{uid}\n（若確定是本人換帳號，請到 Render Shell 手動更新）"))
+                                text=f"⚠️ 綁定衝突\n有人想綁定「{bind_name}」，但這個名字已經綁給別人。\n新的代碼：{uid}\n（若確定是本人換帳號，請在這裡輸入：/綁定核准 {bind_name}）"))
                         except Exception as e:
                             print(f"[BIND NOTIFY FAIL] {e}")
                 else:
@@ -1981,6 +2000,80 @@ def handle_text_message(event):
         if is_group and not tl.startswith("/"):
             return
             
+        # ==========================================
+        # /綁定核准 名字：Albert 核准理專換綁 LINE 代碼
+        # 只有 Albert 本人、且在 Albert Claw Bot 打才有效
+        # ==========================================
+        if text_raw.startswith("/綁定核准"):
+            if not is_albert or _is_eln_channel:
+                return
+            approve_name = text_raw.replace("/綁定核准", "", 1).strip()
+            try:
+                with engine.begin() as conn:
+                    conn.execute(sql_text("""
+                    CREATE TABLE IF NOT EXISTS agent_line_ids (
+                        agent_name TEXT PRIMARY KEY,
+                        line_id TEXT NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )"""))
+                    conn.execute(sql_text("""
+                    CREATE TABLE IF NOT EXISTS agent_bind_pending (
+                        agent_name TEXT PRIMARY KEY,
+                        new_line_id TEXT NOT NULL,
+                        requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )"""))
+                    if not approve_name:
+                        # 沒給名字：列出目前待核准的名單
+                        rows = conn.execute(sql_text(
+                            "SELECT agent_name, new_line_id FROM agent_bind_pending ORDER BY requested_at"
+                        )).fetchall()
+                        if rows:
+                            msg = "📋 待核准的綁定：\n" + "\n".join(f"• {r[0]}（新代碼 {r[1]}）" for r in rows) \
+                                  + "\n\n請輸入：/綁定核准 名字"
+                        else:
+                            msg = "目前沒有待核准的綁定。\n用法：/綁定核准 名字"
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(text=msg[:4900]))
+                        return
+                    pend = conn.execute(sql_text(
+                        "SELECT new_line_id FROM agent_bind_pending WHERE agent_name=:n"
+                    ), {"n": approve_name}).fetchone()
+                    if not pend:
+                        _bot_api.reply_message(event.reply_token, TextSendMessage(
+                            text=f"找不到待核准的綁定：「{approve_name}」"))
+                        return
+                    new_id = pend[0]
+                    old_row = conn.execute(sql_text(
+                        "SELECT line_id FROM agent_line_ids WHERE agent_name=:n"
+                    ), {"n": approve_name}).fetchone()
+                    old_id = old_row[0] if old_row else "（原本沒有）"
+                    conn.execute(sql_text("""
+                    INSERT INTO agent_line_ids (agent_name, line_id, updated_at)
+                    VALUES (:n, :l, NOW())
+                    ON CONFLICT (agent_name) DO UPDATE
+                    SET line_id = EXCLUDED.line_id, updated_at = NOW()
+                    """), {"n": approve_name, "l": new_id})
+                    conn.execute(sql_text("DELETE FROM agent_bind_pending WHERE agent_name=:n"),
+                                 {"n": approve_name})
+            except Exception as e:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 核准失敗：{e}"[:4900]))
+                return
+
+            notify_note = ""
+            if eln_group_bot_api:
+                try:
+                    eln_group_bot_api.push_message(new_id, TextSendMessage(
+                        text=f"✅ 綁定成功！\n管理員已核准「{approve_name}」綁定到你的 LINE。\n"
+                             f"之後「{approve_name}」的 ELN 商品如果提前出場或到期，系統會自動通知你 📬"))
+                    notify_note = "\n📨 已用 ELN Autotracking 通知理專"
+                except Exception as e:
+                    print(f"[BIND APPROVE NOTIFY FAIL] {e}")
+                    notify_note = f"\n⚠️ 通知理專失敗：{e}"
+            else:
+                notify_note = "\n⚠️ ELN Autotracking 機器人未設定，沒有通知理專"
+            _bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=(f"✅ 已核准「{approve_name}」的綁定\n舊代碼：{old_id}\n→ 新代碼：{new_id}" + notify_note)[:4900]))
+            return
+
         # ==========================================
         # 內規專屬指令攔截 (使用 Claude 全文理解，完美舉一反三)
         # ==========================================
