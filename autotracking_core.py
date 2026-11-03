@@ -739,6 +739,10 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                         if 0 < dist_ki <= 3:
                             cell_text += f" ⚠️距KI {dist_ki:.1f}%"
                             near_ki_alerts.append(f"{asset['code']} 距KI {dist_ki:.1f}%")
+                    # 有 KI 的商品也顯示執行價（BEN 的 KI 就是執行價，相同就不重複顯示）
+                    if abs(strike_thresh - ki_thresh) > 1e-9:
+                        strike_price_display = round(asset["initial"] * strike_thresh, 2)
+                        cell_text += f"\n 執行價: {strike_price_display} ({strike_thresh_val:.0f}%)"
                 else:
                     strike_price_display = round(asset["initial"] * strike_thresh, 2)
                     cell_text += f"\n Strike: {strike_price_display} ({strike_thresh_val:.0f}%)"
