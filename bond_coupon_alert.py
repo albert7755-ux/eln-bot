@@ -219,6 +219,7 @@ def read_bonds(path):
             elif h.startswith("最低申購"): col.setdefault("min_amt", i)
             elif h.startswith("本日有"): col.setdefault("avail", i)
             elif h == "交割日": col.setdefault("settle", i)
+            elif h.upper().startswith("LTV"): col.setdefault("ltv", i)
         # 評等欄找不到時，改用下一列（評等副標題列）的「S&P」位置
         if "sp" not in col and hdr_idx + 1 < len(rows) and rows[hdr_idx + 1]:
             for i, c in enumerate(rows[hdr_idx + 1]):
@@ -248,7 +249,7 @@ def read_bonds(path):
                 remark=str(g("remark") or "").strip(),
                 ccy=g("ccy"), coupon=g("coupon"), freq=str(g("freq") or "").strip(),
                 offer=g("offer"), ytm=g("ytm"), maturity=to_date(g("maturity")),
-                min_amt=g("min_amt"), avail=g("avail"), sheet=name,
+                min_amt=g("min_amt"), avail=g("avail"), ltv=g("ltv"), sheet=name,
                 sheets=set([name]),
             )
             if isin in bonds:
