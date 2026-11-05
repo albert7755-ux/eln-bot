@@ -230,13 +230,14 @@ def save_price_history(snap_date=None, path=None):
                      "o": first_num(b["offer"]), "bd": first_num(b.get("bid")),
                      "y": first_num(b["ytm"]), "m": b["maturity"],
                      "l": first_num(b.get("ltv")), "cp": first_num(b.get("coupon")),
-                     "ma": first_num(b.get("min_amt"))})
+                     "ma": first_num(b.get("min_amt")),
+                     "pc": (str(b.get("code")).strip() if b.get("code") else None)})
     with engine.begin() as conn:
-        conn.execute(text("""INSERT INTO bond_price_history(snap_date, isin, bond_name, ccy, offer, bid, ytm, maturity, ltv, coupon, min_amt)
-                             VALUES (:d,:i,:n,:c,:o,:bd,:y,:m,:l,:cp,:ma)
+        conn.execute(text("""INSERT INTO bond_price_history(snap_date, isin, bond_name, ccy, offer, bid, ytm, maturity, ltv, coupon, min_amt, prod_code)
+                             VALUES (:d,:i,:n,:c,:o,:bd,:y,:m,:l,:cp,:ma,:pc)
                              ON CONFLICT (snap_date, isin) DO UPDATE SET bond_name=EXCLUDED.bond_name, ccy=EXCLUDED.ccy,
                              offer=EXCLUDED.offer, bid=EXCLUDED.bid, ytm=EXCLUDED.ytm, maturity=EXCLUDED.maturity,
-                             ltv=EXCLUDED.ltv, coupon=EXCLUDED.coupon, min_amt=EXCLUDED.min_amt"""), rows)
+                             ltv=EXCLUDED.ltv, coupon=EXCLUDED.coupon, min_amt=EXCLUDED.min_amt, prod_code=EXCLUDED.prod_code"""), rows)
     return len(rows)
 
 def price_movers(days_back=1, threshold_pct=2.0, top_n=15):
@@ -494,6 +495,8 @@ def init_db():
         ALTER TABLE bond_price_history ADD COLUMN IF NOT EXISTS coupon DOUBLE PRECISION;"""))
         conn.execute(text("""
         ALTER TABLE bond_price_history ADD COLUMN IF NOT EXISTS min_amt DOUBLE PRECISION;"""))
+        conn.execute(text("""
+        ALTER TABLE bond_price_history ADD COLUMN IF NOT EXISTS prod_code TEXT;"""))
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS bond_issuer_profile (
             issuer TEXT PRIMARY KEY, profile TEXT NOT NULL,
