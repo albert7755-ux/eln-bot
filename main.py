@@ -1496,7 +1496,7 @@ def chat_key_of(event) -> str:
 # ==============================
 # Adapter: core -> (summary, top5, detail_map)
 # ==============================
-def run_autotracking(file_path: str, lookback_days: int = 3, notify_ki_daily: bool = True):
+def run_autotracking(file_path: str, lookback_days: int = 2, notify_ki_daily: bool = True):
     from auto_tracking_cron import build_result
     out = calculate_from_file(file_path=file_path, lookback_days=lookback_days, notify_ki_daily=notify_ki_daily)
     return build_result(out)

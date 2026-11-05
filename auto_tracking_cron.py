@@ -459,10 +459,10 @@ def main():
                     f"資料庫失敗原因：{db_reason}\n"
                     f"請盡快確認 Supabase 狀態，恢復後打 /runnow。"
                 )
-                out = calculate_from_file(excel_path, lookback_days=3, notify_ki_daily=True)
+                out = calculate_from_file(excel_path, lookback_days=2, notify_ki_daily=True)
 
         if out is None:
-            out = calculate_from_records(records, lookback_days=3, notify_ki_daily=True)
+            out = calculate_from_records(records, lookback_days=2, notify_ki_daily=True)
         print(f"✅ 計算完成（資料來源：{source}）")
 
         # 走到備援 → 先通知 Albert（在每日摘要之前）
