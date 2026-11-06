@@ -192,9 +192,10 @@ send.onclick=async()=>{{
         if len(raw) > MAX_UPLOAD_BYTES:
             return JSONResponse({"ok": False, "msg": "❌ 圖片超過 10MB"})
         try:
-            from PIL import Image
+            from PIL import Image, ImageOps
             img = Image.open(io.BytesIO(raw))
             img.load()
+            img = ImageOps.exif_transpose(img)  # 手機照片依拍攝方向轉正
             img = img.convert("RGB")
         except Exception:
             return JSONResponse({"ok": False, "msg": "❌ 這不是可讀取的圖片檔"})
