@@ -422,6 +422,13 @@ from articles import router as articles_router
 app.include_router(articles_router)
 from eln_form_router import router as eln_form_router
 app.include_router(eln_form_router)
+# 配息雷達文字頁 /radar、圖片上傳 /radar-upload（ChatGPT 生圖後推回 LINE）
+try:
+    from radar_image import register as _radar_register, save_radar_text as _save_radar_text
+    _radar_register(app, line_bot_api)
+except Exception as _e:
+    print(f"[RadarImage] 載入失敗: {_e}")
+    _save_radar_text = None
 
 VERSION = "eln-autotracking-db-v3-2026-03-05"
 TZ_TAIPEI = timezone(timedelta(hours=8))
@@ -5820,6 +5827,11 @@ def job_bond_coupon_radar():
         msg += f"\n📎 報價檔更新於 {mtime:%m/%d %H:%M}｜/coupon all 看全部｜/coupon table 出Excel"
         if age_days >= 3:
             msg += f"（已 {age_days} 天未更新，記得丟新檔）"
+        if _save_radar_text:
+            try:
+                _save_radar_text(msg)  # 存一份給 /radar 網頁（Mac mini 生圖用）
+            except Exception as e:
+                print(f"[RadarImage save] {e}")
         ok_n = 0
         for rid in recipients:
             try:
