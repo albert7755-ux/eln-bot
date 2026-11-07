@@ -291,15 +291,16 @@ def format_sector(rows, today, ccy="USD", file_time=""):
         return "目前沒有足夠資料計算產業概況(需先完成發行機構產業分類)。"
     has_sp = any(r["med_spread"] is not None for r in rows)
     has_chg = any(r["avg_chg30"] is not None for r in rows)
-    lines = [f"🏭 {today:%m/%d} 產業概況（{ccy}，利差窄→寬）", ""]
+    lines = [f"🏭 {today:%m/%d} 貨架產業概況（{ccy}，利差窄→寬）", ""]
     for r in rows:
-        seg = [f"{r['sector']}（{r['n']}檔）", f"YTM {r['med_ytm']:.2f}"]
+        _yrs = f"，平均{r['avg_years']:.1f}年" if r.get("avg_years") is not None else ""
+        seg = [f"{r['sector']}（{r['n']}檔{_yrs}）", f"YTM {r['med_ytm']:.2f}"]
         if r["med_cy"] is not None: seg.append(f"當期 {r['med_cy']:.2f}")
         if r["med_spread"] is not None: seg.append(f"較美債 {r['med_spread']:+.0f}bp")
-        if r["avg_chg30"] is not None: seg.append(f"近30天 {r['avg_chg30']:+.1f}%")
+        if r["avg_chg30"] is not None: seg.append(f"近30天價格 {r['avg_chg30']:+.1f}%")
         lines.append("▪ " + "｜".join(seg))
     lines.append("")
-    note = ("利差＝每檔債券 YTM 減「同剩餘年期」的美債殖利率（美債曲線 3M/2Y/5Y/10Y/20Y/30Y 內插），"
+    note = ("僅計入總行報價檔上架的債券，非市場產業指數。利差＝每檔債券 YTM 減「同剩餘年期」的美債殖利率（美債曲線 3M/2Y/5Y/10Y/20Y/30Y 內插），"
             "再取該產業中位數；利差窄代表市場要求的風險補償低。")
     if has_chg:
         note += "近30天為該產業 Offer 平均變化，正值代表價格上漲(殖利率下行)。"
@@ -364,13 +365,18 @@ def weekly_review(path, today, movers_txt="", new_isins=(), gone_isins=(), secto
 
     # 4) 產業概況(可選)
     if sector_rows:
-        lines.append("🏭 產業利差（USD，窄→寬）")
+        lines.append("🏭 貨架產業利差（USD，窄→寬）")
         for r in sector_rows[:8]:
             seg = f"{r['sector']} {r['med_ytm']:.2f}%"
-            if r["med_spread"] is not None: seg += f"（較美債 {r['med_spread']:+.0f}bp）"
+            extra = []
+            if r["med_spread"] is not None: extra.append(f"較美債 {r['med_spread']:+.0f}bp")
+            extra.append(f"{r['n']}檔")
+            if r.get("avg_years") is not None: extra.append(f"平均{r['avg_years']:.1f}年")
+            seg += "（" + "，".join(extra) + "）"
             if r["avg_chg30"] is not None: seg += f" 近30天價格 {r['avg_chg30']:+.1f}%"
             lines.append("・" + seg)
-        lines.append("※ 前面％為產業 YTM 中位數；較美債＝與「同剩餘年期」美債殖利率的利差；"
+        lines.append("※ 僅計入總行報價檔上架的債券，非市場產業指數；檔數少時易受單一債券影響。"
+                     "前面％為產業 YTM 中位數；較美債＝與「同剩餘年期」美債殖利率的利差；"
                      "近30天價格＝Offer 價格平均漲跌（正值＝價格漲、殖利率降）。")
         lines.append("")
     lines.append("※ 依總行報價檔 Offer 計算，僅供內部參考，非投資建議。")
