@@ -760,6 +760,73 @@ def get_weekday_topic() -> str:
     return topics[weekday]
 
 
+def get_weekday_action_angle() -> str:
+    """【今日操作思維】每天指定不同的切入角度,避免天天寫成同一套結論"""
+    tw_tz = pytz.timezone("Asia/Taipei")
+    weekday = datetime.now(tw_tz).weekday()
+    angles = {
+        0: "本週事件:本週有哪些數據、央行會議或公債標售,市場在等什麼,事件前後我們可以留意的地方",
+        1: "曲線與天期:短率和長率這陣子各自怎麼走,不同天期的債券在目前環境下各有什麼特性",
+        2: "歷史對比:拿今天的具體數字跟過去某個時點比較(例如一年前、2021年、上次降息前),說明這個水準的意義",
+        3: "定價與基本面的落差:市場目前對降息/升息的定價,和最新數據或官員說法之間有沒有落差",
+        4: "配置面:從存續期間、幣別、信用品質或配息節奏的角度,看目前市況對客戶既有部位的意義",
+        5: "本週變化:這一週跟上週比,什麼真的變了、什麼其實沒變",
+        6: "本週變化:這一週跟上週比,什麼真的變了、什麼其實沒變",
+    }
+    return angles[weekday]
+
+
+def _extract_action_from_report(report_text: str) -> str:
+    """從存檔的成品日報抓出【今日操作思維】那段(到下一個段落或結尾為止)"""
+    t = report_text or ""
+    i = t.find("🧭 今日操作思維")
+    if i < 0:
+        return ""
+    body = t[i + len("🧭 今日操作思維"):]
+    j = body.find("🔄 另一種看法")
+    if j >= 0:
+        body = body[:j]
+    return body.strip()
+
+
+def get_recent_actions(days: int = 5) -> list:
+    """
+    從 bond_daily_report_cache 抓前幾天(不含今天)的【今日操作思維】,
+    同一天若跑過多次(手動 /bonddaily)只取當天最後一份。
+    讀不到資料庫就回空清單,不影響日報產生。
+    """
+    if not DATABASE_URL:
+        return []
+    try:
+        from sqlalchemy import create_engine, text
+        db_url = DATABASE_URL
+        if db_url.startswith("postgres://"):
+            db_url = db_url.replace("postgres://", "postgresql+psycopg://", 1)
+        elif db_url.startswith("postgresql://"):
+            db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+        engine = create_engine(db_url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT DISTINCT ON ((created_at AT TIME ZONE 'Asia/Taipei')::date)
+                       (created_at AT TIME ZONE 'Asia/Taipei')::date AS d, report_text
+                FROM bond_daily_report_cache
+                WHERE (created_at AT TIME ZONE 'Asia/Taipei')::date
+                      < (NOW() AT TIME ZONE 'Asia/Taipei')::date
+                ORDER BY (created_at AT TIME ZONE 'Asia/Taipei')::date DESC, created_at DESC
+                LIMIT :n
+            """), {"n": days}).fetchall()
+        engine.dispose()
+        out = []
+        for d, rep in rows:
+            a = _extract_action_from_report(rep)
+            if a:
+                out.append((d.strftime("%m/%d"), a))
+        return out
+    except Exception as e:
+        print(f"[BondDaily] 讀取前幾天操作思維失敗(略過): {e}")
+        return []
+
+
 def _looks_truncated(text: str) -> bool:
     """
     收尾沒有句點/驚嘆號/問號,又不是短句,就當作寫到一半被砍。
@@ -782,6 +849,21 @@ def generate_bond_commentary(snapshot_text: str) -> str:
     focus, focus_risk = get_daily_focus_full()
     if focus:
         print(f"[BondDaily] 當期主打方向: {focus}｜必講風險: {focus_risk or '(未設定)'}")
+    action_angle = get_weekday_action_angle()
+    recent_actions = get_recent_actions(5)
+    print(f"[BondDaily] 今日操作思維角度: {action_angle[:12]}…｜取得前 {len(recent_actions)} 天操作思維")
+    if recent_actions:
+        recent_block = (
+            "【前幾天已經寫過的『今日操作思維』——今天嚴禁重複】\n"
+            + "\n\n".join(f"〔{d}〕\n{a}" for d, a in recent_actions)
+            + "\n\n以上是前幾天的內容。今天的【今日操作思維】必須和它們明顯不同:"
+            "不可重複同樣的觀點或結論(例如又寫一次『殖利率在高位、進場收益率有吸引力』)、"
+            "不可沿用同樣的句型或開頭、不可換句話說把同一件事再講一次。"
+            "若當期主打方向的連結句前幾天已經用過某個角度,今天換另一個角度。"
+            "寫完後逐段自我檢查:這段話放在前幾天的任何一份裡也說得通嗎?說得通就代表太通用,刪掉重寫。\n"
+        )
+    else:
+        recent_block = ""
 
     prompt = (
         "你是銀行固定收益科的債券晨報編輯,讀者是分行的理財同仁,"
@@ -874,13 +956,16 @@ def generate_bond_commentary(snapshot_text: str) -> str:
         "「同樣一筆錢,現在買到的年息比兩年前多不少」「殖利率站在相對高位」等,"
         "也可以用具體對比(例如與2021年同天期殖利率相比)取代形容詞。"
         "不要浮誇、不要emoji、不要驚嘆號。\n"
-        "基調要正面、有建設性:同樣的市況,優先從「機會與可著力之處」的角度切入,"
-        "例如殖利率處於高位代表新資金的進場收益率具吸引力、波動代表客戶更需要專業陪伴、"
-        "事件前的觀望期正是盤點客戶配置與需求的好時機——把市況轉譯成我們今天「可以做什麼」,"
-        "而不是渲染風險或潑冷水;若市場確實偏空,誠實陳述之餘仍要給一個正面的行動視角。"
-        "每天換不同角度,避免固定套路:具體數字的意義、歷史水準對比、"
-        "即將發生的事件與其影響、市場定價與基本面的落差、配置面的可著力之處,"
-        "挑最適合今天新聞的一種,用直述句寫出來。"
+        "基調要正面、有建設性:把市況轉譯成我們今天「可以做什麼」,"
+        "而不是渲染風險或潑冷水;若市場確實偏空,誠實陳述之餘仍要給一個正面的行動視角。\n"
+        f"  【今天指定的切入角度】{action_angle}。"
+        "整段以這個角度為主軸來寫,不要又回到「殖利率高、進場收益率有吸引力」這種每天都成立的通用結論。\n"
+        "  【必須綁當天新聞】第一段一定要引用『今天才有』的具體事件或數字"
+        "(來自上面【殖利率動向解讀】找到的新聞、或數據區今天的變動),"
+        "讓人一看就知道這是今天寫的、不是昨天的複製品。"
+        "每天都成立的敘述(殖利率處於相對高位、票息有吸引力、波動需要專業陪伴、適合盤點配置)"
+        "不能當作任何一段的主要觀點;只有當天殖利率真的創下新高或新低時,才可以提水準本身。\n"
+        + recent_block +
         "正面不等於樂觀喊多:對市場方向仍要保留不確定性,禁止「正是時機」「趨勢已確立」「必然」"
         "這類果決斷言,行情永遠可能反向,語氣要留餘地;避免固定句型,"
         "不要每天都用「值得留意」「建議關注」這類結尾;"
@@ -936,13 +1021,20 @@ def generate_bond_commentary(snapshot_text: str) -> str:
         "- 禁止空泛的呼籲句和集體喊話,例如「大家來想想」「不妨思考」「讓我們一起」「值得我們深思」;"
         "要嘛給具體的觀察或做法,要嘛不寫。\n"
         "- 純文字輸出,禁用任何markdown符號(**粗體**、#標題、-條列),LINE不支援會變亂碼。\n"
-        "- 總長度精簡,適合手機閱讀:四段文字合計約350~480字,寧可少寫也不要湊字數,但每段不可空白。\n\n"
+        "5.【另一種看法】80~120字,一段文字,不加任何符號。\n"
+        "   先用半句話點出今天市場的主流解讀,接著寫『市場上持相反或不同看法的人怎麼想』:"
+        "他們的理由是什麼、看的是哪個數據或哪個風險。"
+        "要有具體依據(某個數據、某家機構或官員的說法、某個歷史經驗),不可空泛地說「也有人看法不同」。"
+        "立場中立,只呈現另一種觀點,不判斷誰對誰錯,不寫成投資建議,不提具體商品;"
+        "也不要跟【今日操作思維】唱反調變成自打嘴巴,而是補上『主流以外的可能性』。\n\n"
+        "- 總長度精簡,適合手機閱讀:五段文字合計約430~600字,寧可少寫也不要湊字數,但每段不可空白。\n\n"
         "輸出格式必須完全如下:\n\n"
         "【前言】\n(內容)\n\n"
         "【殖利率動向解讀】\n(內容)\n\n"
         "【今日專題】\n(內容)\n\n"
-        "【今日操作思維】\n(內容)\n"
-        "格式硬性規定:四個標籤各自獨立成一行、標籤後換行再寫內容、每段都要有內容;"
+        "【今日操作思維】\n(內容)\n\n"
+        "【另一種看法】\n(內容)\n"
+        "格式硬性規定:五個標籤各自獨立成一行、標籤後換行再寫內容、每段都要有內容;"
         "不要粗體、不要 markdown、不要分隔線、不要把兩個標籤寫在同一行、不要改標籤名稱。\n"
         "【用語‧全篇適用】讀者是台灣的銀行理財同仁,一律用台灣金融業的講法,"
         "下列左邊的寫法一律改成右邊:\n"
@@ -956,7 +1048,7 @@ def generate_bond_commentary(snapshot_text: str) -> str:
         "另外,『長率』『短率』只在有對應數字時使用,不要拿來泛稱整條曲線。\n"
         "【符號用量】全篇只允許兩個符號:【殖利率動向解讀】每個觸發事件開頭的 📝,"
         "以及【今日操作思維】每一段開頭的 ✅。兩者都只能出現在段落最前面,不可用在句中。"
-        "除此之外,四個段落的內文一律不得出現任何 emoji、圖示、• ・ ▸ ◆ ※ 等符號,"
+        "除此之外,所有段落的內文一律不得出現任何 emoji、圖示、• ・ ▸ ◆ ※ 等符號,"
         "也不要用數字編號(1. 2. 3.)或破折號當條列。"
         "符號少才有辨識度,滿篇符號跟只貼新聞標題的群組沒有差別。\n"
     )
@@ -1007,6 +1099,7 @@ SECTION_ALIASES = {
     "殖利率動向解讀": ["殖利率動向解讀", "殖利率解讀", "動向解讀", "殖利率動向"],
     "今日專題": ["今日專題", "專題", "主題"],
     "今日操作思維": ["今日操作思維", "操作思維", "操作建議", "今日思維"],
+    "另一種看法": ["另一種看法", "不同觀點", "反方觀點", "另一種觀點"],
 }
 
 
@@ -1084,8 +1177,8 @@ def build_final_bond_report(data: dict) -> str:
         print(f"[BondDaily] 段落缺少 {missing}、版型問題 {shape},重試一次。"
               f"原始輸出前400字:\n{(commentary or '')[:400]}")
         try:
-            hint = ("\n\n【格式再次提醒】四個段落標題必須各自獨立成一行、只用這四個標籤:"
-                    "【前言】【殖利率動向解讀】【今日專題】【今日操作思維】,"
+            hint = ("\n\n【格式再次提醒】五個段落標題必須各自獨立成一行、只用這五個標籤:"
+                    "【前言】【殖利率動向解讀】【今日專題】【今日操作思維】【另一種看法】,"
                     "標籤後換行再寫內容,不要粗體、不要分隔線、不要把兩個標籤寫在同一行。")
             if shape:
                 hint += ("\n【上一次的版型錯誤】" + "；".join(shape) +
@@ -1106,6 +1199,7 @@ def build_final_bond_report(data: dict) -> str:
     yields = secs.get("殖利率動向解讀", "")
     topic = secs.get("今日專題", "")
     action = secs.get("今日操作思維", "")
+    other_view = secs.get("另一種看法", "")
 
     tw_tz = pytz.timezone("Asia/Taipei")
     weekday = datetime.now(tw_tz).weekday()
@@ -1128,6 +1222,10 @@ def build_final_bond_report(data: dict) -> str:
     if action:
         final_text += "\n\n🧭 今日操作思維\n"
         final_text += _trim_dangling(action)
+
+    if other_view:
+        final_text += "\n\n🔄 另一種看法\n"
+        final_text += _trim_dangling(other_view)
 
     return final_text.strip()
 
