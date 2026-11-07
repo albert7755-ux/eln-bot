@@ -368,8 +368,10 @@ def weekly_review(path, today, movers_txt="", new_isins=(), gone_isins=(), secto
         for r in sector_rows[:8]:
             seg = f"{r['sector']} {r['med_ytm']:.2f}%"
             if r["med_spread"] is not None: seg += f"（較美債 {r['med_spread']:+.0f}bp）"
-            if r["avg_chg30"] is not None: seg += f" 近30天 {r['avg_chg30']:+.1f}%"
+            if r["avg_chg30"] is not None: seg += f" 近30天價格 {r['avg_chg30']:+.1f}%"
             lines.append("・" + seg)
+        lines.append("※ 前面％為產業 YTM 中位數；較美債＝與「同剩餘年期」美債殖利率的利差；"
+                     "近30天價格＝Offer 價格平均漲跌（正值＝價格漲、殖利率降）。")
         lines.append("")
     lines.append("※ 依總行報價檔 Offer 計算，僅供內部參考，非投資建議。")
     return "\n".join(lines)
