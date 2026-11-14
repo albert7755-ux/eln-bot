@@ -1951,6 +1951,32 @@ def handle_text_message(event):
             raw_cmd = text_raw[1:]
         else:
             cmd = tl.split()[0] if tl.split() else tl
+        # ── 群島留言通知：/island settarget（只有 Albert 本人能設定）──
+        if tl.startswith("/island"):
+            if not os.getenv("LINE_USER_ID", "") or getattr(event.source, "user_id", None) != os.getenv("LINE_USER_ID", ""):
+                return
+            _parts = tl.split()
+            _targets = load_targets()
+            if len(_parts) > 1 and _parts[1] == "settarget" and not (len(_parts) > 2 and _parts[2] == "off"):
+                if event.source.type == "group":
+                    _tid = event.source.group_id
+                elif event.source.type == "room":
+                    _tid = event.source.room_id
+                else:
+                    _tid = event.source.user_id
+                _targets["island"] = _tid
+                _targets["island_bot"] = "eln" if (eln_group_bot_api is not None and _bot_api is eln_group_bot_api) else "main"
+                save_targets(_targets)
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="✅ 已設定：海外債知識群島的留言板有新留言時，會通知到這裡。\n取消請打 /island settarget off"))
+            elif len(_parts) > 2 and _parts[1] == "settarget" and _parts[2] == "off":
+                _targets.pop("island", None)
+                save_targets(_targets)
+                _bot_api.reply_message(event.reply_token, TextSendMessage(text="🔕 已取消群島留言通知。"))
+            else:
+                _bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text="群島留言通知：\n/island settarget → 新留言通知到這裡\n/island settarget off → 取消"))
+            return
         # ── 海外債「查價群」：只回 /price 與 /help，其他一律靜默 ──
         if is_group and is_bond_query_group(ck):
             if not tl.startswith("/"):
@@ -5871,6 +5897,51 @@ def _job_db_recover():
             pass
 
 
+def job_island_board_watch():
+    """群島留言板有新留言 → 推播到 /island settarget 設定的群組。
+    只讀群島 Supabase 的留言板（公開讀取的那張表），不碰龍蝦自己的資料庫。"""
+    try:
+        import requests
+        targets = load_targets()
+        tgt = targets.get("island")
+        sb_url = os.getenv("ISLAND_SB_URL", "").strip().rstrip("/")
+        sb_key = os.getenv("ISLAND_SB_KEY", "").strip()
+        if not tgt or not sb_url or not sb_key:
+            return
+        head = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+        last = targets.get("island_board_last")
+        if last is None:
+            r = requests.get(f"{sb_url}/rest/v1/island_board?select=id&order=id.desc&limit=1", headers=head, timeout=15)
+            rows = r.json() if r.ok else []
+            targets["island_board_last"] = rows[0]["id"] if rows else 0
+            save_targets(targets)
+            return
+        r = requests.get(f"{sb_url}/rest/v1/island_board?select=id,name,branch,category,topic,body,hidden"
+                         f"&id=gt.{int(last)}&order=id.asc&limit=10", headers=head, timeout=15)
+        if not r.ok:
+            return
+        rows = r.json()
+        if not rows:
+            return
+        api = eln_group_bot_api if (targets.get("island_bot") == "eln" and eln_group_bot_api is not None) else line_bot_api
+        admin_url = os.getenv("ISLAND_ADMIN_URL", "https://bond-islands-app-o5w4gswyhgsjuuyj8yj5kc.streamlit.app/?admin=1")
+        lines = []
+        for x in rows:
+            if x.get("hidden"):
+                continue
+            who = "・".join(v for v in ((x.get("name") or "").strip(), (x.get("branch") or "").strip()) if v) or "島民"
+            tag = (x.get("category") or "留言") + (f"｜#{x['topic']}" if x.get("topic") else "")
+            body = (x.get("body") or "").strip().replace("\n", " ")
+            lines.append(f"【{tag}】{who}\n{body[:60]}{'…' if len(body) > 60 else ''}")
+        if lines:
+            msg = "📮 群島留言板有新留言\n\n" + "\n\n".join(lines) + f"\n\n👉 到上傳頁「留言板」回覆：\n{admin_url}"
+            api.push_message(tgt, TextSendMessage(text=msg[:4900]))
+        targets["island_board_last"] = max(int(x["id"]) for x in rows)
+        save_targets(targets)
+    except Exception as e:
+        print(f"[IslandBoardWatch] {e}")
+
+
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=TZ_TAIPEI_PYTZ)
     # DB 自動復原:啟動時連不上的話,每分鐘重試建表,恢復後不必重新部署
@@ -5880,6 +5951,7 @@ def start_scheduler():
     scheduler.add_job(job_bond_rating_news, CronTrigger(day_of_week="mon-fri", hour=6, minute=50, timezone=TZ_TAIPEI_PYTZ), id="bond_rating_news", name="信評新聞雷達")
     scheduler.add_job(job_drive_cleanup, CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=TZ_TAIPEI_PYTZ), id="drive_cleanup", name="Drive清理")
     scheduler.add_job(job_econ_watch, IntervalTrigger(minutes=10, timezone=TZ_TAIPEI_PYTZ), id="econ_watch", name="經濟數據監控")
+    scheduler.add_job(job_island_board_watch, IntervalTrigger(minutes=3, timezone=TZ_TAIPEI_PYTZ), id="island_board_watch", name="群島留言通知")
     scheduler.add_job(job_econ_watch_hot, IntervalTrigger(minutes=2, timezone=TZ_TAIPEI_PYTZ), id="econ_watch_hot", name="經濟數據監控(加密)")
     scheduler.add_job(job_weekly_review, CronTrigger(day_of_week="fri", hour=17, minute=30, timezone=TZ_TAIPEI_PYTZ), id="weekly_review", name="本週回顧")
     scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=40, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
