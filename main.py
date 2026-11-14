@@ -5898,7 +5898,7 @@ def _job_db_recover():
 
 
 def job_island_board_watch():
-    """群島留言板有新留言 → 推播到 /island settarget 設定的群組。
+    """群島留言板有新留言 → 推播到 /island settarget 設定的群組（07:00～22:50 每 10 分鐘檢查一次）。
     只讀群島 Supabase 的留言板（公開讀取的那張表），不碰龍蝦自己的資料庫。"""
     try:
         import requests
@@ -5951,7 +5951,7 @@ def start_scheduler():
     scheduler.add_job(job_bond_rating_news, CronTrigger(day_of_week="mon-fri", hour=6, minute=50, timezone=TZ_TAIPEI_PYTZ), id="bond_rating_news", name="信評新聞雷達")
     scheduler.add_job(job_drive_cleanup, CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=TZ_TAIPEI_PYTZ), id="drive_cleanup", name="Drive清理")
     scheduler.add_job(job_econ_watch, IntervalTrigger(minutes=10, timezone=TZ_TAIPEI_PYTZ), id="econ_watch", name="經濟數據監控")
-    scheduler.add_job(job_island_board_watch, IntervalTrigger(minutes=3, timezone=TZ_TAIPEI_PYTZ), id="island_board_watch", name="群島留言通知")
+    scheduler.add_job(job_island_board_watch, CronTrigger(hour="7-22", minute="*/10", timezone=TZ_TAIPEI_PYTZ), id="island_board_watch", name="群島留言通知")
     scheduler.add_job(job_econ_watch_hot, IntervalTrigger(minutes=2, timezone=TZ_TAIPEI_PYTZ), id="econ_watch_hot", name="經濟數據監控(加密)")
     scheduler.add_job(job_weekly_review, CronTrigger(day_of_week="fri", hour=17, minute=30, timezone=TZ_TAIPEI_PYTZ), id="weekly_review", name="本週回顧")
     scheduler.add_job(job_daily_report, CronTrigger(day_of_week="mon-sat", hour=6, minute=40, timezone=TZ_TAIPEI_PYTZ), id="daily_report", name="財經日報")
