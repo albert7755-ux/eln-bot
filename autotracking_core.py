@@ -679,6 +679,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
             dra_fail_list = []
             any_eki_risk_today = False
             any_eki_fresh = False
+            eki_fresh_list = []   # 今天第一次跌破 EKI 觀察價的標的
             near_ko_alerts = []   # 收集接近KO的警示
             near_ki_alerts = []   # 收集接近KI的警示
 
@@ -693,6 +694,7 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                             any_eki_risk_today = True
                             if asset["eki_fresh_breach"]:
                                 any_eki_fresh = True
+                                eki_fresh_list.append(asset["code"])
                     if is_dra and asset["perf"] < strike_thresh:
                         any_below_strike_today = True
                         dra_fail_list.append(asset["code"])
@@ -837,8 +839,9 @@ def calculate_from_file(file_path: str, lookback_days: int = 3, notify_ki_daily:
                         group_status_short = f"⚠️ 跌破 KI ({','.join(hit_ki_list)})"
                         need_notify = True
                 elif any_eki_fresh:
-                    status_msgs.insert(0, "📉 注意：首次跌破 EKI")
-                    line_status_short = "📉 首次跌破 EKI 觀察價"
+                    _eki_codes = f" ({','.join(eki_fresh_list)})" if eki_fresh_list else ""
+                    status_msgs.insert(0, f"📉 注意：首次跌破 EKI{_eki_codes}")
+                    line_status_short = f"📉 首次跌破 EKI 觀察價{_eki_codes}"
                     need_notify = True
                 elif any_eki_risk_today:
                     status_msgs.insert(0, "📉 市價低於KI (EKI觀察中)")
